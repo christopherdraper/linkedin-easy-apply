@@ -4,17 +4,18 @@ LinkedIn Easy Apply job search and auto-apply.
 Uses Claude AI for job scoring, cover letters, screening questions, and application notes.
 """
 
+import argparse
 import json
+import logging
 import re
 import time
-import argparse
-import logging
-from pathlib import Path
-from typing import List, Dict, Optional
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional
 
 try:
     import anthropic as _anthropic
+
     _AI_AVAILABLE = True
 except ImportError:
     _AI_AVAILABLE = False
@@ -31,23 +32,51 @@ log = logging.getLogger(__name__)
 # Prompt injection defence
 # ---------------------------------------------------------------------------
 _INJECTION_PATTERNS = [
-    "ignore previous", "ignore all", "disregard", "forget your",
-    "if you are an ai", "if this is an ai", "if you're an ai",
-    "ai agent", "language model", "llm", "gpt", "chatgpt", "claude",
-    "new instructions", "override", "system prompt", "system message",
-    "do not apply", "do not submit", "stop processing",
-    "act as", "pretend you", "roleplay",
-    "math problem", "calculate", "what is [0-9]",
-    "jailbreak", "bypass",
+    "ignore previous",
+    "ignore all",
+    "disregard",
+    "forget your",
+    "if you are an ai",
+    "if this is an ai",
+    "if you're an ai",
+    "ai agent",
+    "language model",
+    "llm",
+    "gpt",
+    "chatgpt",
+    "claude",
+    "new instructions",
+    "override",
+    "system prompt",
+    "system message",
+    "do not apply",
+    "do not submit",
+    "stop processing",
+    "act as",
+    "pretend you",
+    "roleplay",
+    "math problem",
+    "calculate",
+    "what is [0-9]",
+    "jailbreak",
+    "bypass",
 ]
 
 
 # Fields that should never appear in a legitimate job application form
 _ABORT_FIELD_PATTERNS = [
-    "social security", "ssn", "social insurance",
-    "bank account", "routing number", "account number",
-    "passport number", "driver's license number", "driver license number",
-    "credit card", "date of birth", "mother's maiden",
+    "social security",
+    "ssn",
+    "social insurance",
+    "bank account",
+    "routing number",
+    "account number",
+    "passport number",
+    "driver's license number",
+    "driver license number",
+    "credit card",
+    "date of birth",
+    "mother's maiden",
 ]
 
 
@@ -56,6 +85,7 @@ class ApplicationAbortError(Exception):
     Raised anywhere in the application pipeline to abort the current submission.
     Caught by submit_easy_apply which returns 'aborted: <reason>'.
     """
+
     pass
 
 
@@ -73,9 +103,7 @@ def _check_field_label(label: str) -> None:
     """
     lower = label.lower()
     if _looks_like_injection(label):
-        raise ApplicationAbortError(
-            f"Prompt injection detected in form field: {label[:80]!r}"
-        )
+        raise ApplicationAbortError(f"Prompt injection detected in form field: {label[:80]!r}")
     for pattern in _ABORT_FIELD_PATTERNS:
         if pattern in lower:
             raise ApplicationAbortError(
@@ -91,7 +119,9 @@ def _sanitize_description(text: str) -> str:
     clean = []
     for line in text.splitlines():
         if _looks_like_injection(line):
-            log.warning(f"   ⚠️  Possible prompt injection removed from job description: {line[:80]!r}")
+            log.warning(
+                f"   ⚠️  Possible prompt injection removed from job description: {line[:80]!r}"
+            )
             clean.append("[line removed]")
         else:
             clean.append(line)
@@ -139,9 +169,9 @@ class ApplicantProfile:
         docs = p.get("documents", {})
         skills_data = p.get("skills", {})
         all_skills = (
-            skills_data.get("programming_languages", []) +
-            skills_data.get("frameworks", []) +
-            skills_data.get("tools", [])
+            skills_data.get("programming_languages", [])
+            + skills_data.get("frameworks", [])
+            + skills_data.get("tools", [])
         )
         cover_letter_template = None
         cl_path = docs.get("cover_letter_template_path")
@@ -190,6 +220,60 @@ Authorized to work in US: {profile.authorized_to_work}
 Requires sponsorship: {profile.requires_sponsorship}"""
 
 
+_STATE_NAMES = {
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
+}
+
+
 def _playwright_context(p, proxy: Optional[str] = None):
     """Create a stealth Playwright browser context with LinkedIn session loaded."""
     opts = {}
@@ -209,6 +293,7 @@ def _playwright_context(p, proxy: Optional[str] = None):
     page = context.new_page()
     try:
         from playwright_stealth import Stealth
+
         Stealth().apply_stealth_sync(page)
     except ImportError:
         pass
@@ -256,8 +341,8 @@ def _fetch_description(context, url: str) -> str:
 
         if text:
             return re.sub(r"\s+", " ", text).strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Description fetch failed for %s: %s", url, exc)
     finally:
         desc_page.close()
     return ""
@@ -271,12 +356,13 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        raise RuntimeError("Run: pip install playwright && playwright install chromium")
+        raise RuntimeError("Run: pip install playwright && playwright install chromium") from None
 
     if not SESSION_FILE.exists():
         raise RuntimeError(f"No LinkedIn session found at {SESSION_FILE}")
 
     from urllib.parse import urlencode
+
     query_parts = {"keywords": params.title, "refresh": "true"}
     if params.location:
         query_parts["location"] = params.location
@@ -298,7 +384,9 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
             try:
                 page.wait_for_selector("div.job-card-container", timeout=12000)
             except Exception:
-                raise RuntimeError(f"No results found — LinkedIn may have changed layout. URL: {page.url}")
+                raise RuntimeError(
+                    f"No results found — LinkedIn may have changed layout. URL: {page.url}"
+                ) from None
 
             page.evaluate("window.scrollTo(0, 500)")
             page.wait_for_timeout(1500)
@@ -310,19 +398,24 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
                     company_el = card.query_selector("div.artdeco-entity-lockup__subtitle")
                     location_el = card.query_selector("div.artdeco-entity-lockup__caption")
                     footer_items = card.query_selector_all("li.job-card-container__footer-item")
-                    has_easy_apply = any("easy apply" in el.inner_text().lower() for el in footer_items)
+                    has_easy_apply = any(
+                        "easy apply" in el.inner_text().lower() for el in footer_items
+                    )
 
                     if title_el and company_el and has_easy_apply:
                         href = title_el.evaluate("el => el.href")
-                        jobs.append({
-                            "id": f"li_{abs(hash(href or title_el.inner_text()))}",
-                            "title": title_el.inner_text().strip(),
-                            "company": company_el.inner_text().strip(),
-                            "location": location_el.inner_text().strip() if location_el else "",
-                            "url": href,
-                            "description": "",
-                        })
-                except Exception:
+                        jobs.append(
+                            {
+                                "id": f"li_{abs(hash(href or title_el.inner_text()))}",
+                                "title": title_el.inner_text().strip(),
+                                "company": company_el.inner_text().strip(),
+                                "location": location_el.inner_text().strip() if location_el else "",
+                                "url": href,
+                                "description": "",
+                            }
+                        )
+                except Exception as exc:
+                    log.debug("Skipping malformed job card: %s", exc)
                     continue
 
             # Apply filters before fetching descriptions (no point fetching blacklisted jobs)
@@ -349,13 +442,25 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
 
 def score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     """Keyword-based fallback scorer used when AI is unavailable."""
-    description = re.sub(r"<[^>]+>", " ", job.get("description", "") + " " + job.get("title", "")).lower()
+    description = re.sub(
+        r"<[^>]+>", " ", job.get("description", "") + " " + job.get("title", "")
+    ).lower()
     profile_skills = [s.lower() for s in profile.skills]
     matched = [s for s in profile_skills if s in description]
     skill_score = len(matched) / max(len(profile_skills), 1)
 
-    sre_keywords = ["reliability", "sre", "devops", "platform", "infrastructure",
-                    "cloud", "linux", "kubernetes", "k8s", "devsecops"]
+    sre_keywords = [
+        "reliability",
+        "sre",
+        "devops",
+        "platform",
+        "infrastructure",
+        "cloud",
+        "linux",
+        "kubernetes",
+        "k8s",
+        "devsecops",
+    ]
     title_hits = sum(1 for kw in sre_keywords if kw in job.get("title", "").lower())
     title_score = min(1.0, title_hits / 2)
 
@@ -542,7 +647,7 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        raise RuntimeError("Playwright not installed")
+        raise RuntimeError("Playwright not installed") from None
 
     with sync_playwright() as p:
         browser, context, page = _playwright_context(p, proxy)
@@ -618,9 +723,8 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
             browser.close()
 
 
-def _answer_screening_questions(page, profile: ApplicantProfile):
-    """Answer screening questions — explicit profile answers first, AI fallback for anything else."""
-    # Work authorization radio buttons
+def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:
+    """Click work authorization and sponsorship radio buttons."""
     if profile.authorized_to_work:
         for label in page.query_selector_all("label"):
             text = label.inner_text().lower()
@@ -628,7 +732,6 @@ def _answer_screening_questions(page, profile: ApplicantProfile):
                 label.click()
                 break
 
-    # Sponsorship radio buttons
     sponsorship_answer = "yes" if profile.requires_sponsorship else "no"
     for label in page.query_selector_all("label"):
         text = label.inner_text().lower()
@@ -636,7 +739,9 @@ def _answer_screening_questions(page, profile: ApplicantProfile):
             label.click()
             break
 
-    # Textarea questions — match from profile screening_answers
+
+def _answer_textareas(page, profile: ApplicantProfile) -> None:
+    """Fill textarea fields from profile.screening_answers."""
     for question, answer in profile.screening_answers.items():
         for textarea in page.query_selector_all("textarea"):
             placeholder = (textarea.get_attribute("placeholder") or "").lower()
@@ -649,12 +754,64 @@ def _answer_screening_questions(page, profile: ApplicantProfile):
             if question.lower() in placeholder or question.lower() in label_text:
                 textarea.fill(answer)
 
-    # Input fields — explicit answers first, then AI for anything unanswered
+
+def _contact_value_for_label(label_text: str, profile: ApplicantProfile) -> Optional[str]:
+    """Return the matching contact field value for a label, or None if not a contact field."""
+    state_abbr = profile.state or ""
+    state_full = _STATE_NAMES.get(state_abbr.upper(), state_abbr)
+    state_value = state_full if any(w in label_text for w in ("full", "name")) else state_abbr
+    contact_fields = [
+        (("phone", "mobile", "telephone"), profile.phone),
+        (("city",), profile.city or ""),
+        (("state", "region", "province"), state_value),
+        (("zip", "postal"), profile.zip_code or ""),
+        (("linkedin",), profile.linkedin_url or ""),
+        (("github",), profile.github_url or ""),
+        (("email",), profile.email),
+    ]
+    for keywords, value in contact_fields:
+        if value and any(kw in label_text for kw in keywords):
+            return value
+    return None
+
+
+def _fill_input_field(inp, label_text: str, profile: ApplicantProfile) -> None:
+    """Fill a single input field: injection check → screening answers → contact fields → AI."""
+    if label_text:
+        _check_field_label(label_text)  # raises ApplicationAbortError if suspicious
+
+    # Explicit numeric screening answers
+    for question, answer in profile.screening_answers.items():
+        numeric = answer.replace("+", "").replace("-", "")
+        if numeric.isdigit() and question.lower() in label_text:
+            inp.fill(numeric)
+            return
+
+    # Direct contact fields — never send these to AI
+    if label_text:
+        contact_value = _contact_value_for_label(label_text, profile)
+        if contact_value:
+            inp.fill(contact_value)
+            return
+
+    # AI fallback for anything unmatched
+    if label_text:
+        answer = _ai_answer_question(label_text, profile)
+        if answer:
+            inp.fill(answer)
+
+
+def _answer_screening_questions(page, profile: ApplicantProfile) -> None:
+    """Answer all screening questions on the current form step."""
+    _answer_radio_buttons(page, profile)
+    _answer_textareas(page, profile)
+
     for inp in page.query_selector_all("input[type='text'], input[type='number']"):
         try:
             if inp.input_value():
                 continue
-        except Exception:
+        except Exception as exc:
+            log.debug("Skipping non-interactable input field: %s", exc)
             continue
 
         inp_id = inp.get_attribute("id") or ""
@@ -664,68 +821,7 @@ def _answer_screening_questions(page, profile: ApplicantProfile):
             if label_el:
                 label_text = label_el.inner_text().lower()
 
-        # Abort on injection or sensitive data requests — raises ApplicationAbortError
-        if label_text:
-            _check_field_label(label_text)
-
-        # Try explicit screening answers first
-        matched = False
-        for question, answer in profile.screening_answers.items():
-            numeric = answer.replace("+", "").replace("-", "")
-            if not numeric.isdigit():
-                continue
-            if question.lower() in label_text:
-                inp.fill(numeric)
-                matched = True
-                break
-
-        if matched:
-            continue
-
-        # Direct contact field matching — never send these to AI
-        _STATE_NAMES = {
-            "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
-            "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
-            "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
-            "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
-            "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
-            "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
-            "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
-            "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
-            "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
-            "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
-            "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
-            "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
-            "WI": "Wisconsin", "WY": "Wyoming",
-        }
-        state_abbr = profile.state or ""
-        state_full = _STATE_NAMES.get(state_abbr.upper(), state_abbr)
-        # Use full name if the label says "full" or "name", abbreviation otherwise
-        state_value = state_full if any(w in label_text for w in ("full", "name")) else state_abbr
-        contact_fields = [
-            (("phone", "mobile", "telephone"), profile.phone),
-            (("city",), profile.city or ""),
-            (("state", "region", "province"), state_value),
-            (("zip", "postal"), profile.zip_code or ""),
-            (("linkedin",), profile.linkedin_url or ""),
-            (("github",), profile.github_url or ""),
-            (("email",), profile.email),
-        ]
-        contact_matched = False
-        for keywords, value in contact_fields:
-            if value and any(kw in label_text for kw in keywords):
-                inp.fill(value)
-                contact_matched = True
-                break
-
-        if contact_matched:
-            continue
-
-        # AI fallback for anything we couldn't match directly
-        if label_text:
-            answer = _ai_answer_question(label_text, profile)
-            if answer:
-                inp.fill(answer)
+        _fill_input_field(inp, label_text, profile)
 
 
 def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[str]:
@@ -771,7 +867,9 @@ Rules:
 
         # Reject anomalously long answers — a form field value should never be a paragraph
         if len(answer) > 150:
-            log.warning(f"   🛡️  AI answer suspiciously long ({len(answer)} chars), skipping: {answer[:80]!r}")
+            log.warning(
+                f"   🛡️  AI answer suspiciously long ({len(answer)} chars), skipping: {answer[:80]!r}"
+            )
             return None
 
         # Reject answers that look like the model was manipulated
@@ -804,7 +902,11 @@ def save_log(entries: List[Dict]):
 
 
 def already_applied(log_entries: List[Dict]) -> set:
-    return {e["url"] for e in log_entries if e.get("status", "").startswith("submitted") and e.get("url")}
+    return {
+        e["url"]
+        for e in log_entries
+        if e.get("status", "").startswith("submitted") and e.get("url")
+    }
 
 
 def auto_apply_workflow(
@@ -850,11 +952,15 @@ def auto_apply_workflow(
 
         if compat["match_score"] < min_match_score:
             reason = f" — {compat['reasoning']}" if compat.get("reasoning") else ""
-            log.info(f"⏭  Low score ({compat['match_score']}): {job['title']} at {job['company']}{reason}")
+            log.info(
+                f"⏭  Low score ({compat['match_score']}): {job['title']} at {job['company']}{reason}"
+            )
             continue
 
         if compat.get("deal_breakers"):
-            log.info(f"⏭  Deal-breakers: {job['title']} at {job['company']} → {compat['deal_breakers']}")
+            log.info(
+                f"⏭  Deal-breakers: {job['title']} at {job['company']} → {compat['deal_breakers']}"
+            )
             continue
 
         log.info(f"✨ {job['title']} at {job['company']} (score {compat['match_score']})")
@@ -870,31 +976,41 @@ def auto_apply_workflow(
         cl_file.write_text(cover_letter)
 
         if dry_run:
-            log.info(f"   ⚠️  Dry run — not submitted")
+            log.info("   ⚠️  Dry run — not submitted")
             status = "dry_run"
         else:
-            log.info(f"   Submitting...")
+            log.info("   Submitting...")
             status = submit_easy_apply(job, profile, proxy=proxy)
-            icon = "✅" if status == "submitted" else "🛡️ " if status.startswith("aborted") else "⚠️ " if "unconfirmed" in status else "❌"
+            icon = (
+                "✅"
+                if status == "submitted"
+                else "🛡️ "
+                if status.startswith("aborted")
+                else "⚠️ "
+                if "unconfirmed" in status
+                else "❌"
+            )
             log.info(f"   {icon} {status}")
 
         # AI-generated notes for the log
         notes = ai_build_notes(job, compat)
 
-        applications.append({
-            "job_id": job["id"],
-            "title": job["title"],
-            "company": job["company"],
-            "url": job["url"],
-            "location": job.get("location", ""),
-            "status": status,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "match_score": compat["match_score"],
-            "reasoning": compat.get("reasoning", ""),
-            "deal_breakers": compat.get("deal_breakers", []),
-            "cover_letter_path": str(cl_file),
-            "notes": notes,
-        })
+        applications.append(
+            {
+                "job_id": job["id"],
+                "title": job["title"],
+                "company": job["company"],
+                "url": job["url"],
+                "location": job.get("location", ""),
+                "status": status,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "match_score": compat["match_score"],
+                "reasoning": compat.get("reasoning", ""),
+                "deal_breakers": compat.get("deal_breakers", []),
+                "cover_letter_path": str(cl_file),
+                "notes": notes,
+            }
+        )
         applied += 1
         time.sleep(3)
 
@@ -934,7 +1050,9 @@ def main():
     _criteria = _raw.get("search_criteria", {})
 
     max_applications = args.max_applications or _settings.get("max_applications_per_day", 10)
-    min_score = args.min_score if args.min_score is not None else _settings.get("min_match_score", 0.30)
+    min_score = (
+        args.min_score if args.min_score is not None else _settings.get("min_match_score", 0.30)
+    )
 
     params = JobSearchParams(
         title=args.title,
