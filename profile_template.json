@@ -1,0 +1,96 @@
+{
+  "profile": {
+    "personal": {
+      "full_name": "Your Full Name",
+      "email": "your.email@example.com",
+      "phone": "+1-234-567-8900",
+      "location": {
+        "city": "San Francisco",
+        "state": "CA",
+        "country": "USA"
+      },
+      "linkedin_url": "https://linkedin.com/in/yourprofile",
+      "portfolio_url": "https://yourportfolio.com",
+      "github_url": "https://github.com/yourusername"
+    },
+
+    "work_authorization": {
+      "authorized_to_work_us": true,
+      "requires_visa_sponsorship": false,
+      "willing_to_relocate": false,
+      "open_to_remote": true
+    },
+
+    "experience": {
+      "years_total": 5,
+      "current_title": "Senior Software Engineer",
+      "industry": "Technology",
+      "specializations": [
+        "Backend Development",
+        "API Design",
+        "Cloud Architecture"
+      ]
+    },
+
+    "education": {
+      "highest_degree": "Bachelor's",
+      "field_of_study": "Computer Science",
+      "university": "University Name",
+      "graduation_year": 2018
+    },
+
+    "skills": {
+      "programming_languages": ["Python", "JavaScript", "TypeScript"],
+      "frameworks": ["Django", "React", "Node.js", "FastAPI"],
+      "tools": ["Docker", "Kubernetes", "AWS", "Git"]
+    },
+
+    "preferences": {
+      "job_types": ["full-time", "contract"],
+      "work_arrangement": ["remote", "hybrid"],
+      "salary_expectations": {
+        "minimum": 120000,
+        "currency": "USD",
+        "period": "annual"
+      },
+      "deal_breakers": [
+        "No remote option"
+      ]
+    },
+
+    "documents": {
+      "resume_path": "~/Documents/resume.pdf",
+      "cover_letter_template_path": null
+    },
+
+    "application_settings": {
+      "platforms": ["linkedin", "indeed", "wellfound"],
+      "max_applications_per_day": 10,
+      "min_match_score": 0.75,
+      "require_manual_confirmation": true
+    },
+
+    "screening_answers": {
+      "why leave current job": "Seeking new challenges and growth opportunities",
+      "expected start date": "2 weeks notice",
+      "salary expectations": "Market rate based on experience",
+      "availability for interview": "Flexible, can do evenings and weekends"
+    }
+  },
+
+  "search_criteria": {
+    "job_titles": [
+      "Software Engineer",
+      "Backend Engineer",
+      "Full Stack Engineer"
+    ],
+    "keywords_required": ["python", "api"],
+    "keywords_excluded": ["java", "frontend-only"],
+    "locations": [
+      {"city": "San Francisco", "state": "CA"},
+      {"remote": true}
+    ],
+    "experience_levels": ["mid-level", "senior"],
+    "company_blacklist": []
+  }
+}
