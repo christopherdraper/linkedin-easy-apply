@@ -1061,8 +1061,22 @@ def auto_apply_workflow(
 def main():
     parser = argparse.ArgumentParser(description="LinkedIn Easy Apply automation")
     parser.add_argument("--profile", default=str(DATA_DIR / "profile.json"))
-    parser.add_argument("--title", required=True)
+    parser.add_argument(
+        "--title",
+        nargs="*",
+        default=None,
+        help="Job title(s) to search. Defaults to search_criteria.job_titles in profile.",
+    )
     parser.add_argument("--location", default=None)
+    parser.add_argument(
+        "--remote",
+        default=None,
+        action="store_true",
+        help="Remote only (default: from profile or True)",
+    )
+    parser.add_argument(
+        "--no-remote", dest="remote", action="store_false", help="Include non-remote jobs"
+    )
     parser.add_argument("--max-applications", type=int, default=None)
     parser.add_argument("--min-score", type=float, default=None)
     parser.add_argument("--dry-run", action="store_true", default=False)
@@ -1073,28 +1087,44 @@ def main():
     profile = ApplicantProfile.from_dict(_raw)
     _settings = _raw.get("profile", _raw).get("application_settings", {})
     _criteria = _raw.get("search_criteria", {})
+    _prefs = _raw.get("profile", _raw).get("preferences", {})
 
     max_applications = args.max_applications or _settings.get("max_applications_per_day", 10)
     min_score = (
         args.min_score if args.min_score is not None else _settings.get("min_match_score", 0.30)
     )
 
-    params = JobSearchParams(
-        title=args.title,
-        location=args.location,
-        remote=True,
-        keywords_excluded=_criteria.get("keywords_excluded", []),
-        company_blacklist=_criteria.get("company_blacklist", []),
-    )
+    # Titles: CLI args override, otherwise read from profile
+    titles = args.title if args.title else _criteria.get("job_titles", [])
+    if not titles:
+        parser.error(
+            "No job titles specified — pass --title or set search_criteria.job_titles in profile"
+        )
 
-    auto_apply_workflow(
-        params=params,
-        profile=profile,
-        max_applications=max_applications,
-        min_match_score=min_score,
-        dry_run=args.dry_run,
-        proxy=args.proxy,
-    )
+    # Remote: CLI flag overrides, otherwise check profile preferences
+    if args.remote is None:
+        work_arrangement = _prefs.get("work_arrangement", ["remote"])
+        remote = "remote" in work_arrangement
+    else:
+        remote = args.remote
+
+    for title in titles:
+        params = JobSearchParams(
+            title=title,
+            location=args.location,
+            remote=remote,
+            keywords_excluded=_criteria.get("keywords_excluded", []),
+            company_blacklist=_criteria.get("company_blacklist", []),
+        )
+
+        auto_apply_workflow(
+            params=params,
+            profile=profile,
+            max_applications=max_applications,
+            min_match_score=min_score,
+            dry_run=args.dry_run,
+            proxy=args.proxy,
+        )
 
 
 if __name__ == "__main__":
