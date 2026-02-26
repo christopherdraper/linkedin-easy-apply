@@ -12,3 +12,9 @@ repos:
       - id: bandit
         args: ["-c", "pyproject.toml"]
         files: \.py$
+
+  - repo: https://github.com/jendrikseipp/vulture
+    rev: v2.14
+    hooks:
+      - id: vulture
+        args: ["job_search_apply.py", "--min-confidence", "80"]

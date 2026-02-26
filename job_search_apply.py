@@ -159,8 +159,7 @@ class ApplicantProfile:
     screening_answers: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_json(cls, path: str) -> "ApplicantProfile":
-        data = json.loads(Path(path).expanduser().read_text())
+    def from_dict(cls, data: dict) -> "ApplicantProfile":
         p = data.get("profile", data)
         personal = p.get("personal", p)
         location = personal.get("location", {})
@@ -201,6 +200,10 @@ class ApplicantProfile:
             screening_answers=p.get("screening_answers", {}),
         )
 
+    @classmethod
+    def from_json(cls, path: str) -> "ApplicantProfile":
+        return cls.from_dict(json.loads(Path(path).expanduser().read_text()))
+
 
 def _profile_summary(profile: ApplicantProfile) -> str:
     """Build a text summary of the applicant for use in AI prompts."""
@@ -211,8 +214,8 @@ Phone: {profile.phone}
 Location: {", ".join(location_parts) or "Indianapolis, IN"}{f" {profile.zip_code}" if profile.zip_code else ""}
 LinkedIn: {profile.linkedin_url or "not provided"}
 GitHub: {profile.github_url or "not provided"}
-Current title: {profile.current_title or "Senior Site Reliability Engineer"}
-Current employer: {profile.current_employer or "Eli Lilly and Company"}
+Current title: {profile.current_title or "not provided"}
+Current employer: {profile.current_employer or "not provided"}
 Total years of experience: {profile.years_experience}
 Specializations: {", ".join(profile.specializations)}
 Skills & tools: {", ".join(profile.skills)}
@@ -1044,8 +1047,8 @@ def main():
     parser.add_argument("--proxy", default=None)
     args = parser.parse_args()
 
-    profile = ApplicantProfile.from_json(args.profile)
     _raw = json.loads(Path(args.profile).expanduser().read_text())
+    profile = ApplicantProfile.from_dict(_raw)
     _settings = _raw.get("profile", _raw).get("application_settings", {})
     _criteria = _raw.get("search_criteria", {})
 

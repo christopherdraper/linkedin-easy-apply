@@ -1,11 +1,11 @@
 ---
 name: job-apply
-description: Automated job search and application system. Use when the user wants to search for jobs and apply to positions matching their criteria. Handles job searching across LinkedIn, Indeed, Glassdoor, ZipRecruiter, and Wellfound, generates tailored cover letters, fills application forms, and tracks application status. All profile data stays local on this machine — nothing is sent to external services. Use when user says things like "find and apply to jobs", "auto-apply for [job title]", "search for [position] jobs and apply", or "help me apply to multiple jobs automatically".
+description: Automated LinkedIn Easy Apply job search and application system. Use when the user wants to search for jobs and apply to positions matching their criteria. Searches LinkedIn Easy Apply jobs, scores them with Claude AI, generates tailored cover letters, fills application forms, and tracks application status. All profile data stays local on this machine — nothing is sent to external services. Use when user says things like "find and apply to jobs", "auto-apply for [job title]", "search for [position] jobs and apply", or "help me apply to multiple jobs automatically".
 ---
 
 # Job Apply Skill
 
-Automate job searching and application submission across multiple platforms.
+Automate LinkedIn Easy Apply job searching and application submission.
 All data (profile, resume, application logs) is stored locally under `~/.local/share/job-apply/`.
 
 ## Setup
@@ -13,7 +13,7 @@ All data (profile, resume, application logs) is stored locally under `~/.local/s
 ### 1. Install dependencies
 
 ```bash
-pip install playwright
+pip install playwright anthropic
 playwright install chromium
 ```
 
@@ -21,14 +21,14 @@ playwright install chromium
 
 ```bash
 mkdir -p ~/.local/share/job-apply
-cp ~/.openclaw/agents/main/agent/skills/job-apply/profile_template.json ~/.local/share/job-apply/profile.json
+cp ~/.openclaw/skills/job-apply/profile_template.json ~/.local/share/job-apply/profile.json
 # Edit profile.json with your real information
 ```
 
 ### 3. Run (dry run first)
 
 ```bash
-python ~/.openclaw/agents/main/agent/skills/job-apply/job_search_apply.py \
+python ~/.openclaw/skills/job-apply/job_search_apply.py \
   --profile ~/.local/share/job-apply/profile.json \
   --title "Software Engineer" \
   --dry-run
@@ -37,41 +37,34 @@ python ~/.openclaw/agents/main/agent/skills/job-apply/job_search_apply.py \
 ## Usage from OpenClaw
 
 Natural language prompts:
-- "Find Python developer jobs in San Francisco"
-- "Search for remote backend engineer positions and apply to the top 5 matches"
-- "Auto-apply to senior software engineer roles with 100k+ salary"
-- "Show me my application history"
+- "Find remote SRE jobs and apply to the best matches"
+- "Auto-apply to senior DevOps engineer roles"
+- "Search for Platform Engineer jobs, dry run only"
+- "Apply to up to 5 Staff Engineer jobs"
 
 The agent will:
 1. Load your profile from `~/.local/share/job-apply/profile.json`
-2. Search the specified platforms
-3. Score each job against your profile
-4. Generate a tailored cover letter
-5. Ask for confirmation before submitting each application
-6. Log all results to `~/.local/share/job-apply/applications.json`
+2. Search LinkedIn for Easy Apply jobs matching the title
+3. Score each job against your profile using Claude AI
+4. Skip low-scoring jobs and any with deal-breakers
+5. Generate a tailored cover letter for each application
+6. Submit and log all results to `~/.local/share/job-apply/applications.json`
 
 ## Data storage
 
 | Data | Location |
 |------|----------|
 | Your profile | `~/.local/share/job-apply/profile.json` |
+| LinkedIn session | `~/.local/share/job-apply/sessions/linkedin.json` |
 | Application log | `~/.local/share/job-apply/applications.json` |
 | Cover letters | `~/.local/share/job-apply/cover-letters/` |
-| Session cookies | `~/.local/share/job-apply/sessions/` |
 
-No data leaves this machine except what is submitted directly to the job platform.
+No data leaves this machine except what is submitted directly to LinkedIn and the Anthropic API.
 
 ## Safety defaults
 
-- `dry_run: true` by default — will not submit without `--no-dry-run`
-- `require_confirmation: true` — asks before each application
-- `max_applications_per_day: 10` — hard cap
-- `min_match_score: 0.75` — skips poor matches
-
-## Supported platforms
-
-- LinkedIn (Easy Apply)
-- Indeed
-- Glassdoor
-- ZipRecruiter
-- Wellfound (AngelList)
+- `--dry-run` flag — scores and logs jobs without submitting
+- `max_applications_per_day: 10` — hard cap (configurable in profile)
+- `min_match_score: 0.30` — skips poor matches (configurable in profile)
+- Prompt injection detection — aborts applications with suspicious form fields
+- Sensitive field detection — aborts if a form requests SSN, bank info, etc.

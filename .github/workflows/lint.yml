@@ -18,7 +18,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install linters
-        run: pip install ruff bandit
+        run: pip install ruff bandit vulture
 
       - name: Ruff lint
         run: ruff check .
@@ -28,3 +28,6 @@ jobs:
 
       - name: Bandit security scan
         run: bandit -r job_search_apply.py
+
+      - name: Vulture dead code check
+        run: vulture job_search_apply.py --min-confidence 80
