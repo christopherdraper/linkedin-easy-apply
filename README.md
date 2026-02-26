@@ -162,7 +162,6 @@ profile context.
 |-------|---------|-------------|
 | `max_applications_per_day` | `10` | Hard cap per run |
 | `min_match_score` | `0.30` | 0.0–1.0 — skip jobs below this threshold |
-| `require_manual_confirmation` | `true` | Not yet enforced in CLI — all runs are live unless `--dry-run` |
 
 ### `search_criteria`
 
@@ -244,8 +243,9 @@ python job_search_apply.py \
 
 ## Data Storage
 
-All data is local — nothing is sent anywhere except directly to LinkedIn and the
-Anthropic API.
+All data is stored locally. Profile data (name, skills, experience) is sent to the
+Anthropic API for AI scoring and form-filling. No data is sent to any other
+external service besides LinkedIn and Anthropic.
 
 | Data | Location |
 |------|----------|

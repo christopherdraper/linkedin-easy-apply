@@ -27,7 +27,7 @@ jobs:
         run: ruff format --check .
 
       - name: Bandit security scan
-        run: bandit -r job_search_apply.py
+        run: bandit -r job_search_apply.py -c pyproject.toml
 
       - name: Vulture dead code check
         run: vulture job_search_apply.py --min-confidence 80

@@ -59,7 +59,7 @@ The agent will:
 | Application log | `~/.local/share/job-apply/applications.json` |
 | Cover letters | `~/.local/share/job-apply/cover-letters/` |
 
-No data leaves this machine except what is submitted directly to LinkedIn and the Anthropic API.
+Profile data (name, skills, experience) is sent to the Anthropic API for AI scoring and form-filling. No data is sent to any other external service besides LinkedIn and Anthropic.
 
 ## Safety defaults
 

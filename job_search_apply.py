@@ -5,8 +5,10 @@ Uses Claude AI for job scoring, cover letters, screening questions, and applicat
 """
 
 import argparse
+import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -19,6 +21,17 @@ try:
     _AI_AVAILABLE = True
 except ImportError:
     _AI_AVAILABLE = False
+
+_ai_client = None
+
+
+def _get_ai_client():
+    """Return a shared Anthropic client instance (created once, reused across calls)."""
+    global _ai_client  # noqa: PLW0603
+    if _ai_client is None:
+        _ai_client = _anthropic.Anthropic()
+    return _ai_client
+
 
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
@@ -172,6 +185,12 @@ class ApplicantProfile:
             + skills_data.get("frameworks", [])
             + skills_data.get("tools", [])
         )
+        resume_path = docs.get("resume_path", "")
+        if resume_path:
+            resolved = Path(resume_path).expanduser()
+            if not resolved.exists():
+                log.warning(f"⚠️  Resume not found at {resolved} — file uploads will fail")
+
         cover_letter_template = None
         cl_path = docs.get("cover_letter_template_path")
         if cl_path:
@@ -211,7 +230,7 @@ def _profile_summary(profile: ApplicantProfile) -> str:
     return f"""Name: {profile.full_name}
 Email: {profile.email}
 Phone: {profile.phone}
-Location: {", ".join(location_parts) or "Indianapolis, IN"}{f" {profile.zip_code}" if profile.zip_code else ""}
+Location: {", ".join(location_parts) or "not provided"}{f" {profile.zip_code}" if profile.zip_code else ""}
 LinkedIn: {profile.linkedin_url or "not provided"}
 GitHub: {profile.github_url or "not provided"}
 Current title: {profile.current_title or "not provided"}
@@ -277,6 +296,13 @@ _STATE_NAMES = {
 }
 
 
+def _save_session(context) -> None:
+    """Save Playwright session cookies with restricted file permissions (owner-only)."""
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _save_session(context)
+    os.chmod(SESSION_FILE, 0o600)
+
+
 def _playwright_context(p, proxy: Optional[str] = None):
     """Create a stealth Playwright browser context with LinkedIn session loaded."""
     opts = {}
@@ -321,7 +347,8 @@ def _fetch_description(context, url: str) -> str:
                     // Walk up to find the section container, then grab following siblings
                     let container = el;
                     for (let i = 0; i < 5; i++) {
-                        if (container.parentElement && container.nextElementSibling) break;
+                        if (!container.parentElement) break;
+                        if (container.nextElementSibling) break;
                         container = container.parentElement;
                     }
                     // Collect text from this container and its following siblings
@@ -409,7 +436,7 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
                         href = title_el.evaluate("el => el.href")
                         jobs.append(
                             {
-                                "id": f"li_{abs(hash(href or title_el.inner_text()))}",
+                                "id": f"li_{hashlib.sha256((href or title_el.inner_text()).encode()).hexdigest()[:12]}",
                                 "title": title_el.inner_text().strip(),
                                 "company": company_el.inner_text().strip(),
                                 "location": location_el.inner_text().strip() if location_el else "",
@@ -436,7 +463,7 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
                     if job["url"]:
                         job["description"] = _fetch_description(context, job["url"])
 
-            context.storage_state(path=str(SESSION_FILE))
+            _save_session(context)
         finally:
             browser.close()
 
@@ -452,19 +479,9 @@ def score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     matched = [s for s in profile_skills if s in description]
     skill_score = len(matched) / max(len(profile_skills), 1)
 
-    sre_keywords = [
-        "reliability",
-        "sre",
-        "devops",
-        "platform",
-        "infrastructure",
-        "cloud",
-        "linux",
-        "kubernetes",
-        "k8s",
-        "devsecops",
-    ]
-    title_hits = sum(1 for kw in sre_keywords if kw in job.get("title", "").lower())
+    # Derive title keywords from profile specializations and skills
+    title_keywords = [s.lower() for s in profile.specializations] + profile_skills[:10]
+    title_hits = sum(1 for kw in title_keywords if kw in job.get("title", "").lower())
     title_score = min(1.0, title_hits / 2)
 
     score = round((skill_score * 0.4) + (title_score * 0.6), 2)
@@ -481,7 +498,7 @@ def ai_score_job(job: Dict, profile: ApplicantProfile) -> Dict:
         return score_job(job, profile)
 
     try:
-        client = _anthropic.Anthropic()
+        client = _get_ai_client()
         description = _sanitize_description(job.get("description", ""))[:4000]
         prompt = f"""{_profile_summary(profile)}
 
@@ -528,9 +545,9 @@ def ai_generate_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
         return _basic_cover_letter(job, profile)
 
     try:
-        client = _anthropic.Anthropic()
+        client = _get_ai_client()
         # Split template body from AI instructions
-        parts = profile.cover_letter_template.split("---\nTEMPLATE INSTRUCTIONS")
+        parts = profile.cover_letter_template.split("---\nTEMPLATE INSTRUCTIONS FOR AI:")
         template_body = parts[0].strip()
         instructions = parts[1].strip() if len(parts) > 1 else ""
 
@@ -566,16 +583,21 @@ Fill in every {{PLACEHOLDER}} in the template using the job description and cand
 def _basic_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
     """Minimal cover letter fallback when AI is unavailable."""
     if profile.cover_letter_template:
-        template = profile.cover_letter_template.split("---\nTEMPLATE INSTRUCTIONS")[0].strip()
+        template = profile.cover_letter_template.split("---\nTEMPLATE INSTRUCTIONS FOR AI:")[
+            0
+        ].strip()
         template = template.replace("{DATE}", time.strftime("%B %d, %Y"))
         template = template.replace("{COMPANY}", job.get("company", "the company"))
         template = template.replace("{JOB_TITLE}", job.get("title", "the role"))
         template = template.replace("{HIRING_MANAGER_NAME}", "there")
         return template
+    specialization = (
+        ", ".join(profile.specializations[:2]) if profile.specializations else "engineering"
+    )
     return (
         f"{time.strftime('%B %d, %Y')}\n{job.get('company', '')}\nRE: {job.get('title', '')}\n\n"
         f"Hi there,\n\nI'm applying for the {job.get('title')} role at {job.get('company')}. "
-        f"With {profile.years_experience or 9} years of SRE and DevOps experience I believe I'd be a strong fit.\n\n"
+        f"With {profile.years_experience or 'several'} years of {specialization} experience I believe I'd be a strong fit.\n\n"
         f"Please see my attached resume.\n\nThanks,\n{profile.full_name}\n"
         f"{profile.email} | {profile.phone}"
     )
@@ -584,15 +606,15 @@ def _basic_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
 def ai_build_notes(job: Dict, compat: Dict) -> str:
     """
     Write a human-readable application summary using Claude.
-    Tells Christopher what he needs to know if they call — company context, what the role is,
-    what they're looking for, and any flags.
+    Tells the applicant what they need to know if the company calls — company context,
+    what the role is, what they're looking for, and any flags.
     Falls back to raw field dump if AI is unavailable.
     """
     if not _AI_AVAILABLE:
         return _basic_notes(job, compat)
 
     try:
-        client = _anthropic.Anthropic()
+        client = _get_ai_client()
         description = _sanitize_description(job.get("description", ""))[:3000]
         deal_breakers = compat.get("deal_breakers", [])
         prompt = f"""A job application was just submitted. Write a brief debrief note (3-5 sentences) so the applicant knows what he applied to if the company calls him.
@@ -700,7 +722,7 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
                         "[aria-label='Your application was sent'], "
                         ".artdeco-modal__header:has-text('Application submitted')"
                     )
-                    context.storage_state(path=str(SESSION_FILE))
+                    _save_session(context)
                     return "submitted" if success else "submitted (unconfirmed — check LinkedIn)"
                 elif review_btn:
                     review_btn.click()
@@ -837,7 +859,7 @@ def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[st
         raise ApplicationAbortError(f"Prompt injection detected in form field: {question[:80]!r}")
 
     try:
-        client = _anthropic.Anthropic()
+        client = _get_ai_client()
         system = (
             "You are a job application form-filling assistant. Your only job is to output "
             "the correct value for a single form field based on the applicant's profile. "
