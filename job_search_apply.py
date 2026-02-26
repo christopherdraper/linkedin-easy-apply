@@ -299,7 +299,7 @@ _STATE_NAMES = {
 def _save_session(context) -> None:
     """Save Playwright session cookies with restricted file permissions (owner-only)."""
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _save_session(context)
+    context.storage_state(path=str(SESSION_FILE))
     os.chmod(SESSION_FILE, 0o600)
 
 
