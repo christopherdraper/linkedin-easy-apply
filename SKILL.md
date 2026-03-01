@@ -42,11 +42,21 @@ Natural language prompts:
 - "Search for Platform Engineer jobs, dry run only"
 - "Apply to up to 5 Staff Engineer jobs"
 
+**IMPORTANT for agents:** When the user asks to search/apply without specifying a particular job title, run the script with NO `--title` flag. This uses all titles from `search_criteria.job_titles` in the profile (currently 7 titles), which gives much broader coverage. Only pass `--title` if the user explicitly asks to search for a specific role.
+
+```bash
+# Default: search ALL titles from profile (recommended)
+python ~/.openclaw/skills/job-apply/job_search_apply.py
+
+# Only if user asks for a specific title
+python ~/.openclaw/skills/job-apply/job_search_apply.py --title "Staff SRE"
+```
+
 The agent will:
 1. Load your profile from `~/.local/share/job-apply/profile.json`
-2. Search LinkedIn for Easy Apply jobs matching the title
+2. Search LinkedIn for Easy Apply jobs matching each title in the profile
 3. Score each job against your profile using Claude AI
-4. Skip low-scoring jobs and any with deal-breakers
+4. Skip low-scoring jobs, deal-breakers, and already-applied positions
 5. Generate a tailored cover letter for each application
 6. Submit and log all results to `~/.local/share/job-apply/applications.json`
 
