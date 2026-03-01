@@ -1,5 +1,8 @@
 # LinkedIn Easy Apply Automation
 
+[![Tests](https://github.com/christopherdraper/linkedin-easy-apply/actions/workflows/test.yml/badge.svg)](https://github.com/christopherdraper/linkedin-easy-apply/actions/workflows/test.yml)
+[![Lint](https://github.com/christopherdraper/linkedin-easy-apply/actions/workflows/lint.yml/badge.svg)](https://github.com/christopherdraper/linkedin-easy-apply/actions/workflows/lint.yml)
+
 Automated LinkedIn job search and Easy Apply submission using Claude AI.
 
 **What it does:**

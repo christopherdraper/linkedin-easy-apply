@@ -18,3 +18,13 @@ repos:
     hooks:
       - id: vulture
         args: ["job_search_apply.py", "--min-confidence", "80"]
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: python -m pytest tests/ -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
