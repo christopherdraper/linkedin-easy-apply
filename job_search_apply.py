@@ -1395,15 +1395,23 @@ def _check_mandatory_checkboxes(page) -> None:
             log.debug("Checkbox handling failed: %s", exc)
 
 
+def _get_form_container(page):
+    """Return the Easy Apply modal element, or fall back to the full page."""
+    modal = page.query_selector(".artdeco-modal, .jobs-easy-apply-modal, [role='dialog']")
+    return modal if modal else page
+
+
 def _answer_screening_questions(page, profile: ApplicantProfile) -> None:
     """Answer all screening questions on the current form step."""
-    _answer_radio_buttons(page, profile)
-    _answer_textareas(page, profile)
-    _answer_select_dropdowns(page, profile)
-    _check_mandatory_checkboxes(page)
+    # Scope all queries to the modal to avoid picking up video player / page inputs
+    form = _get_form_container(page)
+    _answer_radio_buttons(form, profile)
+    _answer_textareas(form, profile)
+    _answer_select_dropdowns(form, profile)
+    _check_mandatory_checkboxes(form)
 
     # Fill text/number inputs — use broad selector to catch LinkedIn's obfuscated inputs
-    for inp in page.query_selector_all(
+    for inp in form.query_selector_all(
         "input[type='text'], input[type='number'], input.artdeco-text-input--input"
     ):
         try:
@@ -1417,7 +1425,7 @@ def _answer_screening_questions(page, profile: ApplicantProfile) -> None:
             log.debug("Skipping non-interactable input field: %s", exc)
             continue
 
-        label_text = _get_field_label(page, inp)
+        label_text = _get_field_label(form, inp)
         # Skip typeahead search fields (garbled labels like "type type required")
         if not label_text or label_text in ("type", "type type", "type type required"):
             continue
