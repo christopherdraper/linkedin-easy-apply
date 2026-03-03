@@ -717,6 +717,12 @@ def ai_generate_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
         template_body = parts[0].strip()
         instructions = parts[1].strip() if len(parts) > 1 else ""
 
+        # Pre-fill deterministic fields so the AI can't hallucinate them
+        today = time.strftime("%B %d, %Y")
+        template_body = template_body.replace("{DATE}", today)
+        template_body = template_body.replace("{COMPANY}", job.get("company", "the company"))
+        template_body = template_body.replace("{JOB_TITLE}", job.get("title", "the role"))
+
         description = _sanitize_description(job.get("description", ""))[:3000]
         prompt = f"""You are writing a cover letter for a job application.
 
@@ -726,6 +732,8 @@ Job title: {job.get("title")}
 Company: {job.get("company")}
 Job description:
 {description}
+
+Today's date: {today}
 
 Here is the cover letter template to fill in:
 {template_body}
