@@ -29,5 +29,5 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 
 [tool.bandit]
-skips = []
+skips = ["B110", "B112"]  # try/except/pass and try/except/continue are intentional in browser automation
 exclude_dirs = ["tests"]
