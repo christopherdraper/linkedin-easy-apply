@@ -175,6 +175,7 @@ class ApplicantProfile:
     authorized_to_work: bool = True
     requires_sponsorship: bool = False
     screening_answers: Dict[str, str] = field(default_factory=dict)
+    gmail_app_password: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "ApplicantProfile":
@@ -223,6 +224,11 @@ class ApplicantProfile:
             authorized_to_work=work_auth.get("authorized_to_work_us", True),
             requires_sponsorship=work_auth.get("requires_visa_sponsorship", False),
             screening_answers=p.get("screening_answers", {}),
+            gmail_app_password=(
+                p.get("application_settings", {}).get("gmail_app_password")
+                if p.get("application_settings", {}).get("auto_fetch_verification_codes")
+                else None
+            ),
         )
 
     @classmethod
@@ -877,6 +883,116 @@ def _dump_form_debug(page, job_id: str, reason: str) -> Optional[str]:
         return None
 
 
+def _extract_code_from_email_body(body: str) -> Optional[str]:
+    """Extract a verification code from an email body string."""
+    body_clean = re.sub(r"\s+", " ", body)
+    # Primary: "code <optional words> : CODE" — matches Greenhouse format
+    m = re.search(r"code[^:]{0,40}:\s*([A-Za-z0-9]{6,10})\b", body_clean)
+    if m:
+        return m.group(1)
+    # Fallback: isolated 8-char alphanumeric token near keywords
+    for m in re.finditer(r"\b([A-Za-z0-9]{8})\b", body_clean):
+        # Check the surrounding context (30 chars each side)
+        start = max(0, m.start() - 60)
+        context = body_clean[start : m.end() + 60].lower()
+        if any(kw in context for kw in ("code", "verify", "enter", "paste", "security")):
+            return m.group(1)
+    return None
+
+
+def _fetch_verification_code_from_gmail(  # noqa: C901
+    email_addr: str, app_password: str, max_wait: int = 60
+) -> Optional[str]:
+    """Poll Gmail via IMAP for a recent verification code email and extract the code.
+
+    Only considers UNSEEN emails from the last 5 minutes. Marks the email as
+    read after extraction so it won't be picked up again on retry.
+    Retries up to *max_wait* seconds waiting for a new email to arrive.
+    """
+    import email as email_mod
+    import email.utils
+    import imaplib
+    from datetime import timezone
+
+    search_queries = [
+        '(FROM "greenhouse-mail" SUBJECT "security code" UNSEEN)',
+        '(FROM "greenhouse" SUBJECT "security code" UNSEEN)',
+        '(FROM "no-reply" SUBJECT "verification code" UNSEEN)',
+        '(FROM "noreply" SUBJECT "security code" UNSEEN)',
+    ]
+    request_time = time.time()
+
+    deadline = time.time() + max_wait
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        if attempt > 1:
+            time.sleep(5)
+        try:
+            imap = imaplib.IMAP4_SSL("imap.gmail.com")
+            imap.login(email_addr, app_password)
+            imap.select("INBOX")
+
+            for query in search_queries:
+                _status, msg_ids = imap.search(None, query)
+                if not msg_ids or not msg_ids[0]:
+                    continue
+                # Check messages newest-first
+                for mid in reversed(msg_ids[0].split()):
+                    _status, msg_data = imap.fetch(mid, "(RFC822)")
+                    if not msg_data or not msg_data[0] or not isinstance(msg_data[0], tuple):
+                        continue
+                    raw = msg_data[0][1]
+                    msg = email_mod.message_from_bytes(raw)
+
+                    # Skip emails older than 5 minutes before we started
+                    date_str = msg.get("Date", "")
+                    if date_str:
+                        parsed = email.utils.parsedate_to_datetime(date_str)
+                        age = request_time - parsed.replace(tzinfo=timezone.utc).timestamp()
+                        if age > 300:  # older than 5 min
+                            continue
+
+                    # Extract body (prefer plain text, fall back to stripped HTML)
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            ct = part.get_content_type()
+                            if ct == "text/plain":
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    body = payload.decode("utf-8", errors="replace")
+                                    break
+                            elif ct == "text/html" and not body:
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    body = re.sub(
+                                        r"<[^>]+>", " ", payload.decode("utf-8", errors="replace")
+                                    )
+                    else:
+                        payload = msg.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode("utf-8", errors="replace")
+
+                    if not body:
+                        continue
+
+                    code = _extract_code_from_email_body(body)
+                    if code:
+                        # Mark as read so we don't re-use this code
+                        imap.store(mid, "+FLAGS", "\\Seen")
+                        log.info("   📧 Verification code from email: %s", code)
+                        imap.logout()
+                        return code
+
+            imap.logout()
+        except Exception as exc:
+            log.debug("Gmail IMAP attempt %d failed: %s", attempt, exc)
+
+    log.warning("   ⚠️ Could not retrieve verification code from email after %ds", max_wait)
+    return None
+
+
 def _dismiss_save_dialog(page) -> None:
     """Dismiss the 'Save this application?' dialog if it appeared."""
     try:
@@ -1276,9 +1392,14 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
             except Exception:  # noqa: S110
                 pass
             if is_iti_phone:
+                # intl-tel-input auto-prepends the country code (+1 for US),
+                # so strip it and any formatting — type bare local digits only.
+                digits = re.sub(r"\D", "", contact_value)
+                if len(digits) == 11 and digits.startswith("1"):
+                    digits = digits[1:]  # strip US country code
                 inp.click()
                 inp.evaluate("el => el.value = ''")
-                inp.type(contact_value, delay=30)
+                inp.type(digits, delay=30)
             else:
                 inp.fill(contact_value)
             _dismiss_typeahead(page, inp)
@@ -1298,9 +1419,12 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
             except Exception:  # noqa: S110
                 pass
             if is_iti_phone:
+                digits = re.sub(r"\D", "", answer)
+                if len(digits) == 11 and digits.startswith("1"):
+                    digits = digits[1:]
                 inp.click()
                 inp.evaluate("el => el.value = ''")
-                inp.type(answer, delay=30)
+                inp.type(digits, delay=30)
             else:
                 inp.fill(answer)
             _dismiss_typeahead(page, inp)
@@ -1975,10 +2099,10 @@ def _get_custom_dropdown_options(page, element) -> List[str]:  # noqa: C901
             text = opt.inner_text().strip()
             if text:
                 texts.append(text)
-        if not texts:
-            # Close the dropdown if no options found
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(200)
+        # Always close the dropdown after extracting options so that
+        # _fill_custom_dropdown's re-open click actually opens it.
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
         return texts
     except Exception as exc:
         log.debug("Custom dropdown option extraction failed: %s", exc)
@@ -2242,10 +2366,11 @@ def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int
             # Skip combobox inputs — already handled by the custom dropdown loop
             if inp.get_attribute("role") == "combobox":
                 continue
-            # Skip intl-tel-input phone country search inputs
+            # Skip intl-tel-input country *search* inputs (iti__search-input),
+            # but NOT the main phone input (iti__tel-input).
             inp_id = inp.get_attribute("id") or ""
             inp_cls = inp.get_attribute("class") or ""
-            if "iti__" in inp_cls or "iti-" in inp_id:
+            if "iti__search-input" in inp_cls or "iti-search" in inp_id:
                 continue
             if not inp.is_visible():
                 continue
@@ -2268,6 +2393,19 @@ def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int
 
         label_text = _get_field_label(page, inp)
         if not label_text or label_text in ("type", "type type", "type type required"):
+            continue
+        # Skip verification/security code fields — these are filled by
+        # _fetch_verification_code_from_gmail after the submit attempt.
+        lt_lower = label_text.lower()
+        if any(
+            kw in lt_lower
+            for kw in (
+                "security code",
+                "verification code",
+                "verify code",
+                "verification code was sent",
+            )
+        ):
             continue
 
         try:
@@ -2584,6 +2722,81 @@ def _navigate_external_form(  # noqa: C901
             _dump_form_debug(page, job.get("id", ""), "Error page")
             return "failed: ATS error page"
 
+        # Detect email verification code prompt and handle it before filling fields
+        if profile.gmail_app_password:
+            has_verification_prompt = page.evaluate("""() => {
+                const text = document.body ? document.body.innerText : '';
+                const lower = text.toLowerCase();
+                return lower.includes('verification code was sent')
+                    || (lower.includes('security code') && lower.includes('character code'))
+                    || lower.includes('enter the') && lower.includes('code to confirm');
+            }""")
+            if has_verification_prompt:
+                code = _fetch_verification_code_from_gmail(
+                    profile.email, profile.gmail_app_password, max_wait=45
+                )
+                if code:
+                    # Find the security code input — try multiple strategies
+                    code_input = None
+                    # Strategy 1: Playwright's label-based locator
+                    for label_text in ("Security code", "Verification code", "Security Code"):
+                        try:
+                            loc = page.get_by_label(label_text)
+                            if loc.count() > 0 and loc.first.is_visible():
+                                code_input = loc.first
+                                break
+                        except Exception:
+                            continue
+                    # Strategy 2: attribute-based selector
+                    if not code_input:
+                        code_input = page.query_selector(
+                            "input[name*='security' i], input[name*='code' i], "
+                            "input[name*='verif' i], input[placeholder*='code' i], "
+                            "input[aria-label*='code' i], input[aria-label*='security' i]"
+                        )
+                    # Strategy 3: empty visible text input near "code" label
+                    if not code_input:
+                        for inp in page.query_selector_all("input[type='text'], input:not([type])"):
+                            try:
+                                if inp.is_visible() and not inp.input_value():
+                                    label = _get_field_label(page, inp)
+                                    if label and "code" in label.lower():
+                                        code_input = inp
+                                        break
+                            except Exception:
+                                continue
+                    if code_input:
+                        # Use click + clear + type for security code inputs
+                        # (React controlled components reject programmatic fill)
+                        code_input.click()
+                        code_input.evaluate("el => el.value = ''")
+                        code_input.type(code, delay=50)
+                        page.wait_for_timeout(500)
+                        log.info(f"   📧 Filled verification code: {code}")
+                        submit_btn = page.query_selector(
+                            "button[type='submit'], input[type='submit'], button:has-text('Submit')"
+                        )
+                        if submit_btn:
+                            _safe_click(submit_btn, page)
+                        else:
+                            _btn_role, _btn_el = _find_navigation_button(page)
+                            if _btn_el:
+                                _safe_click(_btn_el, page)
+                        page.wait_for_timeout(5000)
+                        post_snap = _extract_page_snapshot(page)
+                        if _detect_success_or_confirmation(page, post_snap):
+                            log.info("   ✅ Application submitted after verification code")
+                            if owns_browser:
+                                _save_session(context)
+                            return "submitted"
+                        log.warning("   ⚠️ Verification code may have been rejected")
+                        _dump_form_debug(page, job.get("id", ""), "Verification code rejected")
+                        return "failed: verification code rejected"
+                else:
+                    log.warning("   ⚠️ Could not retrieve verification code from email")
+                    _dump_form_debug(page, job.get("id", ""), "Verification code not received")
+                    return "failed: verification code not received from email"
+
         # Handle file uploads
         if classification.get("has_file_upload"):
             n = _handle_file_uploads(page, profile, cover_letter_path)
@@ -2644,6 +2857,100 @@ def _navigate_external_form(  # noqa: C901
                 if validation_errors:
                     error_summary = "; ".join(validation_errors)
                     log.warning(f"   ⚠️ Validation errors: {error_summary[:200]}")
+                    # Detect human verification (CAPTCHA, email verification codes)
+                    es_lower = error_summary.lower()
+                    email_code_patterns = (
+                        "verification code",
+                        "security code",
+                        "verify you're a human",
+                        "confirm you're a human",
+                    )
+                    captcha_patterns = ("captcha", "recaptcha", "hcaptcha")
+                    if any(bp in es_lower for bp in email_code_patterns):
+                        # Try to fetch the code from Gmail via IMAP
+                        if profile.gmail_app_password:
+                            code = _fetch_verification_code_from_gmail(
+                                profile.email, profile.gmail_app_password, max_wait=45
+                            )
+                            if code:
+                                # Find the security code input
+                                code_input = None
+                                for lbl in ("Security code", "Verification code"):
+                                    try:
+                                        loc = page.get_by_label(lbl)
+                                        if loc.count() > 0 and loc.first.is_visible():
+                                            code_input = loc.first
+                                            break
+                                    except Exception:
+                                        continue
+                                if not code_input:
+                                    code_input = page.query_selector(
+                                        "input[name*='security' i], input[name*='code' i], "
+                                        "input[name*='verif' i], input[placeholder*='code' i], "
+                                        "input[aria-label*='code' i]"
+                                    )
+                                if not code_input:
+                                    for inp in page.query_selector_all(
+                                        "input[type='text'], input:not([type])"
+                                    ):
+                                        try:
+                                            if inp.is_visible() and not inp.input_value():
+                                                lbl = _get_field_label(page, inp)
+                                                if lbl and "code" in lbl.lower():
+                                                    code_input = inp
+                                                    break
+                                        except Exception:
+                                            continue
+                                if code_input:
+                                    code_input.click()
+                                    code_input.evaluate("el => el.value = ''")
+                                    code_input.type(code, delay=50)
+                                    page.wait_for_timeout(500)
+                                    log.info(f"   📧 Filled verification code: {code}")
+                                    # Click submit again
+                                    _btn_role, _btn_el = _find_navigation_button(page)
+                                    if _btn_el:
+                                        _safe_click(_btn_el, page)
+                                        page.wait_for_timeout(5000)
+                                    # Check for success immediately
+                                    post_code_snap = _extract_page_snapshot(page)
+                                    if _detect_success_or_confirmation(page, post_code_snap):
+                                        log.info(
+                                            "   ✅ Application submitted after verification code"
+                                        )
+                                        if owns_browser:
+                                            _save_session(context)
+                                        return "submitted"
+                                    # Code might be wrong/expired — bail rather than loop
+                                    log.warning("   ⚠️ Verification code did not resolve the error")
+                                    _dump_form_debug(
+                                        page,
+                                        job.get("id", ""),
+                                        f"Verification code failed: {error_summary[:200]}",
+                                    )
+                                    return (
+                                        f"failed: verification code rejected: {error_summary[:200]}"
+                                    )
+                                else:
+                                    log.warning("   ⚠️ Got code but couldn't find input field")
+                        else:
+                            log.info(
+                                "   ℹ️  Email verification required but no gmail_app_password "
+                                "configured in profile"
+                            )
+                        _dump_form_debug(
+                            page,
+                            job.get("id", ""),
+                            f"Human verification required: {error_summary[:200]}",
+                        )
+                        return f"failed: human verification required: {error_summary[:200]}"
+                    if any(bp in es_lower for bp in captcha_patterns):
+                        _dump_form_debug(
+                            page,
+                            job.get("id", ""),
+                            f"CAPTCHA required: {error_summary[:200]}",
+                        )
+                        return f"failed: captcha required: {error_summary[:200]}"
                     # If we can't fill any more fields, bail out
                     if fields_filled_total == 0 or stalled >= 2:
                         _dump_form_debug(
