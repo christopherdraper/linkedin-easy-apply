@@ -150,6 +150,7 @@ class JobSearchParams:
     title: str
     location: Optional[str] = None
     remote: bool = True
+    max_age_days: Optional[int] = 14  # Only show jobs posted within this many days
     keywords_excluded: List[str] = field(default_factory=list)
     company_blacklist: List[str] = field(default_factory=list)
 
@@ -597,6 +598,8 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
         query_parts["location"] = params.location
     if params.remote:
         query_parts["f_WT"] = "2"
+    if params.max_age_days:
+        query_parts["f_TPR"] = f"r{params.max_age_days * 86400}"
 
     url = f"https://www.linkedin.com/jobs/search/?{urlencode(query_parts)}"
 
@@ -3639,6 +3642,7 @@ def main():
             title=title,
             location=args.location,
             remote=remote,
+            max_age_days=_criteria.get("max_age_days", 14),
             keywords_excluded=_criteria.get("keywords_excluded", []),
             company_blacklist=_criteria.get("company_blacklist", []),
         )
