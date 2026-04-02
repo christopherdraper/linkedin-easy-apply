@@ -1682,6 +1682,85 @@ def _dump_form_debug(page, job_id: str, reason: str) -> Optional[str]:
         return None
 
 
+def _get_validation_errors(page) -> List[str]:
+    """Extract visible validation error messages from the LinkedIn Easy Apply modal."""
+    try:
+        errors = page.evaluate("""() => {
+            const modal = document.querySelector(
+                '.artdeco-modal, .jobs-easy-apply-modal, [role="dialog"]'
+            );
+            if (!modal) return [];
+            const errorEls = modal.querySelectorAll(
+                '.artdeco-inline-feedback--error, '
+                + '[data-test-form-element-error], '
+                + '.fb-dash-form-element__error-text, '
+                + '[class*="error-text"], '
+                + '[role="alert"]'
+            );
+            const msgs = [];
+            for (const el of errorEls) {
+                const text = el.textContent.trim();
+                if (text && text.length < 200 && !msgs.includes(text))
+                    msgs.push(text);
+            }
+            return msgs.slice(0, 10);
+        }""")
+        return errors or []
+    except Exception:
+        return []
+
+
+def _fill_empty_required_fields(page, profile) -> int:
+    """Find required fields that are empty and try to fill them. Returns count filled."""
+    form = _get_form_container(page)
+    filled = 0
+
+    # Find empty required text/number inputs
+    for inp in form.query_selector_all(
+        "input[required], input[aria-required='true'], "
+        "select[required], select[aria-required='true'], "
+        "textarea[required], textarea[aria-required='true']"
+    ):
+        try:
+            if not inp.is_visible():
+                continue
+            tag = inp.evaluate("el => el.tagName.toLowerCase()")
+            if tag == "select":
+                # Select first non-empty option if nothing selected
+                val = inp.evaluate("el => el.value")
+                if not val:
+                    inp.evaluate("""el => {
+                        for (const opt of el.options) {
+                            if (opt.value && opt.value !== '') {
+                                el.value = opt.value;
+                                el.dispatchEvent(new Event('change', {bubbles: true}));
+                                break;
+                            }
+                        }
+                    }""")
+                    filled += 1
+                continue
+            inp_type = (inp.get_attribute("type") or "text").lower()
+            if inp_type in ("hidden", "file", "radio", "checkbox", "submit"):
+                continue
+            if inp.input_value():
+                continue
+            label_text = _get_field_label(form, inp)
+            if not label_text or label_text in ("type", "type type", "type type required"):
+                continue
+            _fill_input_field(inp, label_text, page, profile)
+            if inp.input_value():
+                filled += 1
+        except Exception:
+            continue
+
+    # Also try radio buttons and checkboxes that might be required but unanswered
+    _answer_radio_buttons(form, profile)
+    _check_mandatory_checkboxes(form)
+
+    return filled
+
+
 def _extract_code_from_email_body(body: str) -> Optional[str]:
     """Extract a verification code from an email body string."""
     body_clean = re.sub(r"\s+", " ", body)
@@ -1817,7 +1896,7 @@ def _get_modal_text(page) -> str:
     return ""
 
 
-def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> str:
+def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> str:  # noqa: C901
     """Navigate through multi-step Easy Apply form. Returns status string."""
     max_steps = 15
     stalled = 0
@@ -1888,11 +1967,22 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
             _dismiss_save_dialog(page)
             new_text = _get_modal_text(page)
             if new_text == cur_text:
-                stalled += 1
-                log.debug("Review click didn't change modal (stalled=%d)", stalled)
-                if stalled >= 3:
-                    _dump_form_debug(page, job_id, "Review not advancing")
-                    return "failed: form stuck — Review not advancing"
+                # Stalled — check for validation errors and try to fix them
+                errors = _get_validation_errors(page)
+                filled = _fill_empty_required_fields(page, profile)
+                if filled > 0:
+                    log.debug("Review stalled: filled %d fields, retrying", filled)
+                    stalled = 0  # reset — we made progress
+                else:
+                    stalled += 1
+                    err_hint = f" errors={errors}" if errors else ""
+                    log.debug("Review click didn't change modal (stalled=%d)%s", stalled, err_hint)
+                    if stalled >= 3:
+                        reason = "Review not advancing"
+                        if errors:
+                            reason += f" (validation: {'; '.join(errors)[:200]})"
+                        _dump_form_debug(page, job_id, reason)
+                        return f"failed: form stuck — {reason}"
             else:
                 stalled = 0
         elif next_btn:
@@ -1903,13 +1993,22 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
             _dismiss_save_dialog(page)
             new_text = _get_modal_text(page)
             if new_text == cur_text:
-                stalled += 1
-                log.debug("Next click didn't change modal (stalled=%d)", stalled)
-                if stalled >= 3:
-                    _dump_form_debug(page, job_id, "Next not advancing")
-                    return (
-                        "failed: form stuck — Next not advancing (likely missing required fields)"
-                    )
+                # Stalled — check for validation errors and try to fix them
+                errors = _get_validation_errors(page)
+                filled = _fill_empty_required_fields(page, profile)
+                if filled > 0:
+                    log.debug("Next stalled: filled %d fields, retrying", filled)
+                    stalled = 0  # reset — we made progress
+                else:
+                    stalled += 1
+                    err_hint = f" errors={errors}" if errors else ""
+                    log.debug("Next click didn't change modal (stalled=%d)%s", stalled, err_hint)
+                    if stalled >= 3:
+                        reason = "Next not advancing"
+                        if errors:
+                            reason += f" (validation: {'; '.join(errors)[:200]})"
+                        _dump_form_debug(page, job_id, reason)
+                        return f"failed: form stuck — {reason}"
             else:
                 stalled = 0
         else:
@@ -3563,12 +3662,19 @@ def _navigate_external_form(  # noqa: C901
             log.info(f"   ✅ Application confirmed after {step + 1} steps")
             return "submitted"
 
-        # Stall detection
+        # Stall detection — try filling missed fields before giving up
         if snapshot == prev_snapshot:
-            stalled += 1
-            if stalled >= 3:
-                _dump_form_debug(page, job.get("id", ""), "External form stalled")
-                return "failed: external form stuck (same page for 3 steps)"
+            # Re-attempt field filling on stall (fields may have appeared after click)
+            n_refilled = _answer_external_screening_questions(page, profile)
+            if n_refilled > 0:
+                log.debug("External form stalled but filled %d new fields, retrying", n_refilled)
+                fields_filled_total += n_refilled
+                stalled = 0  # reset — we made progress
+            else:
+                stalled += 1
+                if stalled >= 3:
+                    _dump_form_debug(page, job.get("id", ""), "External form stalled")
+                    return "failed: external form stuck (same page for 3 steps)"
         else:
             stalled = 0
         prev_snapshot = snapshot

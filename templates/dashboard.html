@@ -225,6 +225,7 @@
         }
 
         .score-bar .bar .fill {
+            display: block;
             height: 100%;
             border-radius: 3px;
         }
@@ -277,10 +278,12 @@
         <div class="label">Failed</div>
         <div class="value red">{{ status_counts.get('Failed', 0) }}</div>
     </div>
+    {% if status_counts.get('Aborted', 0) > 0 %}
     <div class="stat-card">
         <div class="label">Aborted</div>
         <div class="value amber">{{ status_counts.get('Aborted', 0) }}</div>
     </div>
+    {% endif %}
     <div class="stat-card">
         <div class="label">Dry Runs</div>
         <div class="value purple">{{ status_counts.get('Dry Run', 0) }}</div>
