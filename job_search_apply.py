@@ -35,6 +35,7 @@ def _get_ai_client():
 
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
+SEARCH_LOG_FILE = DATA_DIR / "search_log.json"
 COVER_LETTER_DIR = DATA_DIR / "cover-letters"
 SESSION_FILE = DATA_DIR / "sessions" / "linkedin.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
@@ -1577,6 +1578,19 @@ def save_log(entries: List[Dict]):
     log.info(f"\n💾 Log updated: {LOG_FILE}")
 
 
+def save_search_log(entry: Dict):
+    """Append a search-result entry to search_log.json."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    existing: List[Dict] = []
+    if SEARCH_LOG_FILE.exists():
+        try:
+            existing = json.loads(SEARCH_LOG_FILE.read_text())
+        except Exception:
+            existing = []
+    existing.append(entry)
+    SEARCH_LOG_FILE.write_text(json.dumps(existing, indent=2))
+
+
 def already_applied(log_entries: List[Dict]) -> set:
     return {
         e["url"]
@@ -1609,6 +1623,15 @@ def auto_apply_workflow(
         return {"applications": [], "total": 0, "jobs_found": 0}
 
     log.info(f"✅ {len(jobs)} Easy Apply jobs found\n")
+
+    # Record search results for dashboard tracking
+    save_search_log({
+        "search_title": params.title,
+        "source": "linkedin",
+        "jobs_found": len(jobs),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
     if not jobs:
         return {"applications": [], "total": 0, "jobs_found": 0}
 

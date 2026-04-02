@@ -2,9 +2,10 @@
 """
 Dashboard for tracking LinkedIn Easy Apply job applications.
 
-Reads the application log and displays:
+Reads the application log and search log to display:
   - Application status table (searchable, sortable)
-  - Job role hit counts: all time, last 2 weeks, last month
+  - Total jobs seen per role: all time, last 2 weeks, last month
+  - Application status breakdown
 
 Usage:
     pip install flask
@@ -15,7 +16,7 @@ Usage:
 import argparse
 import json
 import webbrowser
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Timer
@@ -24,47 +25,61 @@ from flask import Flask, render_template
 
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
+SEARCH_LOG_FILE = DATA_DIR / "search_log.json"
 
 app = Flask(__name__)
 
 
-def _load_applications():
-    if LOG_FILE.exists():
+def _load_json(path):
+    if path.exists():
         try:
-            return json.loads(LOG_FILE.read_text())
+            return json.loads(path.read_text())
         except Exception:
             return []
     return []
 
 
+def _load_applications():
+    return _load_json(LOG_FILE)
+
+
+def _load_search_log():
+    return _load_json(SEARCH_LOG_FILE)
+
+
 def _parse_ts(ts_str):
-    """Parse a timestamp string from the application log."""
+    """Parse a timestamp string from the log."""
     try:
         return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
 
 
-def _build_role_stats(entries):
-    """Aggregate application counts per job title across time windows."""
+def _build_role_stats(search_entries):
+    """Aggregate total jobs *seen* per search title across time windows.
+
+    Each search_log entry has: search_title, source, jobs_found, timestamp.
+    We sum jobs_found per search_title for each time window.
+    """
     now = datetime.now()
     two_weeks_ago = now - timedelta(days=14)
     one_month_ago = now - timedelta(days=30)
 
-    total = Counter()
-    last_two_weeks = Counter()
-    last_month = Counter()
+    total = defaultdict(int)
+    last_two_weeks = defaultdict(int)
+    last_month = defaultdict(int)
 
-    for entry in entries:
-        title = entry.get("title", "Unknown")
-        total[title] += 1
+    for entry in search_entries:
+        title = entry.get("search_title", "Unknown")
+        count = entry.get("jobs_found", 0)
+        total[title] += count
 
         ts = _parse_ts(entry.get("timestamp", ""))
         if ts:
             if ts >= two_weeks_ago:
-                last_two_weeks[title] += 1
+                last_two_weeks[title] += count
             if ts >= one_month_ago:
-                last_month[title] += 1
+                last_month[title] += count
 
     # Sort by total count descending
     all_roles = sorted(total.keys(), key=lambda r: total[r], reverse=True)
@@ -98,11 +113,14 @@ def _build_status_counts(entries):
 @app.route("/")
 def index():
     entries = _load_applications()
-    role_stats = _build_role_stats(entries)
+    search_entries = _load_search_log()
+    role_stats = _build_role_stats(search_entries)
     status_counts = _build_status_counts(entries)
 
     # Sort entries by timestamp descending (most recent first)
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+
+    total_jobs_seen = sum(e.get("jobs_found", 0) for e in search_entries)
 
     return render_template(
         "dashboard.html",
@@ -110,6 +128,8 @@ def index():
         role_stats=role_stats,
         status_counts=status_counts,
         total_applications=len(entries),
+        total_jobs_seen=total_jobs_seen,
+        total_searches=len(search_entries),
         log_file=str(LOG_FILE),
     )
 
@@ -118,14 +138,18 @@ def index():
 def api_data():
     """JSON endpoint for live-refresh without full page reload."""
     entries = _load_applications()
-    role_stats = _build_role_stats(entries)
+    search_entries = _load_search_log()
+    role_stats = _build_role_stats(search_entries)
     status_counts = _build_status_counts(entries)
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    total_jobs_seen = sum(e.get("jobs_found", 0) for e in search_entries)
     return {
         "entries": entries,
         "role_stats": role_stats,
         "status_counts": status_counts,
         "total_applications": len(entries),
+        "total_jobs_seen": total_jobs_seen,
+        "total_searches": len(search_entries),
     }
 
 
@@ -139,7 +163,8 @@ def main():
         Timer(1.0, lambda: webbrowser.open(f"http://localhost:{args.port}")).start()
 
     print(f"\n📊 Dashboard: http://localhost:{args.port}")
-    print(f"📁 Reading from: {LOG_FILE}\n")
+    print(f"📁 Reading from: {LOG_FILE}")
+    print(f"📁 Search log:   {SEARCH_LOG_FILE}\n")
 
     app.run(host="127.0.0.1", port=args.port, debug=False)
 
