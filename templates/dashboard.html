@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LinkedIn Easy Apply — Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --border: #2a2d3a;
+            --text: #e4e6eb;
+            --text-muted: #8b8fa3;
+            --accent: #4f8ff7;
+            --green: #34d399;
+            --red: #f87171;
+            --amber: #fbbf24;
+            --purple: #a78bfa;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+            padding: 2rem;
+        }
+
+        h1 {
+            font-size: 1.75rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+        }
+
+        /* -- Stat cards -------------------------------------------------- */
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.25rem;
+        }
+
+        .stat-card .label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-top: 0.25rem;
+        }
+
+        .stat-card .value.green  { color: var(--green); }
+        .stat-card .value.red    { color: var(--red); }
+        .stat-card .value.amber  { color: var(--amber); }
+        .stat-card .value.purple { color: var(--purple); }
+
+        /* -- Charts ------------------------------------------------------ */
+        .charts-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (max-width: 900px) {
+            .charts-row { grid-template-columns: 1fr; }
+        }
+
+        .chart-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.25rem;
+        }
+
+        .chart-card h2 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .chart-wrap {
+            position: relative;
+            width: 100%;
+        }
+
+        /* -- Table ------------------------------------------------------- */
+        .table-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.25rem;
+            overflow-x: auto;
+        }
+
+        .table-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+
+        .table-header h2 {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .search-box {
+            padding: 0.5rem 0.75rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 0.85rem;
+            width: 260px;
+        }
+
+        .search-box::placeholder { color: var(--text-muted); }
+        .search-box:focus { outline: none; border-color: var(--accent); }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+
+        th {
+            text-align: left;
+            padding: 0.6rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-muted);
+            font-weight: 500;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+
+        th:hover { color: var(--text); }
+        th .arrow { font-size: 0.7rem; margin-left: 4px; }
+
+        td {
+            padding: 0.6rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: rgba(79, 143, 247, 0.04); }
+
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .badge-submitted { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .badge-failed    { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+        .badge-aborted   { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+        .badge-dryrun    { background: rgba(167, 139, 250, 0.15); color: var(--purple); }
+        .badge-other     { background: rgba(139, 143, 163, 0.15); color: var(--text-muted); }
+
+        .score-bar {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .score-bar .bar {
+            width: 60px;
+            height: 6px;
+            background: var(--border);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .score-bar .bar .fill {
+            height: 100%;
+            border-radius: 3px;
+        }
+
+        .truncate {
+            max-width: 220px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-muted);
+        }
+
+        .refresh-btn {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 0.4rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+
+        .refresh-btn:hover { border-color: var(--accent); color: var(--text); }
+    </style>
+</head>
+<body>
+
+<h1>LinkedIn Easy Apply Dashboard</h1>
+<p class="subtitle">Tracking {{ total_applications }} application{{ 's' if total_applications != 1 else '' }} &middot; {{ log_file }} &middot; <button class="refresh-btn" onclick="location.reload()">Refresh</button></p>
+
+<!-- Stat cards -->
+<div class="stats-row">
+    <div class="stat-card">
+        <div class="label">Total Applications</div>
+        <div class="value">{{ total_applications }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Submitted</div>
+        <div class="value green">{{ status_counts.get('Submitted', 0) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Failed</div>
+        <div class="value red">{{ status_counts.get('Failed', 0) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Aborted</div>
+        <div class="value amber">{{ status_counts.get('Aborted', 0) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Dry Runs</div>
+        <div class="value purple">{{ status_counts.get('Dry Run', 0) }}</div>
+    </div>
+</div>
+
+<!-- Charts -->
+<div class="charts-row">
+    <div class="chart-card">
+        <h2>Applications by Job Role</h2>
+        <div class="chart-wrap">
+            <canvas id="roleChart"></canvas>
+        </div>
+    </div>
+    <div class="chart-card">
+        <h2>Status Breakdown</h2>
+        <div class="chart-wrap">
+            <canvas id="statusChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Application table -->
+<div class="table-card">
+    <div class="table-header">
+        <h2>All Applications</h2>
+        <input type="text" class="search-box" id="searchBox" placeholder="Search by title, company, status...">
+    </div>
+
+    {% if entries %}
+    <table id="appTable">
+        <thead>
+            <tr>
+                <th onclick="sortTable(0)">Date <span class="arrow">&#9660;</span></th>
+                <th onclick="sortTable(1)">Title</th>
+                <th onclick="sortTable(2)">Company</th>
+                <th onclick="sortTable(3)">Location</th>
+                <th onclick="sortTable(4)">Score</th>
+                <th onclick="sortTable(5)">Status</th>
+                <th>Reasoning</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for e in entries %}
+            <tr>
+                <td style="white-space:nowrap">{{ e.timestamp[:10] if e.timestamp else '—' }}</td>
+                <td class="truncate"><a href="{{ e.url }}" target="_blank" title="{{ e.title }}">{{ e.title }}</a></td>
+                <td>{{ e.company }}</td>
+                <td class="truncate">{{ e.location or '—' }}</td>
+                <td>
+                    {% set score = e.match_score|default(0) %}
+                    {% set pct = (score * 100)|int %}
+                    {% if score >= 0.7 %}
+                        {% set color = '#34d399' %}
+                    {% elif score >= 0.4 %}
+                        {% set color = '#fbbf24' %}
+                    {% else %}
+                        {% set color = '#f87171' %}
+                    {% endif %}
+                    <span class="score-bar">
+                        <span class="bar"><span class="fill" style="width:{{ pct }}%;background:{{ color }}"></span></span>
+                        {{ '%.0f'|format(pct) }}%
+                    </span>
+                </td>
+                <td>
+                    {% set st = e.status|default('unknown') %}
+                    {% if st.startswith('submitted') %}
+                        <span class="badge badge-submitted">Submitted</span>
+                    {% elif st.startswith('aborted') %}
+                        <span class="badge badge-aborted">Aborted</span>
+                    {% elif st.startswith('failed') %}
+                        <span class="badge badge-failed">Failed</span>
+                    {% elif st == 'dry_run' %}
+                        <span class="badge badge-dryrun">Dry Run</span>
+                    {% else %}
+                        <span class="badge badge-other">{{ st }}</span>
+                    {% endif %}
+                </td>
+                <td class="truncate" title="{{ e.reasoning or '' }}">{{ e.reasoning or '—' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <p>No applications yet.</p>
+        <p style="margin-top:0.5rem">Run <code>python job_search_apply.py --dry-run</code> to generate some data.</p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+// -- Chart data from server --
+const roleStats = {{ role_stats | tojson }};
+const statusCounts = {{ status_counts | tojson }};
+
+// -- Role chart (grouped bar) --
+if (roleStats.roles.length > 0) {
+    const ctx1 = document.getElementById('roleChart').getContext('2d');
+    new Chart(ctx1, {
+        type: 'bar',
+        data: {
+            labels: roleStats.roles,
+            datasets: [
+                {
+                    label: 'All Time',
+                    data: roleStats.total,
+                    backgroundColor: 'rgba(79, 143, 247, 0.7)',
+                    borderRadius: 4,
+                },
+                {
+                    label: 'Last 30 Days',
+                    data: roleStats.last_month,
+                    backgroundColor: 'rgba(167, 139, 250, 0.7)',
+                    borderRadius: 4,
+                },
+                {
+                    label: 'Last 14 Days',
+                    data: roleStats.last_two_weeks,
+                    backgroundColor: 'rgba(52, 211, 153, 0.7)',
+                    borderRadius: 4,
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    labels: { color: '#8b8fa3', font: { size: 12 } }
+                }
+            },
+            scales: {
+                x: {
+                    ticks: { color: '#8b8fa3', maxRotation: 45 },
+                    grid: { color: 'rgba(42, 45, 58, 0.5)' },
+                },
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: '#8b8fa3',
+                        stepSize: 1,
+                        callback: v => Number.isInteger(v) ? v : null,
+                    },
+                    grid: { color: 'rgba(42, 45, 58, 0.5)' },
+                },
+            },
+        },
+    });
+}
+
+// -- Status doughnut --
+const statusLabels = Object.keys(statusCounts);
+const statusValues = Object.values(statusCounts);
+const statusColors = statusLabels.map(l => {
+    if (l === 'Submitted') return '#34d399';
+    if (l === 'Failed')    return '#f87171';
+    if (l === 'Aborted')   return '#fbbf24';
+    if (l === 'Dry Run')   return '#a78bfa';
+    return '#8b8fa3';
+});
+
+if (statusLabels.length > 0) {
+    const ctx2 = document.getElementById('statusChart').getContext('2d');
+    new Chart(ctx2, {
+        type: 'doughnut',
+        data: {
+            labels: statusLabels,
+            datasets: [{
+                data: statusValues,
+                backgroundColor: statusColors,
+                borderWidth: 0,
+            }],
+        },
+        options: {
+            responsive: true,
+            cutout: '60%',
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: { color: '#8b8fa3', font: { size: 12 }, padding: 16 }
+                }
+            }
+        },
+    });
+}
+
+// -- Table search --
+document.getElementById('searchBox')?.addEventListener('input', function () {
+    const q = this.value.toLowerCase();
+    const rows = document.querySelectorAll('#appTable tbody tr');
+    rows.forEach(row => {
+        row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+});
+
+// -- Table sort --
+let sortDir = {};
+function sortTable(colIdx) {
+    const table = document.getElementById('appTable');
+    if (!table) return;
+    const tbody = table.tBodies[0];
+    const rows = Array.from(tbody.rows);
+    const dir = sortDir[colIdx] === 'asc' ? 'desc' : 'asc';
+    sortDir[colIdx] = dir;
+
+    rows.sort((a, b) => {
+        let va = a.cells[colIdx].textContent.trim();
+        let vb = b.cells[colIdx].textContent.trim();
+        // try numeric
+        const na = parseFloat(va), nb = parseFloat(vb);
+        if (!isNaN(na) && !isNaN(nb)) {
+            return dir === 'asc' ? na - nb : nb - na;
+        }
+        return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+    });
+
+    rows.forEach(r => tbody.appendChild(r));
+}
+</script>
+
+</body>
+</html>
