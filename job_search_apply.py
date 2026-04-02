@@ -637,6 +637,123 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
     return jobs
 
 
+def _extract_results_count(page) -> Optional[int]:
+    """Extract the total results count from a LinkedIn job search page."""
+    # fmt: off
+    text = page.evaluate(
+        "() => {"
+        "  const selectors = ["
+        "    '.jobs-search-results-list__subtitle',"
+        "    '.jobs-search-results-list__title-heading small',"
+        "    'header .jobs-search-results-list__text',"
+        "    '.jobs-search-no-results-banner',"
+        "  ];"
+        "  for (const sel of selectors) {"
+        "    const el = document.querySelector(sel);"
+        "    if (el && el.innerText) return el.innerText.trim();"
+        "  }"
+        r"  const all = document.body.innerText;"
+        r"  const m = all.match(/([\d,]+)\s+results/i) || all.match(/([\d,]+)\s+jobs/i);"
+        "  if (m) return m[0];"
+        "  return '';"
+        "}"
+    )
+    # fmt: on
+    if not text:
+        return None
+    # Parse "1,234 results" → 1234
+    import re as _re
+
+    match = _re.search(r"([\d,]+)", text)
+    if match:
+        return int(match.group(1).replace(",", ""))
+    return None
+
+
+def market_snapshot(
+    titles: List[str],
+    location: Optional[str] = None,
+    remote: bool = True,
+    proxy: Optional[str] = None,
+) -> List[Dict]:
+    """
+    Lightweight market scan: for each job title, query LinkedIn twice
+    (all results, then filtered to past 2 weeks) and record the total
+    result count — no job cards parsed, no descriptions fetched.
+
+    Returns list of snapshot entries saved to search_log.json.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError("Run: pip install playwright && playwright install chromium") from None
+
+    from urllib.parse import urlencode
+
+    snapshots = []
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    with sync_playwright() as p:
+        browser, context, page, owns_browser = _playwright_context(p, proxy)
+        try:
+            for i, title in enumerate(titles):
+                if i > 0:
+                    delay = 5 + i
+                    log.info(f"⏳ Waiting {delay}s...")
+                    time.sleep(delay)
+
+                log.info(f"📊 Market snapshot: '{title}'")
+
+                base_params = {"keywords": title, "refresh": "true"}
+                if location:
+                    base_params["location"] = location
+                if remote:
+                    base_params["f_WT"] = "2"
+
+                # --- All-time count ---
+                url_all = f"https://www.linkedin.com/jobs/search/?{urlencode(base_params)}"
+                page.goto(url_all, wait_until="domcontentloaded", timeout=30000)
+                _ensure_logged_in(page, url_all)
+                page.wait_for_timeout(3000)
+
+                total_count = _extract_results_count(page)
+                log.info(f"   Total results: {total_count or 'unknown'}")
+
+                # --- Past 2 weeks count (f_TPR = r1209600 = 14 days in seconds) ---
+                recent_params = {**base_params, "f_TPR": "r1209600"}
+                url_recent = f"https://www.linkedin.com/jobs/search/?{urlencode(recent_params)}"
+                page.goto(url_recent, wait_until="domcontentloaded", timeout=30000)
+                _ensure_logged_in(page, url_recent)
+                page.wait_for_timeout(3000)
+
+                recent_count = _extract_results_count(page)
+                log.info(f"   Past 2 weeks:  {recent_count or 'unknown'}")
+
+                snapshots.append({
+                    "search_title": title,
+                    "source": "linkedin",
+                    "total_results": total_count,
+                    "past_two_weeks_results": recent_count,
+                    "location": location or "",
+                    "remote": remote,
+                    "timestamp": now,
+                })
+
+            if owns_browser:
+                _save_session(context)
+        finally:
+            page.close()
+            if owns_browser:
+                browser.close()
+
+    # Save to search log
+    for snap in snapshots:
+        save_search_log(snap)
+
+    log.info(f"\n💾 Market data saved: {SEARCH_LOG_FILE}")
+    return snapshots
+
+
 def score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     """Keyword-based fallback scorer used when AI is unavailable."""
     description = re.sub(
@@ -1623,15 +1740,6 @@ def auto_apply_workflow(
         return {"applications": [], "total": 0, "jobs_found": 0}
 
     log.info(f"✅ {len(jobs)} Easy Apply jobs found\n")
-
-    # Record search results for dashboard tracking
-    save_search_log({
-        "search_title": params.title,
-        "source": "linkedin",
-        "jobs_found": len(jobs),
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-    })
-
     if not jobs:
         return {"applications": [], "total": 0, "jobs_found": 0}
 
@@ -2075,6 +2183,13 @@ def main():
     parser.add_argument("--max-applications", type=int, default=None)
     parser.add_argument("--min-score", type=float, default=None)
     parser.add_argument("--dry-run", action="store_true", default=False)
+    parser.add_argument(
+        "--market-snapshot",
+        action="store_true",
+        default=False,
+        help="Run a lightweight market scan: count total job postings per title on LinkedIn "
+        "(all-time and past 2 weeks). No applications submitted. Data used by dashboard.",
+    )
     parser.add_argument("--proxy", default=None)
     args = parser.parse_args()
 
@@ -2084,6 +2199,23 @@ def main():
 
     if args.sync_profile:
         _sync_linkedin_profile(args.profile)
+        return
+
+    if args.market_snapshot:
+        _raw = json.loads(Path(args.profile).expanduser().read_text())
+        _criteria = _raw.get("search_criteria", {})
+        _prefs = _raw.get("profile", _raw).get("preferences", {})
+        titles = args.title if args.title else _criteria.get("job_titles", [])
+        if not titles:
+            parser.error(
+                "No job titles — pass --title or set search_criteria.job_titles in profile"
+            )
+        if args.remote is None:
+            work_arrangement = _prefs.get("work_arrangement", ["remote"])
+            remote = "remote" in work_arrangement
+        else:
+            remote = args.remote
+        market_snapshot(titles, location=args.location, remote=remote, proxy=args.proxy)
         return
 
     # Auto-sync profile if stale (>7 days since last sync)

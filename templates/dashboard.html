@@ -73,12 +73,17 @@
         .stat-card .value.red    { color: var(--red); }
         .stat-card .value.amber  { color: var(--amber); }
         .stat-card .value.purple { color: var(--purple); }
+        .stat-card .value.accent { color: var(--accent); }
 
         /* -- Charts ------------------------------------------------------ */
         .charts-row {
             display: grid;
             grid-template-columns: 2fr 1fr;
             gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .charts-full {
             margin-bottom: 2rem;
         }
 
@@ -96,12 +101,32 @@
         .chart-card h2 {
             font-size: 1rem;
             font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .chart-card .chart-subtitle {
+            font-size: 0.8rem;
+            color: var(--text-muted);
             margin-bottom: 1rem;
         }
 
         .chart-wrap {
             position: relative;
             width: 100%;
+        }
+
+        .empty-chart {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .empty-chart code {
+            background: var(--bg);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
         }
 
         /* -- Table ------------------------------------------------------- */
@@ -235,20 +260,12 @@
 <body>
 
 <h1>LinkedIn Easy Apply Dashboard</h1>
-<p class="subtitle">Tracking {{ total_applications }} application{{ 's' if total_applications != 1 else '' }} &middot; {{ log_file }} &middot; <button class="refresh-btn" onclick="location.reload()">Refresh</button></p>
+<p class="subtitle">{{ log_file }} &middot; <button class="refresh-btn" onclick="location.reload()">Refresh</button></p>
 
 <!-- Stat cards -->
 <div class="stats-row">
     <div class="stat-card">
-        <div class="label">Jobs Seen</div>
-        <div class="value">{{ total_jobs_seen }}</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">Searches Run</div>
-        <div class="value">{{ total_searches }}</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">Applied</div>
+        <div class="label">Applications</div>
         <div class="value">{{ total_applications }}</div>
     </div>
     <div class="stat-card">
@@ -267,20 +284,51 @@
         <div class="label">Dry Runs</div>
         <div class="value purple">{{ status_counts.get('Dry Run', 0) }}</div>
     </div>
+    <div class="stat-card">
+        <div class="label">Market Snapshots</div>
+        <div class="value accent">{{ total_snapshots }}</div>
+    </div>
 </div>
 
-<!-- Charts -->
+<!-- Market pulse chart -->
+<div class="charts-full">
+    <div class="chart-card">
+        <h2>Job Market Pulse</h2>
+        <p class="chart-subtitle">Total job postings on LinkedIn per role — most recent snapshot</p>
+        <div class="chart-wrap">
+            {% if market_stats.roles %}
+            <canvas id="marketChart"></canvas>
+            {% else %}
+            <div class="empty-chart">
+                No market data yet. Run <code>python job_search_apply.py --market-snapshot</code> to collect data.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Application charts -->
 <div class="charts-row">
     <div class="chart-card">
-        <h2>Total Jobs Seen by Role</h2>
+        <h2>Market History</h2>
+        <p class="chart-subtitle">Total postings over time (each snapshot is a data point)</p>
         <div class="chart-wrap">
-            <canvas id="roleChart"></canvas>
+            {% if market_stats.roles %}
+            <canvas id="historyChart"></canvas>
+            {% else %}
+            <div class="empty-chart">No data yet.</div>
+            {% endif %}
         </div>
     </div>
     <div class="chart-card">
-        <h2>Status Breakdown</h2>
+        <h2>Application Status</h2>
+        <p class="chart-subtitle">Breakdown of application outcomes</p>
         <div class="chart-wrap">
+            {% if status_counts %}
             <canvas id="statusChart"></canvas>
+            {% else %}
+            <div class="empty-chart">No applications yet.</div>
+            {% endif %}
         </div>
     </div>
 </div>
@@ -355,34 +403,31 @@
 </div>
 
 <script>
-// -- Chart data from server --
-const roleStats = {{ role_stats | tojson }};
+// -- Data from server --
+const marketStats = {{ market_stats | tojson }};
 const statusCounts = {{ status_counts | tojson }};
 
-// -- Role chart (grouped bar) --
-if (roleStats.roles.length > 0) {
-    const ctx1 = document.getElementById('roleChart').getContext('2d');
+const chartTextColor = '#8b8fa3';
+const chartGridColor = 'rgba(42, 45, 58, 0.5)';
+
+// -- Market pulse bar chart (total vs past 2 weeks) --
+if (marketStats.roles.length > 0) {
+    const ctx1 = document.getElementById('marketChart').getContext('2d');
     new Chart(ctx1, {
         type: 'bar',
         data: {
-            labels: roleStats.roles,
+            labels: marketStats.roles,
             datasets: [
                 {
-                    label: 'All Time',
-                    data: roleStats.total,
-                    backgroundColor: 'rgba(79, 143, 247, 0.7)',
+                    label: 'Total Postings',
+                    data: marketStats.total_results,
+                    backgroundColor: 'rgba(79, 143, 247, 0.75)',
                     borderRadius: 4,
                 },
                 {
-                    label: 'Last 30 Days',
-                    data: roleStats.last_month,
-                    backgroundColor: 'rgba(167, 139, 250, 0.7)',
-                    borderRadius: 4,
-                },
-                {
-                    label: 'Last 14 Days',
-                    data: roleStats.last_two_weeks,
-                    backgroundColor: 'rgba(52, 211, 153, 0.7)',
+                    label: 'Posted in Last 2 Weeks',
+                    data: marketStats.past_two_weeks,
+                    backgroundColor: 'rgba(52, 211, 153, 0.75)',
                     borderRadius: 4,
                 },
             ],
@@ -391,22 +436,97 @@ if (roleStats.roles.length > 0) {
             responsive: true,
             plugins: {
                 legend: {
-                    labels: { color: '#8b8fa3', font: { size: 12 } }
+                    labels: { color: chartTextColor, font: { size: 12 } }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()} jobs`
+                    }
                 }
             },
             scales: {
                 x: {
-                    ticks: { color: '#8b8fa3', maxRotation: 45 },
-                    grid: { color: 'rgba(42, 45, 58, 0.5)' },
+                    ticks: { color: chartTextColor, maxRotation: 45 },
+                    grid: { color: chartGridColor },
                 },
                 y: {
                     beginAtZero: true,
                     ticks: {
-                        color: '#8b8fa3',
-                        stepSize: 1,
-                        callback: v => Number.isInteger(v) ? v : null,
+                        color: chartTextColor,
+                        callback: v => v.toLocaleString(),
                     },
-                    grid: { color: 'rgba(42, 45, 58, 0.5)' },
+                    grid: { color: chartGridColor },
+                },
+            },
+        },
+    });
+}
+
+// -- Market history line chart (total postings over time per role) --
+if (marketStats.roles.length > 0) {
+    const colors = [
+        'rgba(79, 143, 247, 1)',
+        'rgba(52, 211, 153, 1)',
+        'rgba(167, 139, 250, 1)',
+        'rgba(251, 191, 36, 1)',
+        'rgba(248, 113, 113, 1)',
+        'rgba(96, 165, 250, 1)',
+        'rgba(244, 114, 182, 1)',
+        'rgba(163, 230, 53, 1)',
+    ];
+
+    const datasets = [];
+    const history = marketStats.history;
+
+    for (let i = 0; i < marketStats.roles.length; i++) {
+        const role = marketStats.roles[i];
+        const entries = (history[role] || []).sort((a, b) =>
+            (a.timestamp || '').localeCompare(b.timestamp || '')
+        );
+        datasets.push({
+            label: role,
+            data: entries.map(e => ({
+                x: e.timestamp ? e.timestamp.slice(0, 10) : '',
+                y: e.total_results || 0,
+            })),
+            borderColor: colors[i % colors.length],
+            backgroundColor: colors[i % colors.length].replace('1)', '0.1)'),
+            fill: false,
+            tension: 0.3,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+        });
+    }
+
+    const ctx2 = document.getElementById('historyChart').getContext('2d');
+    new Chart(ctx2, {
+        type: 'line',
+        data: { datasets },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    labels: { color: chartTextColor, font: { size: 12 } }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()} jobs`
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    type: 'category',
+                    ticks: { color: chartTextColor },
+                    grid: { color: chartGridColor },
+                },
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: chartTextColor,
+                        callback: v => v.toLocaleString(),
+                    },
+                    grid: { color: chartGridColor },
                 },
             },
         },
@@ -425,8 +545,8 @@ const statusColors = statusLabels.map(l => {
 });
 
 if (statusLabels.length > 0) {
-    const ctx2 = document.getElementById('statusChart').getContext('2d');
-    new Chart(ctx2, {
+    const ctx3 = document.getElementById('statusChart').getContext('2d');
+    new Chart(ctx3, {
         type: 'doughnut',
         data: {
             labels: statusLabels,
@@ -442,7 +562,7 @@ if (statusLabels.length > 0) {
             plugins: {
                 legend: {
                     position: 'bottom',
-                    labels: { color: '#8b8fa3', font: { size: 12 }, padding: 16 }
+                    labels: { color: chartTextColor, font: { size: 12 }, padding: 16 }
                 }
             }
         },
@@ -471,7 +591,6 @@ function sortTable(colIdx) {
     rows.sort((a, b) => {
         let va = a.cells[colIdx].textContent.trim();
         let vb = b.cells[colIdx].textContent.trim();
-        // try numeric
         const na = parseFloat(va), nb = parseFloat(vb);
         if (!isNaN(na) && !isNaN(nb)) {
             return dir === 'asc' ? na - nb : nb - na;

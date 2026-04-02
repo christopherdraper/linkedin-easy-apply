@@ -2,9 +2,9 @@
 """
 Dashboard for tracking LinkedIn Easy Apply job applications.
 
-Reads the application log and search log to display:
+Reads the application log and market snapshot log to display:
+  - Market pulse: total job postings per role (all results vs past 2 weeks)
   - Application status table (searchable, sortable)
-  - Total jobs seen per role: all time, last 2 weeks, last month
   - Application status breakdown
 
 Usage:
@@ -17,7 +17,7 @@ import argparse
 import json
 import webbrowser
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from threading import Timer
 
@@ -55,40 +55,33 @@ def _parse_ts(ts_str):
         return None
 
 
-def _build_role_stats(search_entries):
-    """Aggregate total jobs *seen* per search title across time windows.
+def _build_market_stats(search_entries):
+    """Build market data from search_log.json snapshots.
 
-    Each search_log entry has: search_title, source, jobs_found, timestamp.
-    We sum jobs_found per search_title for each time window.
+    Each snapshot has: search_title, total_results, past_two_weeks_results, timestamp.
+    We take the most recent snapshot per role for the chart, and keep the full
+    history for the timeline.
     """
-    now = datetime.now()
-    two_weeks_ago = now - timedelta(days=14)
-    one_month_ago = now - timedelta(days=30)
-
-    total = defaultdict(int)
-    last_two_weeks = defaultdict(int)
-    last_month = defaultdict(int)
+    # Group by search_title, keep most recent snapshot per title
+    latest = {}
+    history = defaultdict(list)
 
     for entry in search_entries:
         title = entry.get("search_title", "Unknown")
-        count = entry.get("jobs_found", 0)
-        total[title] += count
-
         ts = _parse_ts(entry.get("timestamp", ""))
-        if ts:
-            if ts >= two_weeks_ago:
-                last_two_weeks[title] += count
-            if ts >= one_month_ago:
-                last_month[title] += count
+        history[title].append(entry)
+        if title not in latest or (ts and ts > _parse_ts(latest[title].get("timestamp", ""))):
+            latest[title] = entry
 
-    # Sort by total count descending
-    all_roles = sorted(total.keys(), key=lambda r: total[r], reverse=True)
+    # Sort roles by total results descending
+    roles = sorted(latest.keys(), key=lambda r: latest[r].get("total_results") or 0, reverse=True)
 
     return {
-        "roles": all_roles,
-        "total": [total[r] for r in all_roles],
-        "last_two_weeks": [last_two_weeks.get(r, 0) for r in all_roles],
-        "last_month": [last_month.get(r, 0) for r in all_roles],
+        "roles": roles,
+        "total_results": [latest[r].get("total_results") or 0 for r in roles],
+        "past_two_weeks": [latest[r].get("past_two_weeks_results") or 0 for r in roles],
+        "latest": {r: latest[r] for r in roles},
+        "history": dict(history),
     }
 
 
@@ -114,22 +107,18 @@ def _build_status_counts(entries):
 def index():
     entries = _load_applications()
     search_entries = _load_search_log()
-    role_stats = _build_role_stats(search_entries)
+    market_stats = _build_market_stats(search_entries)
     status_counts = _build_status_counts(entries)
 
-    # Sort entries by timestamp descending (most recent first)
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
-
-    total_jobs_seen = sum(e.get("jobs_found", 0) for e in search_entries)
 
     return render_template(
         "dashboard.html",
         entries=entries,
-        role_stats=role_stats,
+        market_stats=market_stats,
         status_counts=status_counts,
         total_applications=len(entries),
-        total_jobs_seen=total_jobs_seen,
-        total_searches=len(search_entries),
+        total_snapshots=len(search_entries),
         log_file=str(LOG_FILE),
     )
 
@@ -139,17 +128,15 @@ def api_data():
     """JSON endpoint for live-refresh without full page reload."""
     entries = _load_applications()
     search_entries = _load_search_log()
-    role_stats = _build_role_stats(search_entries)
+    market_stats = _build_market_stats(search_entries)
     status_counts = _build_status_counts(entries)
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
-    total_jobs_seen = sum(e.get("jobs_found", 0) for e in search_entries)
     return {
         "entries": entries,
-        "role_stats": role_stats,
+        "market_stats": market_stats,
         "status_counts": status_counts,
         "total_applications": len(entries),
-        "total_jobs_seen": total_jobs_seen,
-        "total_searches": len(search_entries),
+        "total_snapshots": len(search_entries),
     }
 
 
@@ -163,8 +150,8 @@ def main():
         Timer(1.0, lambda: webbrowser.open(f"http://localhost:{args.port}")).start()
 
     print(f"\n📊 Dashboard: http://localhost:{args.port}")
-    print(f"📁 Reading from: {LOG_FILE}")
-    print(f"📁 Search log:   {SEARCH_LOG_FILE}\n")
+    print(f"📁 Applications: {LOG_FILE}")
+    print(f"📁 Market data:  {SEARCH_LOG_FILE}\n")
 
     app.run(host="127.0.0.1", port=args.port, debug=False)
 
