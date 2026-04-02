@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-LinkedIn Easy Apply job search and auto-apply.
+LinkedIn job search and auto-apply.
+Supports Easy Apply (in-modal) and external ATS applications (Workday, Greenhouse, etc.).
 Uses Claude AI for job scoring, cover letters, screening questions, and application notes.
 """
 
@@ -9,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -43,6 +45,27 @@ CDP_URL = "http://localhost:9222"
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Human-like timing helpers
+# ---------------------------------------------------------------------------
+_USER_AGENTS = [
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
+]
+
+
+def _human_delay(base: float = 2.0, jitter: float = 3.0) -> None:
+    """Sleep for a randomized duration to mimic human pacing."""
+    delay = base + random.uniform(0, jitter)
+    # Occasionally add a longer "thinking" pause (10% chance)
+    if random.random() < 0.10:
+        delay += random.uniform(5, 15)
+    time.sleep(delay)
+
 
 # ---------------------------------------------------------------------------
 # Prompt injection defence
@@ -150,6 +173,7 @@ class JobSearchParams:
     title: str
     location: Optional[str] = None
     remote: bool = True
+    max_age_days: Optional[int] = 14  # Only show jobs posted within this many days
     keywords_excluded: List[str] = field(default_factory=list)
     company_blacklist: List[str] = field(default_factory=list)
 
@@ -175,6 +199,8 @@ class ApplicantProfile:
     authorized_to_work: bool = True
     requires_sponsorship: bool = False
     screening_answers: Dict[str, str] = field(default_factory=dict)
+    gmail_app_password: Optional[str] = None
+    message_hiring_manager: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "ApplicantProfile":
@@ -223,6 +249,14 @@ class ApplicantProfile:
             authorized_to_work=work_auth.get("authorized_to_work_us", True),
             requires_sponsorship=work_auth.get("requires_visa_sponsorship", False),
             screening_answers=p.get("screening_answers", {}),
+            gmail_app_password=(
+                p.get("application_settings", {}).get("gmail_app_password")
+                if p.get("application_settings", {}).get("auto_fetch_verification_codes")
+                else None
+            ),
+            message_hiring_manager=bool(
+                p.get("application_settings", {}).get("message_hiring_manager")
+            ),
         )
 
     @classmethod
@@ -460,14 +494,28 @@ def _playwright_context(p, proxy: Optional[str] = None):
     if proxy:
         opts["proxy"] = {"server": proxy}
 
-    browser = p.chromium.launch(headless=True)
+    # Use new headless mode ("new" arg) — harder to fingerprint than old headless
+    browser = p.chromium.launch(
+        headless=True,
+        args=[
+            "--headless=new",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+    # Randomize viewport slightly so sessions aren't identical
+    vp_w = random.randint(1260, 1380)
+    vp_h = random.randint(780, 900)
     context = browser.new_context(
         **opts,
-        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 800},
+        user_agent=random.choice(_USER_AGENTS),
+        viewport={"width": vp_w, "height": vp_h},
         locale="en-US",
         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
     )
+    # Remove the webdriver navigator flag that automation detectors check
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    """)
     page = context.new_page()
     log.debug("Launched standalone headless Chromium (cookie file)")
     return browser, context, page, True
@@ -523,7 +571,7 @@ def _fetch_description(context, url: str) -> str:
 
 
 def _parse_job_cards(page) -> List[Dict]:
-    """Extract Easy Apply job data from visible job cards on the search results page."""
+    """Extract job data from visible job cards on the search results page."""
     try:
         cards = page.query_selector_all("div.job-card-container")
     except Exception:
@@ -539,8 +587,12 @@ def _parse_job_cards(page) -> List[Dict]:
             location_el = card.query_selector("div.artdeco-entity-lockup__caption")
             footer_items = card.query_selector_all("li.job-card-container__footer-item")
             has_easy_apply = any("easy apply" in el.inner_text().lower() for el in footer_items)
-            if title_el and company_el and has_easy_apply:
-                href = title_el.evaluate("el => el.href")
+            if title_el and company_el:
+                href = title_el.evaluate("el => el.href || el.getAttribute('href') || ''")
+                # Ensure absolute URL
+                if href and href.startswith("/"):
+                    href = "https://www.linkedin.com" + href
+                apply_type = "easy_apply" if has_easy_apply else "external"
                 jobs.append(
                     {
                         "id": f"li_{hashlib.sha256((href or title_el.inner_text()).encode()).hexdigest()[:12]}",
@@ -549,6 +601,7 @@ def _parse_job_cards(page) -> List[Dict]:
                         "location": location_el.inner_text().strip() if location_el else "",
                         "url": href,
                         "description": "",
+                        "apply_type": apply_type,
                     }
                 )
         except Exception as exc:
@@ -569,9 +622,427 @@ def _ensure_logged_in(page, target_url: str) -> None:
         raise RuntimeError("Login succeeded but still redirected to auth wall")
 
 
+def search_remoteok(params: JobSearchParams) -> List[Dict]:
+    """
+    Search RemoteOK's public JSON API for matching jobs.
+    No auth required. Returns jobs in the same dict format as search_linkedin.
+    """
+    import urllib.request
+
+    tag = params.title.lower().replace(" ", "-")
+    api_url = f"https://remoteok.com/api?tag={tag}"
+    req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"   RemoteOK API error: {e}")
+        return []
+
+    # First item is metadata, skip it
+    listings = data[1:] if len(data) > 1 else []
+
+    jobs = []
+    blacklist_lower = [c.lower() for c in params.company_blacklist]
+    excluded_lower = [kw.lower() for kw in params.keywords_excluded]
+
+    for item in listings:
+        company = item.get("company", "")
+        title = item.get("position", "")
+        desc = item.get("description", "")
+        url = item.get("url", "")
+        apply_url = item.get("apply_url") or url
+
+        if not apply_url or not title:
+            continue
+
+        # Apply blacklist
+        if company.lower() in blacklist_lower:
+            continue
+
+        # Apply keyword exclusions
+        title_lower = title.lower()
+        if any(kw in title_lower for kw in excluded_lower):
+            continue
+
+        # Age filter
+        if params.max_age_days:
+            date_str = item.get("date", "")
+            if date_str:
+                try:
+                    from datetime import datetime, timezone
+
+                    posted = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    age_days = (datetime.now(timezone.utc) - posted).days
+                    if age_days > params.max_age_days:
+                        continue
+                except Exception:
+                    pass
+
+        if url and not url.startswith("http"):
+            url = f"https://remoteok.com{url}"
+        if apply_url and not apply_url.startswith("http"):
+            apply_url = f"https://remoteok.com{apply_url}"
+
+        jobs.append(
+            {
+                "id": f"rok_{item.get('id', '')}",
+                "url": apply_url,
+                "listing_url": url,
+                "title": title,
+                "company": company,
+                "description": _sanitize_description(desc[:5000]),
+                "location": "Remote",
+                "easy_apply": False,
+                "apply_type": "external",
+                "source": "remoteok",
+            }
+        )
+
+    return jobs
+
+
+def search_hn_whos_hiring(params: JobSearchParams) -> List[Dict]:
+    """
+    Search HackerNews 'Who is hiring?' threads via the Algolia API.
+    Finds the current month's thread, fetches comments, and filters for relevant jobs.
+    """
+    import urllib.request
+
+    # Find the most recent "Who is hiring?" thread (sort by date to get current month)
+    search_url = (
+        "https://hn.algolia.com/api/v1/search_by_date?"
+        "query=%22who%20is%20hiring%22&tags=story"
+        "&hitsPerPage=5"
+    )
+    req = urllib.request.Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"   HN Algolia search error: {e}")
+        return []
+
+    # Find the thread from this month or last month
+    thread_id = None
+    for hit in data.get("hits", []):
+        title = hit.get("title", "").lower()
+        if "who is hiring?" in title and "freelancer" not in title and "show hn" not in title:
+            thread_id = hit.get("objectID")
+            log.info(f"   Found HN thread: {hit.get('title')} (id: {thread_id})")
+            break
+
+    if not thread_id:
+        log.warning("   Could not find a recent 'Who is hiring?' thread")
+        return []
+
+    # Fetch all comments from the thread
+    comments_url = (
+        f"https://hn.algolia.com/api/v1/search?tags=comment,story_{thread_id}&hitsPerPage=500"
+    )
+    req = urllib.request.Request(comments_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"   HN comments fetch error: {e}")
+        return []
+
+    comments = data.get("hits", [])
+    log.info(f"   Fetched {len(comments)} comments from HN thread")
+
+    # Filter comments for relevant jobs
+    search_terms = [
+        t.lower()
+        for t in (
+            params.title.split()
+            + ["sre", "devops", "platform", "infrastructure", "mlops", "ai engineer"]
+        )
+    ]
+    blacklist_lower = [c.lower() for c in params.company_blacklist]
+    excluded_lower = [kw.lower() for kw in params.keywords_excluded]
+
+    jobs = []
+    for comment in comments:
+        text = comment.get("comment_text") or ""
+        text_lower = text.lower()
+
+        # Skip if no relevant keywords
+        if not any(term in text_lower for term in search_terms):
+            continue
+
+        # Skip if excluded keywords found
+        if any(kw in text_lower for kw in excluded_lower):
+            continue
+
+        # Must mention remote
+        if "remote" not in text_lower:
+            continue
+
+        # Extract company name from first line (HN convention: "Company | Role | Location | ...")
+        first_line = text.split("\n")[0].split("<")[0].strip()
+        parts = [p.strip() for p in re.split(r"\s*[|]\s*", first_line)]
+        company = parts[0] if parts else "Unknown"
+        # Clean HTML tags from company name
+        company = re.sub(r"<[^>]+>", "", company).strip()
+
+        if company.lower() in blacklist_lower:
+            continue
+
+        # Try to find an apply URL in the comment
+        urls = re.findall(r'href="(https?://[^"]+)"', text)
+        if not urls:
+            urls = re.findall(r"(https?://[^\s<\"']+)", text)
+        apply_url = urls[0] if urls else ""
+
+        # Clean HTML for description
+        clean_text = re.sub(r"<[^>]+>", " ", text)
+        clean_text = re.sub(r"\s+", " ", clean_text).strip()
+
+        hn_url = f"https://news.ycombinator.com/item?id={comment.get('objectID', '')}"
+
+        jobs.append(
+            {
+                "id": f"hn_{comment.get('objectID', '')}",
+                "url": apply_url or hn_url,
+                "listing_url": hn_url,
+                "title": " | ".join(parts[1:3]) if len(parts) > 1 else params.title,
+                "company": company,
+                "description": _sanitize_description(clean_text[:5000]),
+                "location": "Remote",
+                "easy_apply": False,
+                "apply_type": "external",
+                "source": "hackernews",
+            }
+        )
+
+    return jobs
+
+
+# ── Biotech / Pharma career sites (Workday API) ─────────────────────────
+_BIOTECH_WORKDAY_SITES = [
+    # (display_name, tenant, wd_instance, site_path)
+    ("Eli Lilly", "lilly", "wd5", "LLY"),
+    ("Amgen", "amgen", "wd1", "Careers"),
+    ("Pfizer", "pfizer", "wd1", "PfizerCareers"),
+    ("BMS", "bristolmyerssquibb", "wd5", "BMS"),
+    ("AstraZeneca", "astrazeneca", "wd3", "Careers"),
+    ("Sanofi", "sanofi", "wd3", "SanofiCareers"),
+    ("Roche", "roche", "wd3", "roche-ext"),
+    ("Biogen", "biibhr", "wd3", "external"),
+    ("Takeda", "takeda", "wd3", "External"),
+]
+
+
+def _workday_search(tenant: str, wd: str, site: str, query: str, limit: int = 20) -> List[Dict]:
+    """Hit a Workday career site's public JSON API."""
+    import urllib.request
+
+    url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
+    payload = json.dumps(
+        {
+            "appliedFacets": {},
+            "limit": limit,
+            "offset": 0,
+            "searchText": query,
+        }
+    ).encode()
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"   Workday API error ({tenant}): {e}")
+        return {}
+
+
+def _workday_job_detail(tenant: str, wd: str, site: str, external_path: str) -> Dict:
+    """Fetch full job description from Workday job detail endpoint."""
+    import urllib.request
+
+    url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}{external_path}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return {}
+
+
+def search_biotech(params: JobSearchParams) -> List[Dict]:
+    """
+    Search major biotech/pharma company career sites (Eli Lilly competitors)
+    via their Workday public APIs. Filters for remote US roles only.
+    """
+    blacklist_lower = [c.lower() for c in params.company_blacklist]
+    excluded_lower = [kw.lower() for kw in params.keywords_excluded]
+
+    # Append "remote" to search query so Workday prioritises remote-eligible postings
+    remote_query = f"{params.title} remote"
+
+    all_jobs = []
+
+    for display_name, tenant, wd, site in _BIOTECH_WORKDAY_SITES:
+        if display_name.lower() in blacklist_lower:
+            continue
+
+        log.info(f"   🏥 Searching {display_name} careers...")
+
+        data = _workday_search(tenant, wd, site, remote_query, limit=20)
+        postings = data.get("jobPostings", [])
+        total = data.get("total", 0)
+
+        if not postings:
+            continue
+
+        log.info(f"      {display_name}: {total} results for '{params.title}'")
+
+        for posting in postings:
+            title = posting.get("title", "")
+            location_text = posting.get("locationsText", "")
+            external_path = posting.get("externalPath", "")
+            posted_on = posting.get("postedOn", "")
+
+            if not title or not external_path:
+                continue
+
+            # Quick pre-filter: skip obviously non-US/non-remote locations
+            loc_lower = location_text.lower()
+            non_us_only = [
+                "india",
+                "hyderabad",
+                "china",
+                "shanghai",
+                "portugal",
+                "dublin",
+                "bogota",
+                "barcelona",
+                "singapore",
+                "japan",
+                "tokyo",
+                "germany",
+                "france",
+                "paris",
+                "london",
+                "brazil",
+                "mexico",
+                "australia",
+                "canada",
+                "buenos aires",
+                "seoul",
+                "taiwan",
+                "hong kong",
+                "philippines",
+                "vietnam",
+                "zurich",
+                "basel",
+                "copenhagen",
+                "amsterdam",
+            ]
+            # Only skip if location is EXCLUSIVELY non-US (not "2 Locations" etc)
+            if any(x in loc_lower for x in non_us_only) and "location" not in loc_lower:
+                continue
+
+            # Title exclusions
+            title_lower = title.lower()
+            if any(kw in title_lower for kw in excluded_lower):
+                continue
+
+            # Age filter (Workday gives "Posted X Days Ago" or "Posted Today")
+            if params.max_age_days and posted_on:
+                if "30+" in posted_on:
+                    continue
+                days_match = re.search(r"(\d+)\s*Days?\s*Ago", posted_on, re.IGNORECASE)
+                if days_match:
+                    age = int(days_match.group(1))
+                    if age > params.max_age_days:
+                        continue
+
+            base_url = f"https://{tenant}.{wd}.myworkdayjobs.com/{site}"
+            apply_url = f"{base_url}{external_path}"
+
+            # Fetch full description and check remoteType in detail
+            detail = _workday_job_detail(tenant, wd, site, external_path)
+            description = ""
+            is_remote = False
+            detail_location = location_text
+
+            if detail:
+                info = detail.get("jobPostingInfo", {})
+                description = info.get("jobDescription", "")
+                # Clean HTML tags
+                description = re.sub(r"<[^>]+>", " ", description)
+                description = re.sub(r"\s+", " ", description).strip()
+
+                remote_type = (info.get("remoteType") or "").lower()
+                detail_location = info.get("location", location_text)
+                country = info.get("country", {})
+                country_name = (
+                    country.get("descriptor", "") if isinstance(country, dict) else str(country)
+                )
+
+                is_remote = remote_type == "remote"
+                is_hybrid = "hybrid" in remote_type
+                is_us = "united states" in country_name.lower()
+
+                # Lilly: allow hybrid (user is in Indianapolis)
+                # Everyone else: remote only
+                lilly_exception = display_name == "Eli Lilly" and is_hybrid
+                if not is_remote and not lilly_exception:
+                    continue
+                if country_name and not is_us:
+                    continue
+
+            job_id = (
+                posting.get("bulletFields", [""])[0]
+                or hashlib.sha256(apply_url.encode()).hexdigest()[:12]
+            )
+
+            all_jobs.append(
+                {
+                    "id": f"bio_{tenant}_{job_id}",
+                    "url": apply_url,
+                    "listing_url": apply_url,
+                    "title": title,
+                    "company": display_name,
+                    "description": _sanitize_description(description[:5000]),
+                    "location": detail_location,
+                    "easy_apply": False,
+                    "apply_type": "external",
+                    "source": "biotech",
+                }
+            )
+
+        # Small delay between companies to be polite
+        time.sleep(random.uniform(0.5, 1.5))
+
+    return all_jobs
+
+
 def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> List[Dict]:
     """
-    Search LinkedIn for Easy Apply jobs matching params.
+    Search LinkedIn for jobs matching params (Easy Apply and external).
     Fetches full job descriptions for AI scoring.
     """
     try:
@@ -586,7 +1057,8 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
         query_parts["location"] = params.location
     if params.remote:
         query_parts["f_WT"] = "2"
-    query_parts["f_LF"] = "f_AL"
+    if params.max_age_days:
+        query_parts["f_TPR"] = f"r{params.max_age_days * 86400}"
 
     url = f"https://www.linkedin.com/jobs/search/?{urlencode(query_parts)}"
 
@@ -800,7 +1272,10 @@ Rate how well this job matches the candidate. Respond with ONLY valid JSON, no o
   "deal_breakers": ["<any red flags: on-site only, wrong seniority, relocation required, etc.>"]
 }}
 
-Scoring guide: 0.9+ = excellent fit, 0.7-0.9 = strong match, 0.5-0.7 = decent match, 0.3-0.5 = partial match, below 0.3 = poor fit. Be honest — don't inflate scores for weak matches."""
+Scoring guide: 0.9+ = excellent fit, 0.7-0.9 = strong match, 0.5-0.7 = decent match, 0.3-0.5 = partial match, below 0.3 = poor fit. Be honest — don't inflate scores for weak matches.
+IMPORTANT: Contract, freelance, and hourly roles are acceptable — do NOT flag them as deal-breakers. Only flag on-site-only, relocation, wrong seniority, or missing hard technical requirements.
+BACKEND/SOFTWARE ENGINEERING: The candidate is open to backend software engineering roles, especially Python-heavy ones. Do NOT penalize a match just because the candidate's current title is SRE — they have strong Python skills, API development experience, and have built production automation and agentic AI systems. Score Python/backend roles based on actual skill overlap, not title mismatch.
+STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or talent consultancy (not the actual employer), add "staffing_agency" to deal_breakers. Signs: company name includes words like Solutions, Staffing, Talent, Consulting, Search, Partners, Recruiting, Group; the description says "our client" or "on behalf of"; vague about the actual employer. Direct employers only — no middlemen."""
 
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -956,6 +1431,224 @@ def _basic_notes(job: Dict, compat: Dict) -> str:
     return "\n".join(lines)
 
 
+def _extract_hiring_manager(page) -> Optional[Dict[str, str]]:
+    """
+    Extract the job poster / hiring manager info from a LinkedIn job detail page.
+
+    Returns a dict with keys: name, headline, profile_url, compose_url
+    or None if no hiring team section is found.
+    """
+    return page.evaluate(
+        """() => {
+        const body = document.body ? document.body.innerText : '';
+        if (!body.includes('Meet the hiring team') && !body.includes('Job poster'))
+            return null;
+
+        const msgLink = document.querySelector(
+            'a[href*="messaging/compose"][href*="JOB_DETAILS"]'
+        );
+        if (!msgLink) return null;
+
+        let card = msgLink;
+        for (let i = 0; i < 10 && card; i++) {
+            const text = card.innerText || '';
+            if (text.includes('Job poster') || text.includes('Meet the hiring team'))
+                break;
+            card = card.parentElement;
+        }
+        if (!card) return null;
+
+        const profileLink = card.querySelector('a[href*="/in/"]');
+        const cardText = card.innerText;
+        const lines = cardText.split('\\n')
+            .map(function(l) { return l.trim(); })
+            .filter(function(l) { return l.length > 0; });
+
+        var name = '';
+        var headline = '';
+        for (var i = 0; i < lines.length; i++) {
+            var l = lines[i];
+            if (l.charAt(0) === '\\u2022' || l === 'Job poster'
+                || l === 'Message' || l === 'Connect'
+                || l.includes('Meet the hiring team')) continue;
+            if (!name) { name = l; continue; }
+            if (!headline && l !== name) { headline = l; break; }
+        }
+
+        return {
+            name: name,
+            headline: headline,
+            profile_url: profileLink ? profileLink.href.split('?')[0] : null,
+            compose_url: msgLink.href,
+        };
+    }"""
+    )
+
+
+def _ai_draft_hiring_message(
+    job: Dict, profile: "ApplicantProfile", poster_name: str
+) -> Optional[str]:
+    """Draft a short personalized message to the hiring manager using Claude."""
+    if not _AI_AVAILABLE:
+        return None
+    try:
+        client = _get_ai_client()
+        description = _sanitize_description(job.get("description", ""))[:2000]
+        prompt = f"""Write a short LinkedIn message (3 sentences) from a job applicant to the hiring manager / job poster.
+
+Applicant: {profile.full_name}, {profile.current_title or "engineer"} with {profile.years_experience or "several"} years of experience.
+Key skills: {", ".join(profile.specializations[:4]) if profile.specializations else "infrastructure engineering"}
+
+Job: {job.get("title")} at {job.get("company")}
+Poster name: {poster_name}
+Job description snippet: {description[:800]}
+
+Guidelines:
+- Start with "Hey <first name>," — that's the only greeting
+- Sentence 1: Say you applied for the role (use the exact title)
+- Sentence 2: ONE specific detail — a tool overlap, a similar problem you solved, or a concrete fact from your background that connects to the job. Not a summary of your whole career.
+- Sentence 3: A brief, natural closer — a question about the team/stack, or saying you'd love to chat. Keep it casual.
+- Do NOT start sentences with "I've spent the last N years". Do NOT list multiple skills. Pick ONE thing.
+- 3 sentences. Under 250 characters after the greeting.
+- Sound like a person dashing off a quick note, not crafting a pitch.
+- NEVER use: "excited", "passionate", "eager", "thrilled", "aligns", "resonates", "looking forward", "opportunity", "I believe", "sounds like", "exactly what", "wheelhouse", "culture", "I'd love to bring"
+- NO subject line, NO sign-off"""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        msg = response.content[0].text.strip()
+        # Strip any AI preamble, self-corrections, or extra lines
+        lines = msg.split("\n")
+        clean = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("*") or stripped.startswith("---"):
+                break  # AI started self-correcting
+            if stripped:
+                clean.append(stripped)
+        msg = " ".join(clean) if clean else msg
+        # Strip stale greeting prefixes
+        for prefix in ("Subject:", "Hi,", "Hello,"):
+            if msg.startswith(prefix):
+                msg = msg[len(prefix) :].strip()
+        return msg
+    except Exception as e:
+        log.warning(f"   AI hiring message draft failed: {e}")
+        return None
+
+
+def _send_hiring_manager_message(  # noqa: C901
+    page,
+    compose_url: str,
+    message: str,
+    poster_name: str,
+    job_title: str = "",
+    company: str = "",
+) -> str:
+    """
+    Navigate to the LinkedIn messaging compose URL and send a message.
+    Returns 'sent', 'failed', or an error description.
+    """
+    try:
+        page.goto(compose_url, wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_timeout(3000)
+
+        # Find the message textbox
+        textbox = page.query_selector('div.msg-form__contenteditable[role="textbox"]')
+        if not textbox:
+            # Fallback: any contenteditable with message-related label
+            textbox = page.query_selector('[role="textbox"][aria-label*="message" i]')
+        if not textbox:
+            log.warning("   Could not find message compose textbox")
+            return "failed: no textbox found"
+
+        # Check for subject line (InMail) and fill if present
+        subject_input = page.query_selector('input.msg-form__subject, input[name="subject"]')
+        if subject_input:
+            subject_input.click()
+            subj = f"Re: {job_title}" if job_title else "Re: your job posting"
+            subject_input.fill(subj)
+            page.wait_for_timeout(300)
+
+        # Type the message
+        textbox.click()
+        page.wait_for_timeout(300)
+        textbox.type(message, delay=20)
+        page.wait_for_timeout(500)
+
+        # Find and click the send button
+        send_btn = page.query_selector("button.msg-form__send-btn")
+        if not send_btn:
+            send_btn = page.query_selector('button[type="submit"]:has(svg)')
+        if not send_btn:
+            log.warning("   Could not find send button")
+            return "failed: no send button"
+
+        send_btn.click()
+        page.wait_for_timeout(2000)
+
+        log.info(f"   ✉️  Message sent to {poster_name}")
+        return "sent"
+    except Exception as exc:
+        log.warning(f"   Message send failed: {exc}")
+        return f"failed: {exc}"
+
+
+def _message_hiring_manager_after_apply(
+    job: Dict,
+    profile: "ApplicantProfile",
+    proxy: Optional[str] = None,
+) -> tuple:
+    """
+    After a successful application, check the job page for a hiring manager
+    and send a short personalized message.
+    Returns (status, message_text, poster_name) or (None, None, None) if skipped.
+    """
+    if not profile.message_hiring_manager:
+        return None, None, None
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None, None, None
+
+    with sync_playwright() as p:
+        browser, context, page, owns_browser = _playwright_context(p, proxy)
+        try:
+            page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(3000)
+
+            poster = _extract_hiring_manager(page)
+            if not poster or not poster.get("compose_url"):
+                log.info("   ℹ️  No hiring manager found for %s", job.get("title"))
+                return None, None, None
+
+            log.info(f"   👤 Found hiring manager: {poster['name']} — {poster.get('headline', '')}")
+
+            message = _ai_draft_hiring_message(job, profile, poster["name"])
+            if not message:
+                log.warning("   Could not draft message — skipping")
+                return None, None, None
+
+            log.info(f"   💬 Sending: {message[:80]}...")
+            status = _send_hiring_manager_message(
+                page,
+                poster["compose_url"],
+                message,
+                poster["name"],
+                job_title=job.get("title", ""),
+                company=job.get("company", ""),
+            )
+            return status, message, poster["name"]
+        finally:
+            page.close()
+            if owns_browser:
+                browser.close()
+
+
 DEBUG_DIR = DATA_DIR / "debug"
 
 
@@ -989,6 +1682,116 @@ def _dump_form_debug(page, job_id: str, reason: str) -> Optional[str]:
         return None
 
 
+def _extract_code_from_email_body(body: str) -> Optional[str]:
+    """Extract a verification code from an email body string."""
+    body_clean = re.sub(r"\s+", " ", body)
+    # Primary: "code <optional words> : CODE" — matches Greenhouse format
+    m = re.search(r"code[^:]{0,40}:\s*([A-Za-z0-9]{6,10})\b", body_clean)
+    if m:
+        return m.group(1)
+    # Fallback: isolated 8-char alphanumeric token near keywords
+    for m in re.finditer(r"\b([A-Za-z0-9]{8})\b", body_clean):
+        # Check the surrounding context (30 chars each side)
+        start = max(0, m.start() - 60)
+        context = body_clean[start : m.end() + 60].lower()
+        if any(kw in context for kw in ("code", "verify", "enter", "paste", "security")):
+            return m.group(1)
+    return None
+
+
+def _fetch_verification_code_from_gmail(  # noqa: C901
+    email_addr: str, app_password: str, max_wait: int = 60
+) -> Optional[str]:
+    """Poll Gmail via IMAP for a recent verification code email and extract the code.
+
+    Only considers UNSEEN emails from the last 5 minutes. Marks the email as
+    read after extraction so it won't be picked up again on retry.
+    Retries up to *max_wait* seconds waiting for a new email to arrive.
+    """
+    import email as email_mod
+    import email.utils
+    import imaplib
+    from datetime import timezone
+
+    search_queries = [
+        '(FROM "greenhouse-mail" SUBJECT "security code" UNSEEN)',
+        '(FROM "greenhouse" SUBJECT "security code" UNSEEN)',
+        '(FROM "no-reply" SUBJECT "verification code" UNSEEN)',
+        '(FROM "noreply" SUBJECT "security code" UNSEEN)',
+    ]
+    request_time = time.time()
+
+    deadline = time.time() + max_wait
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        if attempt > 1:
+            time.sleep(5)
+        try:
+            imap = imaplib.IMAP4_SSL("imap.gmail.com")
+            imap.login(email_addr, app_password)
+            imap.select("INBOX")
+
+            for query in search_queries:
+                _status, msg_ids = imap.search(None, query)
+                if not msg_ids or not msg_ids[0]:
+                    continue
+                # Check messages newest-first
+                for mid in reversed(msg_ids[0].split()):
+                    _status, msg_data = imap.fetch(mid, "(RFC822)")
+                    if not msg_data or not msg_data[0] or not isinstance(msg_data[0], tuple):
+                        continue
+                    raw = msg_data[0][1]
+                    msg = email_mod.message_from_bytes(raw)
+
+                    # Skip emails older than 5 minutes before we started
+                    date_str = msg.get("Date", "")
+                    if date_str:
+                        parsed = email.utils.parsedate_to_datetime(date_str)
+                        age = request_time - parsed.replace(tzinfo=timezone.utc).timestamp()
+                        if age > 300:  # older than 5 min
+                            continue
+
+                    # Extract body (prefer plain text, fall back to stripped HTML)
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            ct = part.get_content_type()
+                            if ct == "text/plain":
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    body = payload.decode("utf-8", errors="replace")
+                                    break
+                            elif ct == "text/html" and not body:
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    body = re.sub(
+                                        r"<[^>]+>", " ", payload.decode("utf-8", errors="replace")
+                                    )
+                    else:
+                        payload = msg.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode("utf-8", errors="replace")
+
+                    if not body:
+                        continue
+
+                    code = _extract_code_from_email_body(body)
+                    if code:
+                        # Mark as read so we don't re-use this code
+                        imap.store(mid, "+FLAGS", "\\Seen")
+                        log.info("   📧 Verification code from email: %s", code)
+                        imap.logout()
+                        return code
+
+            imap.logout()
+        except Exception as exc:
+            log.debug("Gmail IMAP attempt %d failed: %s", attempt, exc)
+
+    log.warning("   ⚠️ Could not retrieve verification code from email after %ds", max_wait)
+    return None
+
+
 def _dismiss_save_dialog(page) -> None:
     """Dismiss the 'Save this application?' dialog if it appeared."""
     try:
@@ -1019,7 +1822,7 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
     max_steps = 15
     stalled = 0
     for _step in range(max_steps):
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(random.randint(800, 2200))
 
         # Dismiss "Save this application?" dialog if it appeared
         _dismiss_save_dialog(page)
@@ -1046,11 +1849,34 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
         if submit_btn:
             _dismiss_all_typeaheads(page)
             _safe_click(submit_btn, page)
-            page.wait_for_timeout(2000)
-            success = page.query_selector(
+            # Wait for confirmation with retries — LinkedIn can be slow to render
+            success = None
+            confirmation_sel = (
                 "[aria-label='Your application was sent'], "
-                ".artdeco-modal__header:has-text('Application submitted')"
+                ".artdeco-modal__header:has-text('Application submitted'), "
+                "h2:has-text('application was sent'), "
+                ".artdeco-inline-feedback--success, "
+                "[data-test-modal-id='post-apply-modal']"
             )
+            try:
+                success = page.wait_for_selector(confirmation_sel, timeout=8000)
+            except Exception:
+                # Final fallback: check if form validation errors appeared (means it didn't submit)
+                validation_err = page.query_selector(
+                    ".artdeco-inline-feedback--error, "
+                    "[data-test-form-element-error], "
+                    ".fb-dash-form-element__error-text"
+                )
+                if validation_err:
+                    err_text = validation_err.inner_text()[:200]
+                    if owns_browser:
+                        _save_session(context)
+                    _dump_form_debug(
+                        page, job_id, f"Submit clicked but validation errors: {err_text}"
+                    )
+                    return f"failed: form validation errors after submit: {err_text}"
+                # No confirmation AND no errors — check once more
+                success = page.query_selector(confirmation_sel)
             if owns_browser:
                 _save_session(context)
             return "submitted" if success else "submitted (unconfirmed — check LinkedIn)"
@@ -1146,13 +1972,15 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
                 browser.close()
 
 
-def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:
-    """Answer all radio button groups (Yes/No fieldsets) on the current form page."""
+def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:  # noqa: C901
+    """Answer all radio button groups on the current form page."""
     # Find all fieldset-style radio groups via their container divs
     fieldsets = page.query_selector_all(
         "fieldset, "
         "div[data-test-form-element]:has(input[type='radio']), "
-        "div.fb-dash-form-element:has(input[type='radio'])"
+        "div.fb-dash-form-element:has(input[type='radio']), "
+        "div.ashby-application-form-field-entry:has(input[type='radio']), "
+        "div[class*='section']:has(input[type='radio'])"
     )
     for group in fieldsets:
         # Check if a radio is already selected in this group
@@ -1168,7 +1996,6 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:
             "span.fb-dash-form-element__label"
         )
         if not question_el:
-            # Fallback: get all text in the group that isn't "Yes" or "No"
             question_text = group.inner_text().strip().lower()
         else:
             question_text = question_el.inner_text().strip().lower()
@@ -1176,17 +2003,56 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:
         if not question_text:
             continue
 
-        # Determine the answer
-        answer = _determine_radio_answer(question_text, profile)
-
-        # Click the matching label
+        # Collect option labels and their text
         labels = group.query_selector_all("label")
-        for lbl in labels:
-            lbl_text = lbl.inner_text().strip().lower()
-            if lbl_text == answer:
-                lbl.click()
-                log.info(f"   📻 Radio '{question_text[:50]}' → '{answer}'")
-                break
+        if not labels:
+            continue
+        option_texts = [lbl.inner_text().strip() for lbl in labels]
+        option_lower = [t.lower() for t in option_texts]
+
+        # Check if this is a simple Yes/No group
+        is_yes_no = all(t.startswith("yes") or t.startswith("no") for t in option_lower if t)
+
+        if is_yes_no:
+            answer = _determine_radio_answer(question_text, profile)
+            # Match labels that START with yes/no (not exact match)
+            for i, lbl_text in enumerate(option_lower):
+                if lbl_text.startswith(answer):
+                    labels[i].click()
+                    log.info(f"   📻 Radio '{question_text[:50]}' → '{answer}'")
+                    break
+        elif _AI_AVAILABLE:
+            # Multi-choice: use AI to pick the best option
+            choices = "\n".join(f"  {i}: {t}" for i, t in enumerate(option_texts) if t)
+            ai_answer = _ai_answer_question(
+                f"{question_text}\n\nChoose one (reply with the number only):\n{choices}",
+                profile,
+            )
+            if ai_answer is not None:
+                # AI might return the number, the letter prefix, or the text
+                ai_clean = ai_answer.strip().lower().rstrip(".")
+                picked = None
+                # Try numeric index
+                try:
+                    idx = int(ai_clean)
+                    if 0 <= idx < len(labels):
+                        picked = idx
+                except ValueError:
+                    pass
+                # Try letter prefix match (a, b, c, d)
+                if picked is None and len(ai_clean) == 1 and ai_clean.isalpha():
+                    letter_idx = ord(ai_clean) - ord("a")
+                    if 0 <= letter_idx < len(labels):
+                        picked = letter_idx
+                # Try startswith match on option text
+                if picked is None:
+                    for i, t in enumerate(option_lower):
+                        if t.startswith(ai_clean[:20]) or ai_clean[:20] in t:
+                            picked = i
+                            break
+                if picked is not None:
+                    labels[picked].click()
+                    log.info(f"   📻 Radio '{question_text[:50]}' → '{option_texts[picked][:60]}'")
 
 
 def _determine_radio_answer(question: str, profile: ApplicantProfile) -> str:
@@ -1335,6 +2201,8 @@ def _dismiss_all_typeaheads(page) -> None:
 
 def _safe_click(element, page) -> None:
     """Click an element, falling back to JS click if Playwright's actionability check fails."""
+    # Brief pre-click pause — humans don't click at machine speed
+    page.wait_for_timeout(random.randint(200, 800))
     try:
         element.click(timeout=5000)
     except Exception:
@@ -1379,7 +2247,25 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
     if label_text:
         contact_value = _contact_value_for_label(label_text, profile)
         if contact_value:
-            inp.fill(contact_value)
+            # For intl-tel-input phone fields, use type() instead of fill()
+            is_iti_phone = False
+            try:
+                is_iti_phone = inp.evaluate(
+                    'el => !!el.closest(\'.iti, [class*="intl-tel-input"], [class*="iti--"]\')'
+                )
+            except Exception:  # noqa: S110
+                pass
+            if is_iti_phone:
+                # intl-tel-input auto-prepends the country code (+1 for US),
+                # so strip it and any formatting — type bare local digits only.
+                digits = re.sub(r"\D", "", contact_value)
+                if len(digits) == 11 and digits.startswith("1"):
+                    digits = digits[1:]  # strip US country code
+                inp.click()
+                inp.evaluate("el => el.value = ''")
+                inp.type(digits, delay=30)
+            else:
+                inp.fill(contact_value)
             _dismiss_typeahead(page, inp)
             return
 
@@ -1387,7 +2273,24 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
     if label_text:
         answer = _ai_answer_question(label_text, profile)
         if answer:
-            inp.fill(answer)
+            # For intl-tel-input phone fields, use type() instead of fill()
+            # because fill() gets intercepted by the widget
+            is_iti_phone = False
+            try:
+                is_iti_phone = inp.evaluate(
+                    'el => !!el.closest(\'.iti, [class*="intl-tel-input"], [class*="iti--"]\')'
+                )
+            except Exception:  # noqa: S110
+                pass
+            if is_iti_phone:
+                digits = re.sub(r"\D", "", answer)
+                if len(digits) == 11 and digits.startswith("1"):
+                    digits = digits[1:]
+                inp.click()
+                inp.evaluate("el => el.value = ''")
+                inp.type(digits, delay=30)
+            else:
+                inp.fill(answer)
             _dismiss_typeahead(page, inp)
 
 
@@ -1401,16 +2304,25 @@ def _get_field_label(page, element) -> str:
             const lbl = document.querySelector('label[for="' + CSS.escape(id) + '"]');
             if (lbl) return lbl.innerText;
         }
-        // Strategy 2: walk up to find a sibling or parent label
+        // Strategy 2: aria-labelledby
+        const lblBy = el.getAttribute('aria-labelledby');
+        if (lblBy) {
+            const ref = document.getElementById(lblBy);
+            if (ref) return ref.innerText;
+        }
+        // Strategy 3: walk up to find a sibling or parent label (LinkedIn + generic ATS)
         const container = el.closest('.artdeco-text-input, .fb-dash-form-element, '
-                                     + '[data-test-form-element], fieldset');
+                                     + '[data-test-form-element], fieldset, '
+                                     + '.form-group, [class*="form-field"], '
+                                     + '[class*="FormField"], [data-automation-id]');
         if (container) {
-            const lbl = container.querySelector('label');
+            const lbl = container.querySelector('label, legend');
             if (lbl) return lbl.innerText;
         }
-        // Strategy 3: preceding sibling label
+        // Strategy 4: preceding sibling label
         const prev = el.previousElementSibling;
-        if (prev && prev.tagName === 'LABEL') return prev.innerText;
+        if (prev && (prev.tagName === 'LABEL' || prev.tagName === 'LEGEND'))
+            return prev.innerText;
         return '';
     }""")
     if label_text:
@@ -1619,8 +2531,7 @@ def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[st
     """
     Use Claude to answer a screening question not found in profile.screening_answers.
 
-    Strategy: generate with Haiku (fast/cheap), then sanity-check the answer.
-    If it looks like prose or a refusal, escalate to Sonnet for a clean re-answer.
+    Uses Claude Sonnet for reliable, terse answers.
     """
     if not _AI_AVAILABLE:
         return None
@@ -1632,35 +2543,13 @@ def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[st
         client = _get_ai_client()
         prompt = _build_form_prompt(question, profile)
 
-        # First attempt: Haiku (fast, cheap)
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=60,
             system=_FORM_FILL_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
         answer = response.content[0].text.strip()
-
-        # Sanity check — escalate to Sonnet if the answer is bad
-        if _answer_looks_bad(answer):
-            log.info(f"   ⚠️  Haiku gave a bad answer for '{question[:50]}': {answer[:60]!r}")
-            log.info("   🔄 Escalating to Sonnet...")
-            correction_prompt = (
-                f"A previous model was asked to fill a form field and gave this bad answer:\n"
-                f'Field: "{question}"\n'
-                f'Bad answer: "{answer}"\n\n'
-                f"This is wrong because form fields need terse values, not sentences.\n"
-                f"Give the correct value. JUST the value, nothing else.\n\n"
-                f"{prompt}"
-            )
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=30,
-                system=_FORM_FILL_SYSTEM,
-                messages=[{"role": "user", "content": correction_prompt}],
-            )
-            answer = response.content[0].text.strip()
-            log.info(f"   ✅ Sonnet corrected → '{answer}'")
 
         # Final guard: still too long after correction
         if len(answer) > 100:
@@ -1676,6 +2565,1356 @@ def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[st
     except Exception as e:
         log.warning(f"   AI answer failed for '{question[:60]}': {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# External ATS form filler (Workday, Greenhouse, Lever, iCIMS, etc.)
+# ---------------------------------------------------------------------------
+
+_MAX_EXTERNAL_STEPS = 20
+
+_PAGE_CLASSIFIER_SYSTEM = (
+    "You classify job application web pages to determine what automated actions are needed. "
+    "Output ONLY valid JSON. Never add explanation or markdown."
+)
+
+
+def _is_login_wall(page) -> bool:
+    """Return True if the current page requires login or account creation."""
+    url = page.url.lower()
+    if any(p in url for p in ("login", "signin", "sign-in", "register", "/auth", "/sso")):
+        # Check for "continue as guest" / "apply without account" first
+        try:
+            guest_link = page.query_selector(
+                "a:has-text('Continue as guest'), a:has-text('Apply without account'), "
+                "a:has-text('Guest'), button:has-text('Continue as guest'), "
+                "button:has-text('Apply without'), a:has-text('continue without')"
+            )
+            if guest_link:
+                _safe_click(guest_link, page)
+                page.wait_for_timeout(2000)
+                return False
+        except Exception:  # noqa: S110
+            pass
+        return True
+
+    # Check for password field on the page
+    try:
+        password_field = page.query_selector("input[type='password']")
+        if password_field and password_field.is_visible():
+            # Double-check: a job form wouldn't have a password field
+            guest_link = page.query_selector(
+                "a:has-text('Continue as guest'), a:has-text('Apply without account'), "
+                "button:has-text('Continue as guest')"
+            )
+            if guest_link:
+                _safe_click(guest_link, page)
+                page.wait_for_timeout(2000)
+                return False
+            return True
+    except Exception:  # noqa: S110
+        pass
+
+    # Check page text for login/registration prompts
+    try:
+        body_text = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 3000) || ''")
+        login_phrases = [
+            "sign in to apply",
+            "log in to apply",
+            "create an account to apply",
+            "create account to apply",
+            "register to apply",
+            "sign in or create",
+            "log in or create",
+        ]
+        if any(p in body_text for p in login_phrases):
+            return True
+    except Exception:  # noqa: S110
+        pass
+
+    return False
+
+
+def _extract_page_snapshot(page, max_chars: int = 8000) -> str:
+    """Extract a compact text representation of all form fields on the current page."""
+    try:
+        snapshot = page.evaluate("""() => {
+            const lines = [];
+            const seen = new Set();
+
+            function getLabel(el) {
+                // label[for=id]
+                if (el.id) {
+                    const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                    if (lbl) return lbl.innerText.trim();
+                }
+                // aria-label
+                if (el.getAttribute('aria-label')) return el.getAttribute('aria-label').trim();
+                // aria-labelledby
+                const lblBy = el.getAttribute('aria-labelledby');
+                if (lblBy) {
+                    const ref = document.getElementById(lblBy);
+                    if (ref) return ref.innerText.trim();
+                }
+                // walk up to find label in parent
+                let parent = el.closest('fieldset, .form-group, [class*="form-field"], '
+                    + '[class*="FormField"], [data-automation-id]');
+                if (parent) {
+                    const lbl = parent.querySelector('label, legend, [class*="label"]');
+                    if (lbl && lbl !== el) return lbl.innerText.trim();
+                }
+                // preceding sibling label
+                const prev = el.previousElementSibling;
+                if (prev && (prev.tagName === 'LABEL' || prev.tagName === 'LEGEND'))
+                    return prev.innerText.trim();
+                // placeholder
+                if (el.placeholder) return el.placeholder.trim();
+                return '';
+            }
+
+            function isVisible(el) {
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                    && el.offsetWidth > 0;
+            }
+
+            const els = document.querySelectorAll(
+                'input, select, textarea, [role="combobox"], [role="listbox"], '
+                + '[contenteditable="true"], button[type="submit"], '
+                + 'button:not([type="button"]):not([aria-hidden="true"])'
+            );
+            for (const el of els) {
+                if (!isVisible(el)) continue;
+                const tag = el.tagName.toLowerCase();
+                const type = (el.getAttribute('type') || '').toLowerCase();
+                if (type === 'hidden') continue;
+
+                const key = el.id || el.name || el.getAttribute('data-automation-id') || '';
+                if (key && seen.has(key)) continue;
+                if (key) seen.add(key);
+
+                const label = getLabel(el);
+                const parts = ['[' + tag + (type ? ':' + type : '') + ']'];
+                if (label) parts.push('label="' + label.slice(0, 80) + '"');
+                if (el.placeholder) parts.push('placeholder="' + el.placeholder.slice(0, 50) + '"');
+                if (el.id) parts.push('id="' + el.id + '"');
+                if (el.name) parts.push('name="' + el.name + '"');
+                if (el.required) parts.push('required');
+                if (el.value && type !== 'password') parts.push('value="' + el.value.slice(0, 30) + '"');
+
+                if (tag === 'select') {
+                    const opts = Array.from(el.options)
+                        .filter(o => o.value && o.text.trim())
+                        .slice(0, 15)
+                        .map(o => o.text.trim());
+                    if (opts.length) parts.push('options="' + opts.join('|') + '"');
+                }
+
+                if (tag === 'button' || type === 'submit') {
+                    parts.push('text="' + (el.innerText || el.value || '').trim().slice(0, 40) + '"');
+                }
+
+                const accept = el.getAttribute('accept');
+                if (accept) parts.push('accept="' + accept + '"');
+
+                lines.push(parts.join(' '));
+                if (lines.length >= 60) break;
+            }
+            return lines.join('\\n');
+        }""")
+        return snapshot[:max_chars] if snapshot else ""
+    except Exception as exc:
+        log.debug("Failed to extract page snapshot: %s", exc)
+        return ""
+
+
+def _classify_page(snapshot: str, url: str) -> dict:
+    """Classify a page as login/form/confirmation/error using AI."""
+    default = {
+        "page_type": "form",
+        "has_required_login": False,
+        "has_file_upload": False,
+        "has_form_fields": True,
+        "notes": "classifier fallback",
+    }
+    if not _AI_AVAILABLE or not snapshot:
+        return default
+
+    prompt = f"""Classify this job application page.
+
+URL: {url}
+
+Interactive elements found on page:
+{snapshot}
+
+Return ONLY this JSON structure:
+{{
+  "page_type": "form" | "login" | "file_upload" | "confirmation" | "error" | "unknown",
+  "has_required_login": true | false,
+  "has_file_upload": true | false,
+  "has_form_fields": true | false,
+  "notes": "one sentence"
+}}
+
+Definitions:
+- login: the only fillable fields are email/password for account login
+- file_upload: primary purpose is uploading a resume or cover letter document
+- form: application fields are present (name, experience, work history, etc.)
+- confirmation: application was accepted; page says thank you / received
+- error: page shows an error, posting closed, or 404
+- job_search: this is a job SEARCH or LISTING page (search filters, job cards, "Displaying X of Y"), NOT an application form. Company career portals with search/filter UI are job_search, not form.
+A page may have has_file_upload=true AND has_form_fields=true."""
+
+    try:
+        client = _get_ai_client()
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            system=_PAGE_CLASSIFIER_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            result = json.loads(match.group())
+            # Ensure all expected keys exist
+            for key in default:
+                if key not in result:
+                    result[key] = default[key]
+            return result
+    except Exception as exc:
+        log.debug("Page classifier failed: %s", exc)
+
+    return default
+
+
+def _detect_success_or_confirmation(page, snapshot: str) -> bool:
+    """Heuristic check for application submission confirmation."""
+    try:
+        url = page.url.lower()
+        if any(p in url for p in ("confirmation", "thank-you", "thankyou", "success", "/complete")):
+            return True
+    except Exception:  # noqa: S110
+        pass
+
+    check_text = snapshot.lower() if snapshot else ""
+    if not check_text:
+        try:
+            check_text = page.evaluate(
+                "document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''"
+            )
+        except Exception:
+            return False
+
+    confirmation_phrases = [
+        "application submitted",
+        "application received",
+        "thank you for applying",
+        "thanks for applying",
+        "we've received your application",
+        "successfully submitted",
+        "application complete",
+        "you have applied",
+        "your application has been",
+    ]
+    return any(p in check_text for p in confirmation_phrases)
+
+
+def _find_file_upload_inputs(page) -> list:
+    """Find all file upload inputs on the page with their labels and IDs."""
+    uploads = []
+    try:
+        for inp in page.query_selector_all("input[type='file']"):
+            label = _get_field_label(page, inp)
+            accept = inp.get_attribute("accept") or ""
+            el_id = (inp.get_attribute("id") or "").lower()
+            el_name = (inp.get_attribute("name") or "").lower()
+            uploads.append(
+                {
+                    "element": inp,
+                    "label": label,
+                    "accept": accept,
+                    "id": el_id,
+                    "name": el_name,
+                }
+            )
+    except Exception as exc:
+        log.debug("File upload scan failed: %s", exc)
+    return uploads
+
+
+def _handle_file_uploads(page, profile: ApplicantProfile, cover_letter_path: str = "") -> int:
+    """Upload resume and cover letter to file inputs on the page. Returns count uploaded."""
+    uploads = _find_file_upload_inputs(page)
+    if not uploads:
+        return 0
+
+    filled = 0
+    resume_path = str(Path(profile.resume_path).expanduser()) if profile.resume_path else ""
+
+    resume_uploaded = False
+    cover_uploaded = False
+
+    for upload in uploads:
+        label = upload["label"]
+        el_id = upload.get("id", "")
+        el_name = upload.get("name", "")
+        element = upload["element"]
+        # Combine label, id, and name for matching
+        hints = f"{label} {el_id} {el_name}".lower()
+        try:
+            if any(kw in hints for kw in ("resume", "cv", "curriculum")):
+                if not resume_uploaded and resume_path and Path(resume_path).exists():
+                    element.set_input_files(resume_path)
+                    log.info(f"   📄 Uploaded resume: {Path(resume_path).name}")
+                    resume_uploaded = True
+                    filled += 1
+            elif any(kw in hints for kw in ("cover_letter", "cover letter", "coverletter")):
+                if not cover_uploaded and cover_letter_path and Path(cover_letter_path).exists():
+                    element.set_input_files(cover_letter_path)
+                    log.info(f"   📄 Uploaded cover letter: {Path(cover_letter_path).name}")
+                    cover_uploaded = True
+                    filled += 1
+            else:
+                # Unknown file field — upload resume if not yet uploaded, else cover letter
+                if not resume_uploaded and resume_path and Path(resume_path).exists():
+                    element.set_input_files(resume_path)
+                    log.info(f"   📄 Uploaded resume (inferred) for '{label[:40]}'")
+                    resume_uploaded = True
+                    filled += 1
+                elif not cover_uploaded and cover_letter_path and Path(cover_letter_path).exists():
+                    element.set_input_files(cover_letter_path)
+                    log.info(f"   📄 Uploaded cover letter (inferred) for '{label[:40]}'")
+                    cover_uploaded = True
+                    filled += 1
+        except Exception as exc:
+            log.debug("File upload failed for '%s': %s", label, exc)
+
+    return filled
+
+
+def _get_custom_dropdown_options(page, element) -> List[str]:  # noqa: C901
+    """Get options from a custom (non-native) dropdown component."""
+    try:
+        # Click to expand the dropdown
+        _safe_click(element, page)
+        page.wait_for_timeout(400)
+
+        options = []
+
+        # Strategy 1: aria-owns / aria-controls → scoped listbox
+        listbox_id = element.get_attribute("aria-owns") or element.get_attribute("aria-controls")
+        if listbox_id:
+            options = page.query_selector_all(f"#{listbox_id} [role='option']")
+
+        # Strategy 2: React-Select pattern — derive listbox ID from element ID
+        if not options:
+            el_id = element.get_attribute("id") or ""
+            if el_id:
+                rs_listbox_id = f"react-select-{el_id}-listbox"
+                options = page.query_selector_all(f"#{rs_listbox_id} [role='option']")
+
+        # Strategy 3: aria-activedescendant → find parent listbox
+        if not options:
+            active_desc = element.get_attribute("aria-activedescendant") or ""
+            if active_desc:
+                active_el = page.query_selector(f"#{active_desc}")
+                if active_el:
+                    options = page.evaluate(
+                        """(el) => {
+                        const listbox = el.closest('[role="listbox"]');
+                        if (!listbox) return [];
+                        return [...listbox.querySelectorAll('[role="option"]')].map(o => o.id || '');
+                    }""",
+                        active_el,
+                    )
+                    if options and isinstance(options[0], str):
+                        # Got IDs — resolve to elements
+                        options = [page.query_selector(f"#{oid}") for oid in options if oid]
+                        options = [o for o in options if o]
+
+        # Strategy 4: broad fallback — only listboxes NOT from phone-country widgets
+        if not options:
+            options = page.evaluate("""() => {
+                const results = [];
+                for (const lb of document.querySelectorAll('[role="listbox"]')) {
+                    if (lb.id && lb.id.includes('country-listbox')) continue;
+                    if (lb.classList.contains('iti__country-list')) continue;
+                    for (const opt of lb.querySelectorAll('[role="option"]')) {
+                        results.push(opt.innerText.trim());
+                    }
+                }
+                return results;
+            }""")
+            if options:
+                # These are text strings already
+                texts = [t for t in options[:20] if t]
+                if not texts:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(200)
+                return texts
+
+        if not options:
+            options = page.query_selector_all(
+                "[class*='menu'] [role='option'], [class*='dropdown'] li, [class*='menu'] li"
+            )
+
+        texts = []
+        for opt in options[:20]:
+            text = opt.inner_text().strip()
+            if text:
+                texts.append(text)
+        # Always close the dropdown after extracting options so that
+        # _fill_custom_dropdown's re-open click actually opens it.
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        return texts
+    except Exception as exc:
+        log.debug("Custom dropdown option extraction failed: %s", exc)
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return []
+
+
+def _fill_custom_dropdown(
+    page, element, label_text: str, options: List[str], profile: ApplicantProfile
+) -> bool:
+    """Fill a custom dropdown by asking AI to pick from the options."""
+    if not options:
+        return False
+
+    options_str = ", ".join(options[:20])
+    answer = _ai_answer_question(f"{label_text} (choose one: {options_str})", profile)
+    if not answer:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        return False
+
+    # Re-open the dropdown (may have closed after option extraction)
+    _safe_click(element, page)
+    page.wait_for_timeout(400)
+
+    # Find and click the matching option — scoped to this dropdown's listbox
+    try:
+        opt_elements = []
+        el_id = element.get_attribute("id") or ""
+        listbox_id = (
+            element.get_attribute("aria-owns") or element.get_attribute("aria-controls") or ""
+        )
+
+        # Try scoped selectors first
+        if listbox_id:
+            opt_elements = page.query_selector_all(f"#{listbox_id} [role='option']")
+        if not opt_elements and el_id:
+            rs_listbox_id = f"react-select-{el_id}-listbox"
+            opt_elements = page.query_selector_all(f"#{rs_listbox_id} [role='option']")
+        if not opt_elements:
+            # Fallback: all options excluding phone-country widgets
+            opt_elements = page.query_selector_all(
+                "[role='listbox']:not(.iti__country-list) [role='option']"
+            )
+
+        for opt_el in opt_elements:
+            opt_text = opt_el.inner_text().strip()
+            if answer.lower() in opt_text.lower() or opt_text.lower() in answer.lower():
+                _safe_click(opt_el, page)
+                log.info(f"   🤖 Custom dropdown '{label_text[:40]}' → '{opt_text}'")
+                return True
+
+        # No match found — close dropdown
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+    except Exception as exc:
+        log.debug("Custom dropdown selection failed: %s", exc)
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    return False
+
+
+def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int:  # noqa: C901
+    """
+    Fill all form fields on an external ATS page using generic selectors.
+    Reuses the existing field-filling pipeline. Returns count of fields filled.
+    """
+    filled = 0
+
+    # Radio buttons — reuse existing handler (selectors are generic enough)
+    try:
+        _answer_radio_buttons(page, profile)
+    except Exception as exc:
+        log.debug("External radio buttons failed: %s", exc)
+
+    # Native select dropdowns — reuse existing handler
+    try:
+        _answer_select_dropdowns(page, profile)
+    except Exception as exc:
+        log.debug("External select dropdowns failed: %s", exc)
+
+    # Textareas — fill with AI (the built-in handler only matches exact screening_answers)
+    try:
+        for textarea in page.query_selector_all("textarea"):
+            try:
+                if textarea.input_value():
+                    continue
+                if not textarea.is_visible():
+                    continue
+            except Exception:
+                continue
+            label_text = _get_field_label(page, textarea)
+            if not label_text:
+                continue
+            _check_field_label(label_text)
+            answer = _ai_answer_question(label_text, profile)
+            if answer:
+                textarea.fill(answer)
+                filled += 1
+    except ApplicationAbortError:
+        raise
+    except Exception as exc:
+        log.debug("External textareas failed: %s", exc)
+
+    # Checkboxes — reuse existing handler
+    try:
+        _check_mandatory_checkboxes(page)
+    except Exception as exc:
+        log.debug("External checkboxes failed: %s", exc)
+
+    # Custom dropdowns (non-native, ARIA-based)
+    # Skip phone country-code widgets (intl-tel-input) and location autocompletes
+    _SKIP_COMBOBOX_IDS = {"iti-0__search-input", "iti-1__search-input", "candidate-location"}
+    _SKIP_COMBOBOX_CLASSES = {"iti__search-input"}
+    try:
+        for combo in page.query_selector_all("[role='combobox']"):
+            combo_id = combo.get_attribute("id") or ""
+            combo_cls = combo.get_attribute("class") or ""
+            # Skip intl-tel-input phone widgets
+            if combo_id in _SKIP_COMBOBOX_IDS or any(
+                c in combo_cls for c in _SKIP_COMBOBOX_CLASSES
+            ):
+                continue
+            # Skip location autocomplete inputs (geocoding, not a fixed dropdown)
+            aria_controls = combo.get_attribute("aria-controls") or ""
+            if "country-listbox" in aria_controls:
+                continue
+            # Check if already filled — React-Select input_value() is unreliable,
+            # so also check for a visible single-value container or placeholder text
+            try:
+                if combo.input_value():
+                    continue
+            except Exception:
+                pass
+            try:
+                already_filled = page.evaluate(
+                    """(el) => {
+                    // Walk up to the React-Select value container or control
+                    // IMPORTANT: use "value-container" or "control", NOT just "container"
+                    // because "select__input-container" is a narrow inner wrapper
+                    let container = el.closest(
+                        '[class*="value-container"], [class*="control"], '
+                        + '[class*="select-shell"], [class*="-container"]:not([class*="input-container"])'
+                    );
+                    if (!container) container = el.parentElement?.parentElement?.parentElement;
+                    if (!container) return false;
+                    // Check for single-value indicator (React-Select renders a div with the selected text)
+                    const singleValue = container.querySelector('[class*="singleValue"], [class*="single-value"]');
+                    if (singleValue && singleValue.textContent.trim()) return true;
+                    // Check if placeholder is present — if it is, the field is NOT filled
+                    const placeholder = container.querySelector('[class*="placeholder"]');
+                    if (placeholder) return false;
+                    // No singleValue and no placeholder — ambiguous, assume not filled
+                    return false;
+                }""",
+                    combo,
+                )
+                if already_filled:
+                    continue
+            except Exception:
+                pass
+            label = _get_field_label(page, combo)
+            if not label:
+                continue
+            _check_field_label(label)
+            options = _get_custom_dropdown_options(page, combo)
+            if options:
+                if _fill_custom_dropdown(page, combo, label, options, profile):
+                    filled += 1
+    except Exception as exc:
+        log.debug("External custom dropdowns failed: %s", exc)
+
+    # Div-based custom selects (Greenhouse, Lever, etc.) — these are clickable divs
+    # that open a listbox but don't have role='combobox' on an input element.
+    # Common patterns: [aria-haspopup='listbox'], [class*='select'][class*='control']
+    try:
+        custom_selects = page.query_selector_all(
+            "[aria-haspopup='listbox']:not([role='combobox']), "
+            "[class*='select__control'], "
+            "[class*='SelectControl'], "
+            "[data-testid*='select']"
+        )
+        for cs in custom_selects:
+            try:
+                if not cs.is_visible():
+                    continue
+                # Check if already has a selected value (no placeholder visible)
+                has_value = cs.evaluate("""el => {
+                    const sv = el.querySelector('[class*="singleValue"], [class*="single-value"]');
+                    if (sv && sv.textContent.trim()) return true;
+                    const text = el.textContent.trim();
+                    if (text && !text.match(/^Select/i) && text !== '--') return true;
+                    return false;
+                }""")
+                if has_value:
+                    continue
+                label = _get_field_label(page, cs)
+                if not label:
+                    continue
+                _check_field_label(label)
+                # Click to open and extract options
+                _safe_click(cs, page)
+                page.wait_for_timeout(400)
+                opts = page.query_selector_all("[role='option']:visible")
+                if not opts:
+                    opts = page.query_selector_all("[role='listbox'] [role='option']")
+                opt_texts = [o.inner_text().strip() for o in opts[:30] if o.inner_text().strip()]
+                if opt_texts:
+                    answer = _ai_answer_question(
+                        f"{label} (choose one: {', '.join(opt_texts[:20])})", profile
+                    )
+                    if answer:
+                        for opt_el in opts:
+                            opt_text = opt_el.inner_text().strip()
+                            if (
+                                answer.lower() in opt_text.lower()
+                                or opt_text.lower() in answer.lower()
+                            ):
+                                _safe_click(opt_el, page)
+                                log.info(f"   🤖 Custom select '{label[:40]}' → '{opt_text}'")
+                                filled += 1
+                                break
+                        else:
+                            page.keyboard.press("Escape")
+                            page.wait_for_timeout(200)
+                    else:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(200)
+                else:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(200)
+            except ApplicationAbortError:
+                raise
+            except Exception as exc:
+                log.debug("Custom select failed: %s", exc)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.debug("Div-based custom selects failed: %s", exc)
+
+    # Text/number/email/tel/url inputs
+    for inp in page.query_selector_all(
+        "input[type='text'], input[type='number'], input[type='email'], "
+        "input[type='tel'], input[type='url'], input:not([type]), "
+        "input.artdeco-text-input--input"
+    ):
+        try:
+            if inp.input_value():
+                continue
+            inp_type = (inp.get_attribute("type") or "text").lower()
+            if inp_type in ("hidden", "file", "radio", "checkbox", "submit", "password", "search"):
+                continue
+            # Skip combobox inputs — already handled by the custom dropdown loop
+            if inp.get_attribute("role") == "combobox":
+                continue
+            # Skip intl-tel-input country *search* inputs (iti__search-input),
+            # but NOT the main phone input (iti__tel-input).
+            inp_id = inp.get_attribute("id") or ""
+            inp_cls = inp.get_attribute("class") or ""
+            if "iti__search-input" in inp_cls or "iti-search" in inp_id:
+                continue
+            if not inp.is_visible():
+                continue
+            # Check if this input is inside an intl-tel-input container —
+            # these phone widgets have their own hidden input that holds the real value
+            is_iti = inp.evaluate("""el => {
+                const wrapper = el.closest('.iti, [class*="intl-tel-input"], [class*="iti--"]');
+                if (!wrapper) return false;
+                // The actual value might be in a hidden input sibling
+                const hiddenInput = wrapper.querySelector('input[type="hidden"]');
+                if (hiddenInput && hiddenInput.value) return true;
+                // Or check if the visible input has the phone number rendered
+                // (intl-tel-input uses the same input but may not update .value properly)
+                return false;
+            }""")
+            if is_iti:
+                continue
+        except Exception:
+            continue
+
+        label_text = _get_field_label(page, inp)
+        if not label_text or label_text in ("type", "type type", "type type required"):
+            continue
+        # Skip verification/security code fields — these are filled by
+        # _fetch_verification_code_from_gmail after the submit attempt.
+        lt_lower = label_text.lower()
+        if any(
+            kw in lt_lower
+            for kw in (
+                "security code",
+                "verification code",
+                "verify code",
+                "verification code was sent",
+            )
+        ):
+            continue
+
+        try:
+            _fill_input_field(inp, label_text, page, profile)
+            filled += 1
+        except ApplicationAbortError:
+            raise
+        except Exception as exc:
+            log.debug("Failed to fill input '%s': %s", label_text[:40], exc)
+
+    # Date inputs
+    for inp in page.query_selector_all("input[type='date']"):
+        label_text = ""
+        try:
+            if inp.input_value():
+                continue
+            label_text = _get_field_label(page, inp)
+            if not label_text:
+                continue
+            _check_field_label(label_text)
+            answer = _ai_answer_question(f"{label_text} (format: YYYY-MM-DD)", profile)
+            if answer:
+                inp.fill(answer)
+                filled += 1
+        except ApplicationAbortError:
+            raise
+        except Exception as exc:
+            log.debug("Date field failed for '%s': %s", label_text, exc)
+
+    # Contenteditable fields (rich text editors)
+    for el in page.query_selector_all("[contenteditable='true']"):
+        label_text = ""
+        try:
+            if el.inner_text().strip():
+                continue
+            label_text = _get_field_label(page, el)
+            if not label_text:
+                continue
+            _check_field_label(label_text)
+            answer = _ai_answer_question(label_text, profile)
+            if answer:
+                el.fill(answer)
+                filled += 1
+        except ApplicationAbortError:
+            raise
+        except Exception as exc:
+            log.debug("Contenteditable failed for '%s': %s", label_text, exc)
+
+    return filled
+
+
+def _find_navigation_button(page):  # noqa: C901
+    """Find the Next/Continue/Submit button on an external form page.
+    Returns (role, element) where role is 'submit', 'next', or 'none'."""
+    # Priority: submit > next/continue
+    submit_texts = [
+        "Submit Application",
+        "Submit application",
+        "Submit",
+        "Apply",
+        "Send Application",
+        "Complete Application",
+        "Finish",
+        "Apply Now",
+        "Submit & Continue",
+        "Apply for this job",
+        "Confirm",
+        "Submit my application",
+    ]
+    next_texts = [
+        "Next",
+        "Continue",
+        "Next Step",
+        "Proceed",
+        "Save and Continue",
+        "Save & Continue",
+        "Save and Next",
+        "Review",
+        "Review Application",
+        "Preview",
+        "Go to next step",
+        "Save & Next",
+        "Next step",
+    ]
+
+    for text in submit_texts:
+        try:
+            btn = page.query_selector(f"button:has-text('{text}')")
+            if btn and btn.is_visible():
+                return ("submit", btn)
+        except Exception:
+            continue
+
+    # Also check input[type='submit']
+    try:
+        btn = page.query_selector("input[type='submit']")
+        if btn and btn.is_visible():
+            return ("submit", btn)
+    except Exception:
+        pass
+
+    try:
+        btn = page.query_selector("button[type='submit']")
+        if btn and btn.is_visible():
+            # Check it's not a login submit
+            text = (btn.inner_text() or "").strip().lower()
+            if text not in ("sign in", "log in", "login"):
+                return ("submit", btn)
+    except Exception:
+        pass
+
+    for text in next_texts:
+        try:
+            btn = page.query_selector(f"button:has-text('{text}')")
+            if btn and btn.is_visible():
+                return ("next", btn)
+        except Exception:
+            continue
+
+    # Try anchor-based buttons (submit texts first, then next texts)
+    for text in submit_texts:
+        try:
+            btn = page.query_selector(f"a:has-text('{text}')")
+            if btn and btn.is_visible():
+                return ("submit", btn)
+        except Exception:
+            continue
+    for text in next_texts:
+        try:
+            btn = page.query_selector(f"a:has-text('{text}')")
+            if btn and btn.is_visible():
+                return ("next", btn)
+        except Exception:  # noqa: S112
+            continue
+
+    # Try div[role='button'] (some ATS frameworks use styled divs)
+    for text in submit_texts:
+        try:
+            btn = page.query_selector(f"div[role='button']:has-text('{text}')")
+            if btn and btn.is_visible():
+                return ("submit", btn)
+        except Exception:  # noqa: S112
+            continue
+    for text in next_texts:
+        try:
+            btn = page.query_selector(f"div[role='button']:has-text('{text}')")
+            if btn and btn.is_visible():
+                return ("next", btn)
+        except Exception:  # noqa: S112
+            continue
+
+    # Last resort: any visible button with submit-like aria-label
+    try:
+        btn = page.query_selector(
+            "button[aria-label*='submit' i], "
+            "button[aria-label*='apply' i], "
+            "button[data-action='submit'], "
+            "[role='button'][aria-label*='submit' i]"
+        )
+        if btn and btn.is_visible():
+            return ("submit", btn)
+    except Exception:  # noqa: S110
+        pass
+
+    # AI vision fallback: screenshot the page and ask Claude to find the button
+    if _AI_AVAILABLE:
+        result = _ai_find_navigation_button(page)
+        if result:
+            return result
+
+    return ("none", None)
+
+
+def _ai_find_navigation_button(page):
+    """Use Claude vision to identify a submit/next button from a screenshot."""
+    import base64
+
+    try:
+        screenshot_bytes = page.screenshot(type="jpeg", quality=60)
+        b64 = base64.b64encode(screenshot_bytes).decode()
+
+        client = _get_ai_client()
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=150,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": b64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "This is a job application form page. Find the primary action button "
+                                "to advance (Submit, Apply, Next, Continue, etc). "
+                                "Reply with ONLY the exact visible button text, or NONE if no such button exists. "
+                                "Ignore login, cancel, save-for-later, and back buttons."
+                            ),
+                        },
+                    ],
+                }
+            ],
+        )
+        button_text = response.content[0].text.strip().strip('"').strip("'")
+        log.info(f"   👁️ AI vision found button: '{button_text}'")
+
+        if not button_text or button_text.upper() == "NONE":
+            return None
+
+        # Try to find the element by its text
+        for selector in [
+            f"button:has-text('{button_text}')",
+            f"a:has-text('{button_text}')",
+            f"[role='button']:has-text('{button_text}')",
+            f"input[value='{button_text}']",
+        ]:
+            try:
+                btn = page.query_selector(selector)
+                if btn and btn.is_visible():
+                    role = (
+                        "submit"
+                        if any(
+                            w in button_text.lower()
+                            for w in ("submit", "apply", "finish", "complete", "confirm")
+                        )
+                        else "next"
+                    )
+                    return (role, btn)
+            except Exception:  # noqa: S112
+                continue
+
+        # Fallback: use page.get_by_text for fuzzy matching
+        try:
+            locator = page.get_by_text(button_text, exact=False)
+            if locator.count() > 0:
+                el = locator.first.element_handle()
+                if el and el.is_visible():
+                    role = (
+                        "submit"
+                        if any(
+                            w in button_text.lower()
+                            for w in ("submit", "apply", "finish", "complete", "confirm")
+                        )
+                        else "next"
+                    )
+                    return (role, el)
+        except Exception:  # noqa: S110
+            pass
+
+    except Exception as exc:
+        log.debug("AI vision button detection failed: %s", exc)
+
+    return None
+
+
+def _navigate_external_form(  # noqa: C901
+    page,
+    profile: ApplicantProfile,
+    job: dict,
+    cover_letter_path: str,
+    owns_browser: bool,
+    context,
+    dry_run: bool = False,
+) -> str:
+    """Navigate a multi-step external application form. Returns status string."""
+    stalled = 0
+    no_button_stalled = 0
+    prev_snapshot = ""
+    fields_filled_total = 0
+
+    for step in range(_MAX_EXTERNAL_STEPS):
+        page.wait_for_timeout(1500)
+
+        # Login wall check on every step (some sites redirect mid-form)
+        if _is_login_wall(page):
+            log.info(f"   🔒 Requires account: {page.url[:60]}")
+            return "skipped: requires account"
+
+        # Take snapshot and check for success
+        snapshot = _extract_page_snapshot(page)
+
+        if _detect_success_or_confirmation(page, snapshot):
+            log.info(f"   ✅ Application confirmed after {step + 1} steps")
+            return "submitted"
+
+        # Stall detection
+        if snapshot == prev_snapshot:
+            stalled += 1
+            if stalled >= 3:
+                _dump_form_debug(page, job.get("id", ""), "External form stalled")
+                return "failed: external form stuck (same page for 3 steps)"
+        else:
+            stalled = 0
+        prev_snapshot = snapshot
+
+        # Classify the page
+        classification = _classify_page(snapshot, page.url)
+        log.debug("   Page classification: %s", classification.get("notes", ""))
+
+        if classification["page_type"] == "login" or classification.get("has_required_login"):
+            return "skipped: requires account"
+
+        if classification["page_type"] == "confirmation":
+            return "submitted"
+
+        if classification["page_type"] == "error":
+            _dump_form_debug(page, job.get("id", ""), "Error page")
+            return "failed: ATS error page"
+
+        if classification["page_type"] == "job_search":
+            log.info("   ⏭  Page is a job search/listing page, not an application form")
+            return "failed: landed on job search page instead of application form"
+
+        # Also catch job search pages by URL pattern (fast path, no AI needed)
+        _url_lower = page.url.lower()
+        if any(
+            pattern in _url_lower
+            for pattern in ("/jobs/search", "/search?query=", "/job-search", "kiosk+mode")
+        ):
+            log.info("   ⏭  URL looks like a job search page, skipping")
+            return "failed: landed on job search page instead of application form"
+
+        # Detect email verification code prompt and handle it before filling fields
+        if profile.gmail_app_password:
+            has_verification_prompt = page.evaluate("""() => {
+                const text = document.body ? document.body.innerText : '';
+                const lower = text.toLowerCase();
+                return lower.includes('verification code was sent')
+                    || (lower.includes('security code') && lower.includes('character code'))
+                    || lower.includes('enter the') && lower.includes('code to confirm');
+            }""")
+            if has_verification_prompt:
+                code = _fetch_verification_code_from_gmail(
+                    profile.email, profile.gmail_app_password, max_wait=45
+                )
+                if code:
+                    # Find the security code input — try multiple strategies
+                    code_input = None
+                    # Strategy 1: Playwright's label-based locator
+                    for label_text in ("Security code", "Verification code", "Security Code"):
+                        try:
+                            loc = page.get_by_label(label_text)
+                            if loc.count() > 0 and loc.first.is_visible():
+                                code_input = loc.first
+                                break
+                        except Exception:
+                            continue
+                    # Strategy 2: attribute-based selector
+                    if not code_input:
+                        code_input = page.query_selector(
+                            "input[name*='security' i], input[name*='code' i], "
+                            "input[name*='verif' i], input[placeholder*='code' i], "
+                            "input[aria-label*='code' i], input[aria-label*='security' i]"
+                        )
+                    # Strategy 3: empty visible text input near "code" label
+                    if not code_input:
+                        for inp in page.query_selector_all("input[type='text'], input:not([type])"):
+                            try:
+                                if inp.is_visible() and not inp.input_value():
+                                    label = _get_field_label(page, inp)
+                                    if label and "code" in label.lower():
+                                        code_input = inp
+                                        break
+                            except Exception:
+                                continue
+                    if code_input:
+                        # Use click + clear + type for security code inputs
+                        # (React controlled components reject programmatic fill)
+                        code_input.click()
+                        code_input.evaluate("el => el.value = ''")
+                        code_input.type(code, delay=50)
+                        page.wait_for_timeout(500)
+                        log.info(f"   📧 Filled verification code: {code}")
+                        submit_btn = page.query_selector(
+                            "button[type='submit'], input[type='submit'], button:has-text('Submit')"
+                        )
+                        if submit_btn:
+                            _safe_click(submit_btn, page)
+                        else:
+                            _btn_role, _btn_el = _find_navigation_button(page)
+                            if _btn_el:
+                                _safe_click(_btn_el, page)
+                        page.wait_for_timeout(5000)
+                        post_snap = _extract_page_snapshot(page)
+                        if _detect_success_or_confirmation(page, post_snap):
+                            log.info("   ✅ Application submitted after verification code")
+                            if owns_browser:
+                                _save_session(context)
+                            return "submitted"
+                        log.warning("   ⚠️ Verification code may have been rejected")
+                        _dump_form_debug(page, job.get("id", ""), "Verification code rejected")
+                        return "failed: verification code rejected"
+                else:
+                    log.warning("   ⚠️ Could not retrieve verification code from email")
+                    _dump_form_debug(page, job.get("id", ""), "Verification code not received")
+                    return "failed: verification code not received from email"
+
+        # Handle file uploads
+        if classification.get("has_file_upload"):
+            n = _handle_file_uploads(page, profile, cover_letter_path)
+            fields_filled_total += n
+
+        # Fill form fields
+        if classification.get("has_form_fields") or classification["page_type"] == "form":
+            n = _answer_external_screening_questions(page, profile)
+            fields_filled_total += n
+            if n > 0:
+                stalled = 0  # filling fields counts as progress
+            log.info(f"   Step {step + 1}: filled {n} fields on {page.url[:60]}")
+
+        if dry_run:
+            return "dry_run"
+
+        # Find and click navigation button
+        btn_role, btn_el = _find_navigation_button(page)
+
+        if btn_role == "none":
+            no_button_stalled += 1
+            if no_button_stalled >= 3:
+                _dump_form_debug(page, job.get("id", ""), "No nav button found")
+                return "failed: no Next/Submit button found"
+            page.wait_for_timeout(2000)
+            continue
+
+        no_button_stalled = 0
+        _safe_click(btn_el, page)
+        page.wait_for_timeout(2000)
+
+        if btn_role == "submit":
+            page.wait_for_timeout(3000)
+            post_snapshot = _extract_page_snapshot(page)
+            if _detect_success_or_confirmation(page, post_snapshot):
+                if owns_browser:
+                    _save_session(context)
+                return "submitted"
+            # Check for validation errors after submit attempt
+            try:
+                validation_errors = page.evaluate("""() => {
+                    const errors = [];
+                    // Common error selectors across ATS systems
+                    const errorEls = document.querySelectorAll(
+                        '[class*="error"]:not([style*="display: none"]):not(.iti__hide), '
+                        + '[class*="Error"]:not([style*="display: none"]), '
+                        + '[role="alert"], '
+                        + '.field-error, .form-error, .invalid-feedback, '
+                        + '[aria-invalid="true"]'
+                    );
+                    for (const el of errorEls) {
+                        const text = el.textContent.trim();
+                        if (text && text.length < 200 && !errors.includes(text))
+                            errors.push(text);
+                    }
+                    return errors.slice(0, 5);
+                }""")
+                if validation_errors:
+                    error_summary = "; ".join(validation_errors)
+                    log.warning(f"   ⚠️ Validation errors: {error_summary[:200]}")
+                    # Detect human verification (CAPTCHA, email verification codes)
+                    es_lower = error_summary.lower()
+                    email_code_patterns = (
+                        "verification code",
+                        "security code",
+                        "verify you're a human",
+                        "confirm you're a human",
+                    )
+                    captcha_patterns = ("captcha", "recaptcha", "hcaptcha")
+                    if any(bp in es_lower for bp in email_code_patterns):
+                        # Try to fetch the code from Gmail via IMAP
+                        if profile.gmail_app_password:
+                            code = _fetch_verification_code_from_gmail(
+                                profile.email, profile.gmail_app_password, max_wait=45
+                            )
+                            if code:
+                                # Find the security code input
+                                code_input = None
+                                for lbl in ("Security code", "Verification code"):
+                                    try:
+                                        loc = page.get_by_label(lbl)
+                                        if loc.count() > 0 and loc.first.is_visible():
+                                            code_input = loc.first
+                                            break
+                                    except Exception:
+                                        continue
+                                if not code_input:
+                                    code_input = page.query_selector(
+                                        "input[name*='security' i], input[name*='code' i], "
+                                        "input[name*='verif' i], input[placeholder*='code' i], "
+                                        "input[aria-label*='code' i]"
+                                    )
+                                if not code_input:
+                                    for inp in page.query_selector_all(
+                                        "input[type='text'], input:not([type])"
+                                    ):
+                                        try:
+                                            if inp.is_visible() and not inp.input_value():
+                                                lbl = _get_field_label(page, inp)
+                                                if lbl and "code" in lbl.lower():
+                                                    code_input = inp
+                                                    break
+                                        except Exception:
+                                            continue
+                                if code_input:
+                                    code_input.click()
+                                    code_input.evaluate("el => el.value = ''")
+                                    code_input.type(code, delay=50)
+                                    page.wait_for_timeout(500)
+                                    log.info(f"   📧 Filled verification code: {code}")
+                                    # Click submit again
+                                    _btn_role, _btn_el = _find_navigation_button(page)
+                                    if _btn_el:
+                                        _safe_click(_btn_el, page)
+                                        page.wait_for_timeout(5000)
+                                    # Check for success immediately
+                                    post_code_snap = _extract_page_snapshot(page)
+                                    if _detect_success_or_confirmation(page, post_code_snap):
+                                        log.info(
+                                            "   ✅ Application submitted after verification code"
+                                        )
+                                        if owns_browser:
+                                            _save_session(context)
+                                        return "submitted"
+                                    # Code might be wrong/expired — bail rather than loop
+                                    log.warning("   ⚠️ Verification code did not resolve the error")
+                                    _dump_form_debug(
+                                        page,
+                                        job.get("id", ""),
+                                        f"Verification code failed: {error_summary[:200]}",
+                                    )
+                                    return (
+                                        f"failed: verification code rejected: {error_summary[:200]}"
+                                    )
+                                else:
+                                    log.warning("   ⚠️ Got code but couldn't find input field")
+                        else:
+                            log.info(
+                                "   ℹ️  Email verification required but no gmail_app_password "
+                                "configured in profile"
+                            )
+                        _dump_form_debug(
+                            page,
+                            job.get("id", ""),
+                            f"Human verification required: {error_summary[:200]}",
+                        )
+                        return f"failed: human verification required: {error_summary[:200]}"
+                    if any(bp in es_lower for bp in captcha_patterns):
+                        _dump_form_debug(
+                            page,
+                            job.get("id", ""),
+                            f"CAPTCHA required: {error_summary[:200]}",
+                        )
+                        return f"failed: captcha required: {error_summary[:200]}"
+                    # If we can't fill any more fields, bail out
+                    if fields_filled_total == 0 or stalled >= 2:
+                        _dump_form_debug(
+                            page, job.get("id", ""), f"Validation errors: {error_summary[:200]}"
+                        )
+                        return f"failed: form validation errors: {error_summary[:200]}"
+            except Exception:  # noqa: S110
+                pass
+            # Submit clicked but no confirmation — continue loop to check next state
+
+    _dump_form_debug(page, job.get("id", ""), "Exceeded max external form steps")
+    return f"failed: exceeded max form steps ({_MAX_EXTERNAL_STEPS})"
+
+
+def submit_external_apply(
+    job: Dict,
+    profile: ApplicantProfile,
+    cover_letter_path: str = "",
+    proxy: Optional[str] = None,
+    dry_run: bool = False,
+) -> str:
+    """
+    Submit an external job application using AI-powered form filling.
+    Works on any ATS (Workday, Greenhouse, Lever, iCIMS, etc.).
+    Returns status string.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError("Playwright not installed") from None
+
+    with sync_playwright() as p:
+        browser, context, page, owns_browser = _playwright_context(p, proxy)
+        try:
+            page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2000)
+
+            # If we're still on LinkedIn, find and click the external "Apply" button
+            if "linkedin.com" in page.url:
+                _ensure_logged_in(page, job["url"])
+                page.wait_for_timeout(2000)
+
+                apply_btn = page.query_selector(
+                    "a[aria-label*='Apply on company'], "
+                    "a[aria-label*='Apply on external'], "
+                    "button.jobs-apply-button:not(:has-text('Easy Apply')), "
+                    "a.jobs-apply-button, "
+                    "button:has-text('Apply'):not(:has-text('Easy'))"
+                )
+                if not apply_btn:
+                    return "failed: no Apply button found on LinkedIn job page"
+
+                _safe_click(apply_btn, page)
+                page.wait_for_timeout(3000)
+
+                # Handle new tab (external URLs often open in new tab)
+                if len(context.pages) > 1:
+                    page.close()
+                    page = context.pages[-1]
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception:  # noqa: S110
+                        pass
+
+            # Immediate login wall check
+            if _is_login_wall(page):
+                log.info(f"   🔒 Skipped: requires account ({page.url[:60]})")
+                return "skipped: requires account"
+
+            return _navigate_external_form(
+                page, profile, job, cover_letter_path, owns_browser, context, dry_run=dry_run
+            )
+
+        except ApplicationAbortError as e:
+            log.warning(f"   🛡️  Application aborted: {e}")
+            return f"aborted: {e}"
+        except Exception as e:
+            return f"failed: {e}"
+        finally:
+            for p_page in list(context.pages):
+                try:
+                    p_page.close()
+                except Exception:  # noqa: S110
+                    pass
+            if owns_browser:
+                browser.close()
 
 
 def load_log() -> List[Dict]:
@@ -1723,15 +3962,23 @@ def already_applied(log_entries: List[Dict]) -> set:
     }
 
 
-def auto_apply_workflow(
+def auto_apply_workflow(  # noqa: C901
     params: JobSearchParams,
     profile: ApplicantProfile,
     max_applications: int = 10,
     min_match_score: float = 0.30,
     dry_run: bool = False,
     proxy: Optional[str] = None,
+    source: str = "linkedin",
 ) -> Dict:
-    log.info("🚀 LinkedIn Easy Apply workflow")
+    source_labels = {
+        "linkedin": "LinkedIn",
+        "remoteok": "RemoteOK",
+        "hn": "HackerNews Who's Hiring",
+        "biotech": "Biotech/Pharma Careers",
+    }
+    label = source_labels.get(source, source)
+    log.info(f"🚀 {label} job apply workflow (Easy Apply + External)")
     log.info(f"   dry_run={dry_run}  max={max_applications}  min_score={min_match_score}")
     log.info(f"   AI: {'enabled' if _AI_AVAILABLE else 'disabled (install anthropic)'}\n")
 
@@ -1739,14 +3986,23 @@ def auto_apply_workflow(
     if applied_urls:
         log.info(f"   Skipping {len(applied_urls)} already-applied jobs\n")
 
-    log.info(f"🔍 Searching LinkedIn for '{params.title}'...")
+    log.info(f"🔍 Searching {label} for '{params.title}'...")
     try:
-        jobs = search_linkedin(params, proxy=proxy)
+        if source == "remoteok":
+            jobs = search_remoteok(params)
+        elif source == "hn":
+            jobs = search_hn_whos_hiring(params)
+        elif source == "biotech":
+            jobs = search_biotech(params)
+        else:
+            jobs = search_linkedin(params, proxy=proxy)
     except RuntimeError as e:
         log.error(f"❌ Search failed: {e}")
         return {"applications": [], "total": 0, "jobs_found": 0}
 
-    log.info(f"✅ {len(jobs)} Easy Apply jobs found\n")
+    easy_count = sum(1 for j in jobs if j.get("apply_type") == "easy_apply")
+    ext_count = sum(1 for j in jobs if j.get("apply_type") == "external")
+    log.info(f"✅ {len(jobs)} jobs found ({easy_count} Easy Apply, {ext_count} external)\n")
     if not jobs:
         return {"applications": [], "total": 0, "jobs_found": 0}
 
@@ -1789,11 +4045,13 @@ def auto_apply_workflow(
         cover_letter = ai_generate_cover_letter(job, profile)
         cl_file.write_text(cover_letter)
 
+        apply_type = job.get("apply_type", "easy_apply")
+
         if dry_run:
-            log.info("   ⚠️  Dry run — not submitted")
+            log.info(f"   ⚠️  Dry run — not submitted ({apply_type})")
             status = "dry_run"
-        else:
-            log.info("   Submitting...")
+        elif apply_type == "easy_apply":
+            log.info("   Submitting via Easy Apply...")
             status = submit_easy_apply(job, profile, proxy=proxy)
             icon = (
                 "✅"
@@ -1805,9 +4063,44 @@ def auto_apply_workflow(
                 else "❌"
             )
             log.info(f"   {icon} {status}")
+        else:
+            log.info("   Submitting via external apply...")
+            status = submit_external_apply(
+                job,
+                profile,
+                cover_letter_path=str(cl_file),
+                proxy=proxy,
+                dry_run=dry_run,
+            )
+            icon = (
+                "✅"
+                if status == "submitted"
+                else "🔒"
+                if "requires account" in status
+                else "🛡️ "
+                if status.startswith("aborted")
+                else "⚠️ "
+                if "unconfirmed" in status
+                else "❌"
+            )
+            log.info(f"   {icon} {status}")
 
         # AI-generated notes for the log
         notes = ai_build_notes(job, compat)
+
+        # Message hiring manager after successful application
+        msg_status = None
+        msg_text = None
+        msg_poster = None
+        if status.startswith("submitted") and profile.message_hiring_manager:
+            try:
+                msg_status, msg_text, msg_poster = _message_hiring_manager_after_apply(
+                    job, profile, proxy=proxy
+                )
+                if msg_status:
+                    log.info(f"   📨 Hiring manager message: {msg_status}")
+            except Exception as exc:
+                log.info("   ⚠️  Hiring manager message failed: %s", exc)
 
         applications.append(
             {
@@ -1817,16 +4110,24 @@ def auto_apply_workflow(
                 "url": job["url"],
                 "location": job.get("location", ""),
                 "status": status,
+                "apply_type": job.get("apply_type", "easy_apply"),
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "match_score": compat["match_score"],
                 "reasoning": compat.get("reasoning", ""),
                 "deal_breakers": compat.get("deal_breakers", []),
                 "cover_letter_path": str(cl_file),
                 "notes": notes,
+                "hiring_manager_messaged": msg_status,
+                "hiring_manager_message_text": msg_text,
+                "hiring_manager_name": msg_poster,
             }
         )
         applied += 1
-        time.sleep(3)
+        # Human-like delay between applications (longer for Easy Apply to avoid spam flags)
+        if job.get("easy_apply"):
+            _human_delay(base=8.0, jitter=12.0)  # 8-20s, occasionally 20-35s
+        else:
+            _human_delay(base=3.0, jitter=5.0)  # 3-8s for external ATS
 
     save_log(applications)
 
@@ -1835,6 +4136,9 @@ def auto_apply_workflow(
     log.info(f"   Jobs found:    {len(jobs)}")
     submitted = sum(1 for a in applications if a["status"].startswith("submitted"))
     log.info(f"   Submitted:     {submitted}")
+    skipped_account = sum(1 for a in applications if a["status"] == "skipped: requires account")
+    if skipped_account:
+        log.info(f"   Skipped (login): {skipped_account}")
     aborted = sum(1 for a in applications if a["status"].startswith("aborted"))
     if aborted:
         log.info(f"   Aborted:       {aborted} (injection/suspicious fields detected)")
@@ -2159,7 +4463,9 @@ def _maybe_sync_profile(profile_path: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LinkedIn Easy Apply automation")
+    parser = argparse.ArgumentParser(
+        description="LinkedIn job apply automation (Easy Apply + External)"
+    )
     parser.add_argument("--profile", default=str(DATA_DIR / "profile.json"))
     parser.add_argument(
         "--setup",
@@ -2198,6 +4504,19 @@ def main():
         "(all-time and past 2 weeks). No applications submitted. Data used by dashboard.",
     )
     parser.add_argument("--proxy", default=None)
+    parser.add_argument(
+        "--external-url",
+        default=None,
+        help="Apply to a specific external job URL (any ATS)",
+    )
+    parser.add_argument("--job-title", default=None, help="Job title for --external-url")
+    parser.add_argument("--company", default=None, help="Company name for --external-url")
+    parser.add_argument(
+        "--source",
+        choices=["linkedin", "remoteok", "hn", "biotech", "all"],
+        default="linkedin",
+        help="Job source: linkedin, remoteok, hn, biotech (pharma career sites), or all",
+    )
     args = parser.parse_args()
 
     if args.setup:
@@ -2223,6 +4542,27 @@ def main():
         else:
             remote = args.remote
         market_snapshot(titles, location=args.location, remote=remote, proxy=args.proxy)
+        return
+
+    if args.external_url:
+        _raw = json.loads(Path(args.profile).expanduser().read_text())
+        profile = ApplicantProfile.from_dict(_raw)
+        job = {
+            "id": f"ext_{hashlib.sha256(args.external_url.encode()).hexdigest()[:12]}",
+            "url": args.external_url,
+            "title": args.job_title or "Unknown",
+            "company": args.company or "Unknown",
+            "description": "",
+            "apply_type": "external",
+        }
+        log.info(f"🌐 Applying to external URL: {args.external_url}")
+        status = submit_external_apply(
+            job,
+            profile,
+            proxy=args.proxy,
+            dry_run=args.dry_run,
+        )
+        log.info(f"Result: {status}")
         return
 
     # Auto-sync profile if stale (>7 days since last sync)
@@ -2253,36 +4593,46 @@ def main():
     else:
         remote = args.remote
 
-    for i, title in enumerate(titles):
-        if i > 0:
-            delay = 8 + (i * 2)  # Increasing delay between searches to avoid bot detection
-            log.info(f"⏳ Waiting {delay}s before next search...")
-            time.sleep(delay)
+    sources = ["linkedin", "remoteok", "hn", "biotech"] if args.source == "all" else [args.source]
 
-        params = JobSearchParams(
-            title=title,
-            location=args.location,
-            remote=remote,
-            keywords_excluded=_criteria.get("keywords_excluded", []),
-            company_blacklist=_criteria.get("company_blacklist", []),
-        )
+    for source in sources:
+        if len(sources) > 1:
+            log.info(f"\n{'=' * 50}")
+            log.info(f"📡 Source: {source.upper()}")
+            log.info(f"{'=' * 50}\n")
 
-        try:
-            auto_apply_workflow(
-                params=params,
-                profile=profile,
-                max_applications=max_applications,
-                min_match_score=min_score,
-                dry_run=args.dry_run,
-                proxy=args.proxy,
+        for i, title in enumerate(titles):
+            if i > 0:
+                delay = random.randint(15, 30) + (i * random.randint(3, 8))
+                log.info(f"⏳ Waiting {delay}s before next search...")
+                time.sleep(delay)
+
+            params = JobSearchParams(
+                title=title,
+                location=args.location,
+                remote=remote,
+                max_age_days=_criteria.get("max_age_days", 14),
+                keywords_excluded=_criteria.get("keywords_excluded", []),
+                company_blacklist=_criteria.get("company_blacklist", []),
             )
-        except RuntimeError as exc:
-            if "session expired" in str(exc).lower():
-                log.error(
-                    f"❌ Session expired during '{title}' — stopping. Re-authenticate and retry."
+
+            try:
+                auto_apply_workflow(
+                    params=params,
+                    profile=profile,
+                    max_applications=max_applications,
+                    min_match_score=min_score,
+                    dry_run=args.dry_run,
+                    proxy=args.proxy,
+                    source=source,
                 )
-                break
-            log.error(f"❌ Error during '{title}': {exc}")
+            except RuntimeError as exc:
+                if "session expired" in str(exc).lower():
+                    log.error(
+                        f"❌ Session expired during '{title}' — stopping. Re-authenticate and retry."
+                    )
+                    break
+                log.error(f"❌ Error during '{title}': {exc}")
             continue
 
 
