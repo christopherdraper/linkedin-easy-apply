@@ -70,7 +70,8 @@ def _build_market_stats(search_entries):
         title = entry.get("search_title", "Unknown")
         ts = _parse_ts(entry.get("timestamp", ""))
         history[title].append(entry)
-        if title not in latest or (ts and ts > _parse_ts(latest[title].get("timestamp", ""))):
+        existing_ts = _parse_ts(latest[title].get("timestamp", "")) if title in latest else None
+        if title not in latest or (ts and (not existing_ts or ts > existing_ts)):
             latest[title] = entry
 
     # Sort roles by total results descending

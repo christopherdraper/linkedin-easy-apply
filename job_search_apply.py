@@ -662,9 +662,7 @@ def _extract_results_count(page) -> Optional[int]:
     if not text:
         return None
     # Parse "1,234 results" → 1234
-    import re as _re
-
-    match = _re.search(r"([\d,]+)", text)
+    match = re.search(r"([\d,]+)", text)
     if match:
         return int(match.group(1).replace(",", ""))
     return None
@@ -729,15 +727,17 @@ def market_snapshot(
                 recent_count = _extract_results_count(page)
                 log.info(f"   Past 2 weeks:  {recent_count or 'unknown'}")
 
-                snapshots.append({
-                    "search_title": title,
-                    "source": "linkedin",
-                    "total_results": total_count,
-                    "past_two_weeks_results": recent_count,
-                    "location": location or "",
-                    "remote": remote,
-                    "timestamp": now,
-                })
+                snapshots.append(
+                    {
+                        "search_title": title,
+                        "source": "linkedin",
+                        "total_results": total_count,
+                        "past_two_weeks_results": recent_count,
+                        "location": location or "",
+                        "remote": remote,
+                        "timestamp": now,
+                    }
+                )
 
             if owns_browser:
                 _save_session(context)
@@ -1697,15 +1697,22 @@ def save_log(entries: List[Dict]):
 
 def save_search_log(entry: Dict):
     """Append a search-result entry to search_log.json."""
+    import fcntl
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    existing: List[Dict] = []
-    if SEARCH_LOG_FILE.exists():
-        try:
-            existing = json.loads(SEARCH_LOG_FILE.read_text())
-        except Exception:
-            existing = []
-    existing.append(entry)
-    SEARCH_LOG_FILE.write_text(json.dumps(existing, indent=2))
+    fd = open(SEARCH_LOG_FILE, "a+")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.seek(0)
+        raw = fd.read()
+        existing: List[Dict] = json.loads(raw) if raw.strip() else []
+        existing.append(entry)
+        fd.seek(0)
+        fd.truncate()
+        fd.write(json.dumps(existing, indent=2))
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 def already_applied(log_entries: List[Dict]) -> set:

@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LinkedIn Easy Apply — Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js" crossorigin="anonymous"></script>
     <style>
         :root {
             --bg: #0f1117;
@@ -486,9 +487,9 @@ if (marketStats.roles.length > 0) {
         datasets.push({
             label: role,
             data: entries.map(e => ({
-                x: e.timestamp ? e.timestamp.slice(0, 10) : '',
+                x: e.timestamp ? new Date(e.timestamp) : null,
                 y: e.total_results || 0,
-            })),
+            })).filter(d => d.x),
             borderColor: colors[i % colors.length],
             backgroundColor: colors[i % colors.length].replace('1)', '0.1)'),
             fill: false,
@@ -516,7 +517,8 @@ if (marketStats.roles.length > 0) {
             },
             scales: {
                 x: {
-                    type: 'category',
+                    type: 'time',
+                    time: { unit: 'day', tooltipFormat: 'MMM d, yyyy' },
                     ticks: { color: chartTextColor },
                     grid: { color: chartGridColor },
                 },
@@ -600,6 +602,25 @@ function sortTable(colIdx) {
 
     rows.forEach(r => tbody.appendChild(r));
 }
+
+// -- Auto-refresh every 60s --
+setInterval(() => {
+    fetch('/api/data')
+        .then(r => r.json())
+        .then(data => {
+            // Update stat cards
+            const cards = document.querySelectorAll('.stat-card .value');
+            if (cards.length >= 6) {
+                cards[0].textContent = data.total_applications;
+                cards[1].textContent = data.status_counts['Submitted'] || 0;
+                cards[2].textContent = data.status_counts['Failed'] || 0;
+                cards[3].textContent = data.status_counts['Aborted'] || 0;
+                cards[4].textContent = data.status_counts['Dry Run'] || 0;
+                cards[5].textContent = data.total_snapshots;
+            }
+        })
+        .catch(() => {});
+}, 60000);
 </script>
 
 </body>
