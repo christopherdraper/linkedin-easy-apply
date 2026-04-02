@@ -29,5 +29,5 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 
 [tool.bandit]
-skips = ["B110", "B112"]  # try/except/pass and try/except/continue are intentional in browser automation
+skips = ["B110", "B112", "B310", "B311"]  # B110/B112: try/except/pass intentional; B310: urlopen on hardcoded API URLs; B311: random for timing jitter, not crypto
 exclude_dirs = ["tests"]

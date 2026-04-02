@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -43,6 +44,27 @@ CDP_URL = "http://localhost:9222"
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Human-like timing helpers
+# ---------------------------------------------------------------------------
+_USER_AGENTS = [
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
+]
+
+
+def _human_delay(base: float = 2.0, jitter: float = 3.0) -> None:
+    """Sleep for a randomized duration to mimic human pacing."""
+    delay = base + random.uniform(0, jitter)
+    # Occasionally add a longer "thinking" pause (10% chance)
+    if random.random() < 0.10:
+        delay += random.uniform(5, 15)
+    time.sleep(delay)
+
 
 # ---------------------------------------------------------------------------
 # Prompt injection defence
@@ -177,6 +199,7 @@ class ApplicantProfile:
     requires_sponsorship: bool = False
     screening_answers: Dict[str, str] = field(default_factory=dict)
     gmail_app_password: Optional[str] = None
+    message_hiring_manager: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "ApplicantProfile":
@@ -229,6 +252,9 @@ class ApplicantProfile:
                 p.get("application_settings", {}).get("gmail_app_password")
                 if p.get("application_settings", {}).get("auto_fetch_verification_codes")
                 else None
+            ),
+            message_hiring_manager=bool(
+                p.get("application_settings", {}).get("message_hiring_manager")
             ),
         )
 
@@ -467,14 +493,28 @@ def _playwright_context(p, proxy: Optional[str] = None):
     if proxy:
         opts["proxy"] = {"server": proxy}
 
-    browser = p.chromium.launch(headless=True)
+    # Use new headless mode ("new" arg) — harder to fingerprint than old headless
+    browser = p.chromium.launch(
+        headless=True,
+        args=[
+            "--headless=new",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+    # Randomize viewport slightly so sessions aren't identical
+    vp_w = random.randint(1260, 1380)
+    vp_h = random.randint(780, 900)
     context = browser.new_context(
         **opts,
-        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 800},
+        user_agent=random.choice(_USER_AGENTS),
+        viewport={"width": vp_w, "height": vp_h},
         locale="en-US",
         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
     )
+    # Remove the webdriver navigator flag that automation detectors check
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    """)
     page = context.new_page()
     log.debug("Launched standalone headless Chromium (cookie file)")
     return browser, context, page, True
@@ -579,6 +619,424 @@ def _ensure_logged_in(page, target_url: str) -> None:
     page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
     if "authwall" in page.url or "uas/login" in page.url:
         raise RuntimeError("Login succeeded but still redirected to auth wall")
+
+
+def search_remoteok(params: JobSearchParams) -> List[Dict]:
+    """
+    Search RemoteOK's public JSON API for matching jobs.
+    No auth required. Returns jobs in the same dict format as search_linkedin.
+    """
+    import urllib.request
+
+    tag = params.title.lower().replace(" ", "-")
+    api_url = f"https://remoteok.com/api?tag={tag}"
+    req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"   RemoteOK API error: {e}")
+        return []
+
+    # First item is metadata, skip it
+    listings = data[1:] if len(data) > 1 else []
+
+    jobs = []
+    blacklist_lower = [c.lower() for c in params.company_blacklist]
+    excluded_lower = [kw.lower() for kw in params.keywords_excluded]
+
+    for item in listings:
+        company = item.get("company", "")
+        title = item.get("position", "")
+        desc = item.get("description", "")
+        url = item.get("url", "")
+        apply_url = item.get("apply_url") or url
+
+        if not apply_url or not title:
+            continue
+
+        # Apply blacklist
+        if company.lower() in blacklist_lower:
+            continue
+
+        # Apply keyword exclusions
+        title_lower = title.lower()
+        if any(kw in title_lower for kw in excluded_lower):
+            continue
+
+        # Age filter
+        if params.max_age_days:
+            date_str = item.get("date", "")
+            if date_str:
+                try:
+                    from datetime import datetime, timezone
+
+                    posted = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    age_days = (datetime.now(timezone.utc) - posted).days
+                    if age_days > params.max_age_days:
+                        continue
+                except Exception:
+                    pass
+
+        if url and not url.startswith("http"):
+            url = f"https://remoteok.com{url}"
+        if apply_url and not apply_url.startswith("http"):
+            apply_url = f"https://remoteok.com{apply_url}"
+
+        jobs.append(
+            {
+                "id": f"rok_{item.get('id', '')}",
+                "url": apply_url,
+                "listing_url": url,
+                "title": title,
+                "company": company,
+                "description": _sanitize_description(desc[:5000]),
+                "location": "Remote",
+                "easy_apply": False,
+                "apply_type": "external",
+                "source": "remoteok",
+            }
+        )
+
+    return jobs
+
+
+def search_hn_whos_hiring(params: JobSearchParams) -> List[Dict]:
+    """
+    Search HackerNews 'Who is hiring?' threads via the Algolia API.
+    Finds the current month's thread, fetches comments, and filters for relevant jobs.
+    """
+    import urllib.request
+
+    # Find the most recent "Who is hiring?" thread (sort by date to get current month)
+    search_url = (
+        "https://hn.algolia.com/api/v1/search_by_date?"
+        "query=%22who%20is%20hiring%22&tags=story"
+        "&hitsPerPage=5"
+    )
+    req = urllib.request.Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"   HN Algolia search error: {e}")
+        return []
+
+    # Find the thread from this month or last month
+    thread_id = None
+    for hit in data.get("hits", []):
+        title = hit.get("title", "").lower()
+        if "who is hiring?" in title and "freelancer" not in title and "show hn" not in title:
+            thread_id = hit.get("objectID")
+            log.info(f"   Found HN thread: {hit.get('title')} (id: {thread_id})")
+            break
+
+    if not thread_id:
+        log.warning("   Could not find a recent 'Who is hiring?' thread")
+        return []
+
+    # Fetch all comments from the thread
+    comments_url = (
+        f"https://hn.algolia.com/api/v1/search?tags=comment,story_{thread_id}&hitsPerPage=500"
+    )
+    req = urllib.request.Request(comments_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"   HN comments fetch error: {e}")
+        return []
+
+    comments = data.get("hits", [])
+    log.info(f"   Fetched {len(comments)} comments from HN thread")
+
+    # Filter comments for relevant jobs
+    search_terms = [
+        t.lower()
+        for t in (
+            params.title.split()
+            + ["sre", "devops", "platform", "infrastructure", "mlops", "ai engineer"]
+        )
+    ]
+    blacklist_lower = [c.lower() for c in params.company_blacklist]
+    excluded_lower = [kw.lower() for kw in params.keywords_excluded]
+
+    jobs = []
+    for comment in comments:
+        text = comment.get("comment_text") or ""
+        text_lower = text.lower()
+
+        # Skip if no relevant keywords
+        if not any(term in text_lower for term in search_terms):
+            continue
+
+        # Skip if excluded keywords found
+        if any(kw in text_lower for kw in excluded_lower):
+            continue
+
+        # Must mention remote
+        if "remote" not in text_lower:
+            continue
+
+        # Extract company name from first line (HN convention: "Company | Role | Location | ...")
+        first_line = text.split("\n")[0].split("<")[0].strip()
+        parts = [p.strip() for p in re.split(r"\s*[|]\s*", first_line)]
+        company = parts[0] if parts else "Unknown"
+        # Clean HTML tags from company name
+        company = re.sub(r"<[^>]+>", "", company).strip()
+
+        if company.lower() in blacklist_lower:
+            continue
+
+        # Try to find an apply URL in the comment
+        urls = re.findall(r'href="(https?://[^"]+)"', text)
+        if not urls:
+            urls = re.findall(r"(https?://[^\s<\"']+)", text)
+        apply_url = urls[0] if urls else ""
+
+        # Clean HTML for description
+        clean_text = re.sub(r"<[^>]+>", " ", text)
+        clean_text = re.sub(r"\s+", " ", clean_text).strip()
+
+        hn_url = f"https://news.ycombinator.com/item?id={comment.get('objectID', '')}"
+
+        jobs.append(
+            {
+                "id": f"hn_{comment.get('objectID', '')}",
+                "url": apply_url or hn_url,
+                "listing_url": hn_url,
+                "title": " | ".join(parts[1:3]) if len(parts) > 1 else params.title,
+                "company": company,
+                "description": _sanitize_description(clean_text[:5000]),
+                "location": "Remote",
+                "easy_apply": False,
+                "apply_type": "external",
+                "source": "hackernews",
+            }
+        )
+
+    return jobs
+
+
+# ── Biotech / Pharma career sites (Workday API) ─────────────────────────
+_BIOTECH_WORKDAY_SITES = [
+    # (display_name, tenant, wd_instance, site_path)
+    ("Eli Lilly", "lilly", "wd5", "LLY"),
+    ("Amgen", "amgen", "wd1", "Careers"),
+    ("Pfizer", "pfizer", "wd1", "PfizerCareers"),
+    ("BMS", "bristolmyerssquibb", "wd5", "BMS"),
+    ("AstraZeneca", "astrazeneca", "wd3", "Careers"),
+    ("Sanofi", "sanofi", "wd3", "SanofiCareers"),
+    ("Roche", "roche", "wd3", "roche-ext"),
+    ("Biogen", "biibhr", "wd3", "external"),
+    ("Takeda", "takeda", "wd3", "External"),
+]
+
+
+def _workday_search(tenant: str, wd: str, site: str, query: str, limit: int = 20) -> List[Dict]:
+    """Hit a Workday career site's public JSON API."""
+    import urllib.request
+
+    url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
+    payload = json.dumps(
+        {
+            "appliedFacets": {},
+            "limit": limit,
+            "offset": 0,
+            "searchText": query,
+        }
+    ).encode()
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"   Workday API error ({tenant}): {e}")
+        return {}
+
+
+def _workday_job_detail(tenant: str, wd: str, site: str, external_path: str) -> Dict:
+    """Fetch full job description from Workday job detail endpoint."""
+    import urllib.request
+
+    url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}{external_path}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return {}
+
+
+def search_biotech(params: JobSearchParams) -> List[Dict]:
+    """
+    Search major biotech/pharma company career sites (Eli Lilly competitors)
+    via their Workday public APIs. Filters for remote US roles only.
+    """
+    blacklist_lower = [c.lower() for c in params.company_blacklist]
+    excluded_lower = [kw.lower() for kw in params.keywords_excluded]
+
+    # Append "remote" to search query so Workday prioritises remote-eligible postings
+    remote_query = f"{params.title} remote"
+
+    all_jobs = []
+
+    for display_name, tenant, wd, site in _BIOTECH_WORKDAY_SITES:
+        if display_name.lower() in blacklist_lower:
+            continue
+
+        log.info(f"   🏥 Searching {display_name} careers...")
+
+        data = _workday_search(tenant, wd, site, remote_query, limit=20)
+        postings = data.get("jobPostings", [])
+        total = data.get("total", 0)
+
+        if not postings:
+            continue
+
+        log.info(f"      {display_name}: {total} results for '{params.title}'")
+
+        for posting in postings:
+            title = posting.get("title", "")
+            location_text = posting.get("locationsText", "")
+            external_path = posting.get("externalPath", "")
+            posted_on = posting.get("postedOn", "")
+
+            if not title or not external_path:
+                continue
+
+            # Quick pre-filter: skip obviously non-US/non-remote locations
+            loc_lower = location_text.lower()
+            non_us_only = [
+                "india",
+                "hyderabad",
+                "china",
+                "shanghai",
+                "portugal",
+                "dublin",
+                "bogota",
+                "barcelona",
+                "singapore",
+                "japan",
+                "tokyo",
+                "germany",
+                "france",
+                "paris",
+                "london",
+                "brazil",
+                "mexico",
+                "australia",
+                "canada",
+                "buenos aires",
+                "seoul",
+                "taiwan",
+                "hong kong",
+                "philippines",
+                "vietnam",
+                "zurich",
+                "basel",
+                "copenhagen",
+                "amsterdam",
+            ]
+            # Only skip if location is EXCLUSIVELY non-US (not "2 Locations" etc)
+            if any(x in loc_lower for x in non_us_only) and "location" not in loc_lower:
+                continue
+
+            # Title exclusions
+            title_lower = title.lower()
+            if any(kw in title_lower for kw in excluded_lower):
+                continue
+
+            # Age filter (Workday gives "Posted X Days Ago" or "Posted Today")
+            if params.max_age_days and posted_on:
+                if "30+" in posted_on:
+                    continue
+                days_match = re.search(r"(\d+)\s*Days?\s*Ago", posted_on, re.IGNORECASE)
+                if days_match:
+                    age = int(days_match.group(1))
+                    if age > params.max_age_days:
+                        continue
+
+            base_url = f"https://{tenant}.{wd}.myworkdayjobs.com/{site}"
+            apply_url = f"{base_url}{external_path}"
+
+            # Fetch full description and check remoteType in detail
+            detail = _workday_job_detail(tenant, wd, site, external_path)
+            description = ""
+            is_remote = False
+            detail_location = location_text
+
+            if detail:
+                info = detail.get("jobPostingInfo", {})
+                description = info.get("jobDescription", "")
+                # Clean HTML tags
+                description = re.sub(r"<[^>]+>", " ", description)
+                description = re.sub(r"\s+", " ", description).strip()
+
+                remote_type = (info.get("remoteType") or "").lower()
+                detail_location = info.get("location", location_text)
+                country = info.get("country", {})
+                country_name = (
+                    country.get("descriptor", "") if isinstance(country, dict) else str(country)
+                )
+
+                is_remote = remote_type == "remote"
+                is_hybrid = "hybrid" in remote_type
+                is_us = "united states" in country_name.lower()
+
+                # Lilly: allow hybrid (user is in Indianapolis)
+                # Everyone else: remote only
+                lilly_exception = display_name == "Eli Lilly" and is_hybrid
+                if not is_remote and not lilly_exception:
+                    continue
+                if country_name and not is_us:
+                    continue
+
+            job_id = (
+                posting.get("bulletFields", [""])[0]
+                or hashlib.sha256(apply_url.encode()).hexdigest()[:12]
+            )
+
+            all_jobs.append(
+                {
+                    "id": f"bio_{tenant}_{job_id}",
+                    "url": apply_url,
+                    "listing_url": apply_url,
+                    "title": title,
+                    "company": display_name,
+                    "description": _sanitize_description(description[:5000]),
+                    "location": detail_location,
+                    "easy_apply": False,
+                    "apply_type": "external",
+                    "source": "biotech",
+                }
+            )
+
+        # Small delay between companies to be polite
+        time.sleep(random.uniform(0.5, 1.5))
+
+    return all_jobs
 
 
 def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> List[Dict]:
@@ -697,7 +1155,9 @@ Rate how well this job matches the candidate. Respond with ONLY valid JSON, no o
 }}
 
 Scoring guide: 0.9+ = excellent fit, 0.7-0.9 = strong match, 0.5-0.7 = decent match, 0.3-0.5 = partial match, below 0.3 = poor fit. Be honest — don't inflate scores for weak matches.
-IMPORTANT: Contract, freelance, and hourly roles are acceptable — do NOT flag them as deal-breakers. Only flag on-site-only, relocation, wrong seniority, or missing hard technical requirements."""
+IMPORTANT: Contract, freelance, and hourly roles are acceptable — do NOT flag them as deal-breakers. Only flag on-site-only, relocation, wrong seniority, or missing hard technical requirements.
+BACKEND/SOFTWARE ENGINEERING: The candidate is open to backend software engineering roles, especially Python-heavy ones. Do NOT penalize a match just because the candidate's current title is SRE — they have strong Python skills, API development experience, and have built production automation and agentic AI systems. Score Python/backend roles based on actual skill overlap, not title mismatch.
+STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or talent consultancy (not the actual employer), add "staffing_agency" to deal_breakers. Signs: company name includes words like Solutions, Staffing, Talent, Consulting, Search, Partners, Recruiting, Group; the description says "our client" or "on behalf of"; vague about the actual employer. Direct employers only — no middlemen."""
 
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -851,6 +1311,224 @@ def _basic_notes(job: Dict, compat: Dict) -> str:
         lines.append(f"Description: {snippet}")
     lines.append(f"Match score: {compat['match_score']}")
     return "\n".join(lines)
+
+
+def _extract_hiring_manager(page) -> Optional[Dict[str, str]]:
+    """
+    Extract the job poster / hiring manager info from a LinkedIn job detail page.
+
+    Returns a dict with keys: name, headline, profile_url, compose_url
+    or None if no hiring team section is found.
+    """
+    return page.evaluate(
+        """() => {
+        const body = document.body ? document.body.innerText : '';
+        if (!body.includes('Meet the hiring team') && !body.includes('Job poster'))
+            return null;
+
+        const msgLink = document.querySelector(
+            'a[href*="messaging/compose"][href*="JOB_DETAILS"]'
+        );
+        if (!msgLink) return null;
+
+        let card = msgLink;
+        for (let i = 0; i < 10 && card; i++) {
+            const text = card.innerText || '';
+            if (text.includes('Job poster') || text.includes('Meet the hiring team'))
+                break;
+            card = card.parentElement;
+        }
+        if (!card) return null;
+
+        const profileLink = card.querySelector('a[href*="/in/"]');
+        const cardText = card.innerText;
+        const lines = cardText.split('\\n')
+            .map(function(l) { return l.trim(); })
+            .filter(function(l) { return l.length > 0; });
+
+        var name = '';
+        var headline = '';
+        for (var i = 0; i < lines.length; i++) {
+            var l = lines[i];
+            if (l.charAt(0) === '\\u2022' || l === 'Job poster'
+                || l === 'Message' || l === 'Connect'
+                || l.includes('Meet the hiring team')) continue;
+            if (!name) { name = l; continue; }
+            if (!headline && l !== name) { headline = l; break; }
+        }
+
+        return {
+            name: name,
+            headline: headline,
+            profile_url: profileLink ? profileLink.href.split('?')[0] : null,
+            compose_url: msgLink.href,
+        };
+    }"""
+    )
+
+
+def _ai_draft_hiring_message(
+    job: Dict, profile: "ApplicantProfile", poster_name: str
+) -> Optional[str]:
+    """Draft a short personalized message to the hiring manager using Claude."""
+    if not _AI_AVAILABLE:
+        return None
+    try:
+        client = _get_ai_client()
+        description = _sanitize_description(job.get("description", ""))[:2000]
+        prompt = f"""Write a short LinkedIn message (3 sentences) from a job applicant to the hiring manager / job poster.
+
+Applicant: {profile.full_name}, {profile.current_title or "engineer"} with {profile.years_experience or "several"} years of experience.
+Key skills: {", ".join(profile.specializations[:4]) if profile.specializations else "infrastructure engineering"}
+
+Job: {job.get("title")} at {job.get("company")}
+Poster name: {poster_name}
+Job description snippet: {description[:800]}
+
+Guidelines:
+- Start with "Hey <first name>," — that's the only greeting
+- Sentence 1: Say you applied for the role (use the exact title)
+- Sentence 2: ONE specific detail — a tool overlap, a similar problem you solved, or a concrete fact from your background that connects to the job. Not a summary of your whole career.
+- Sentence 3: A brief, natural closer — a question about the team/stack, or saying you'd love to chat. Keep it casual.
+- Do NOT start sentences with "I've spent the last N years". Do NOT list multiple skills. Pick ONE thing.
+- 3 sentences. Under 250 characters after the greeting.
+- Sound like a person dashing off a quick note, not crafting a pitch.
+- NEVER use: "excited", "passionate", "eager", "thrilled", "aligns", "resonates", "looking forward", "opportunity", "I believe", "sounds like", "exactly what", "wheelhouse", "culture", "I'd love to bring"
+- NO subject line, NO sign-off"""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        msg = response.content[0].text.strip()
+        # Strip any AI preamble, self-corrections, or extra lines
+        lines = msg.split("\n")
+        clean = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("*") or stripped.startswith("---"):
+                break  # AI started self-correcting
+            if stripped:
+                clean.append(stripped)
+        msg = " ".join(clean) if clean else msg
+        # Strip stale greeting prefixes
+        for prefix in ("Subject:", "Hi,", "Hello,"):
+            if msg.startswith(prefix):
+                msg = msg[len(prefix) :].strip()
+        return msg
+    except Exception as e:
+        log.warning(f"   AI hiring message draft failed: {e}")
+        return None
+
+
+def _send_hiring_manager_message(  # noqa: C901
+    page,
+    compose_url: str,
+    message: str,
+    poster_name: str,
+    job_title: str = "",
+    company: str = "",
+) -> str:
+    """
+    Navigate to the LinkedIn messaging compose URL and send a message.
+    Returns 'sent', 'failed', or an error description.
+    """
+    try:
+        page.goto(compose_url, wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_timeout(3000)
+
+        # Find the message textbox
+        textbox = page.query_selector('div.msg-form__contenteditable[role="textbox"]')
+        if not textbox:
+            # Fallback: any contenteditable with message-related label
+            textbox = page.query_selector('[role="textbox"][aria-label*="message" i]')
+        if not textbox:
+            log.warning("   Could not find message compose textbox")
+            return "failed: no textbox found"
+
+        # Check for subject line (InMail) and fill if present
+        subject_input = page.query_selector('input.msg-form__subject, input[name="subject"]')
+        if subject_input:
+            subject_input.click()
+            subj = f"Re: {job_title}" if job_title else "Re: your job posting"
+            subject_input.fill(subj)
+            page.wait_for_timeout(300)
+
+        # Type the message
+        textbox.click()
+        page.wait_for_timeout(300)
+        textbox.type(message, delay=20)
+        page.wait_for_timeout(500)
+
+        # Find and click the send button
+        send_btn = page.query_selector("button.msg-form__send-btn")
+        if not send_btn:
+            send_btn = page.query_selector('button[type="submit"]:has(svg)')
+        if not send_btn:
+            log.warning("   Could not find send button")
+            return "failed: no send button"
+
+        send_btn.click()
+        page.wait_for_timeout(2000)
+
+        log.info(f"   ✉️  Message sent to {poster_name}")
+        return "sent"
+    except Exception as exc:
+        log.warning(f"   Message send failed: {exc}")
+        return f"failed: {exc}"
+
+
+def _message_hiring_manager_after_apply(
+    job: Dict,
+    profile: "ApplicantProfile",
+    proxy: Optional[str] = None,
+) -> tuple:
+    """
+    After a successful application, check the job page for a hiring manager
+    and send a short personalized message.
+    Returns (status, message_text, poster_name) or (None, None, None) if skipped.
+    """
+    if not profile.message_hiring_manager:
+        return None, None, None
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None, None, None
+
+    with sync_playwright() as p:
+        browser, context, page, owns_browser = _playwright_context(p, proxy)
+        try:
+            page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(3000)
+
+            poster = _extract_hiring_manager(page)
+            if not poster or not poster.get("compose_url"):
+                log.info("   ℹ️  No hiring manager found for %s", job.get("title"))
+                return None, None, None
+
+            log.info(f"   👤 Found hiring manager: {poster['name']} — {poster.get('headline', '')}")
+
+            message = _ai_draft_hiring_message(job, profile, poster["name"])
+            if not message:
+                log.warning("   Could not draft message — skipping")
+                return None, None, None
+
+            log.info(f"   💬 Sending: {message[:80]}...")
+            status = _send_hiring_manager_message(
+                page,
+                poster["compose_url"],
+                message,
+                poster["name"],
+                job_title=job.get("title", ""),
+                company=job.get("company", ""),
+            )
+            return status, message, poster["name"]
+        finally:
+            page.close()
+            if owns_browser:
+                browser.close()
 
 
 DEBUG_DIR = DATA_DIR / "debug"
@@ -1026,7 +1704,7 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
     max_steps = 15
     stalled = 0
     for _step in range(max_steps):
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(random.randint(800, 2200))
 
         # Dismiss "Save this application?" dialog if it appeared
         _dismiss_save_dialog(page)
@@ -1053,11 +1731,34 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
         if submit_btn:
             _dismiss_all_typeaheads(page)
             _safe_click(submit_btn, page)
-            page.wait_for_timeout(2000)
-            success = page.query_selector(
+            # Wait for confirmation with retries — LinkedIn can be slow to render
+            success = None
+            confirmation_sel = (
                 "[aria-label='Your application was sent'], "
-                ".artdeco-modal__header:has-text('Application submitted')"
+                ".artdeco-modal__header:has-text('Application submitted'), "
+                "h2:has-text('application was sent'), "
+                ".artdeco-inline-feedback--success, "
+                "[data-test-modal-id='post-apply-modal']"
             )
+            try:
+                success = page.wait_for_selector(confirmation_sel, timeout=8000)
+            except Exception:
+                # Final fallback: check if form validation errors appeared (means it didn't submit)
+                validation_err = page.query_selector(
+                    ".artdeco-inline-feedback--error, "
+                    "[data-test-form-element-error], "
+                    ".fb-dash-form-element__error-text"
+                )
+                if validation_err:
+                    err_text = validation_err.inner_text()[:200]
+                    if owns_browser:
+                        _save_session(context)
+                    _dump_form_debug(
+                        page, job_id, f"Submit clicked but validation errors: {err_text}"
+                    )
+                    return f"failed: form validation errors after submit: {err_text}"
+                # No confirmation AND no errors — check once more
+                success = page.query_selector(confirmation_sel)
             if owns_browser:
                 _save_session(context)
             return "submitted" if success else "submitted (unconfirmed — check LinkedIn)"
@@ -1153,13 +1854,15 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
                 browser.close()
 
 
-def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:
-    """Answer all radio button groups (Yes/No fieldsets) on the current form page."""
+def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:  # noqa: C901
+    """Answer all radio button groups on the current form page."""
     # Find all fieldset-style radio groups via their container divs
     fieldsets = page.query_selector_all(
         "fieldset, "
         "div[data-test-form-element]:has(input[type='radio']), "
-        "div.fb-dash-form-element:has(input[type='radio'])"
+        "div.fb-dash-form-element:has(input[type='radio']), "
+        "div.ashby-application-form-field-entry:has(input[type='radio']), "
+        "div[class*='section']:has(input[type='radio'])"
     )
     for group in fieldsets:
         # Check if a radio is already selected in this group
@@ -1175,7 +1878,6 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:
             "span.fb-dash-form-element__label"
         )
         if not question_el:
-            # Fallback: get all text in the group that isn't "Yes" or "No"
             question_text = group.inner_text().strip().lower()
         else:
             question_text = question_el.inner_text().strip().lower()
@@ -1183,17 +1885,56 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:
         if not question_text:
             continue
 
-        # Determine the answer
-        answer = _determine_radio_answer(question_text, profile)
-
-        # Click the matching label
+        # Collect option labels and their text
         labels = group.query_selector_all("label")
-        for lbl in labels:
-            lbl_text = lbl.inner_text().strip().lower()
-            if lbl_text == answer:
-                lbl.click()
-                log.info(f"   📻 Radio '{question_text[:50]}' → '{answer}'")
-                break
+        if not labels:
+            continue
+        option_texts = [lbl.inner_text().strip() for lbl in labels]
+        option_lower = [t.lower() for t in option_texts]
+
+        # Check if this is a simple Yes/No group
+        is_yes_no = all(t.startswith("yes") or t.startswith("no") for t in option_lower if t)
+
+        if is_yes_no:
+            answer = _determine_radio_answer(question_text, profile)
+            # Match labels that START with yes/no (not exact match)
+            for i, lbl_text in enumerate(option_lower):
+                if lbl_text.startswith(answer):
+                    labels[i].click()
+                    log.info(f"   📻 Radio '{question_text[:50]}' → '{answer}'")
+                    break
+        elif _AI_AVAILABLE:
+            # Multi-choice: use AI to pick the best option
+            choices = "\n".join(f"  {i}: {t}" for i, t in enumerate(option_texts) if t)
+            ai_answer = _ai_answer_question(
+                f"{question_text}\n\nChoose one (reply with the number only):\n{choices}",
+                profile,
+            )
+            if ai_answer is not None:
+                # AI might return the number, the letter prefix, or the text
+                ai_clean = ai_answer.strip().lower().rstrip(".")
+                picked = None
+                # Try numeric index
+                try:
+                    idx = int(ai_clean)
+                    if 0 <= idx < len(labels):
+                        picked = idx
+                except ValueError:
+                    pass
+                # Try letter prefix match (a, b, c, d)
+                if picked is None and len(ai_clean) == 1 and ai_clean.isalpha():
+                    letter_idx = ord(ai_clean) - ord("a")
+                    if 0 <= letter_idx < len(labels):
+                        picked = letter_idx
+                # Try startswith match on option text
+                if picked is None:
+                    for i, t in enumerate(option_lower):
+                        if t.startswith(ai_clean[:20]) or ai_clean[:20] in t:
+                            picked = i
+                            break
+                if picked is not None:
+                    labels[picked].click()
+                    log.info(f"   📻 Radio '{question_text[:50]}' → '{option_texts[picked][:60]}'")
 
 
 def _determine_radio_answer(question: str, profile: ApplicantProfile) -> str:
@@ -1342,6 +2083,8 @@ def _dismiss_all_typeaheads(page) -> None:
 
 def _safe_click(element, page) -> None:
     """Click an element, falling back to JS click if Playwright's actionability check fails."""
+    # Brief pre-click pause — humans don't click at machine speed
+    page.wait_for_timeout(random.randint(200, 800))
     try:
         element.click(timeout=5000)
     except Exception:
@@ -1901,6 +2644,7 @@ Definitions:
 - form: application fields are present (name, experience, work history, etc.)
 - confirmation: application was accepted; page says thank you / received
 - error: page shows an error, posting closed, or 404
+- job_search: this is a job SEARCH or LISTING page (search filters, job cards, "Displaying X of Y"), NOT an application form. Company career portals with search/filter UI are job_search, not form.
 A page may have has_file_upload=true AND has_form_fields=true."""
 
     try:
@@ -2725,6 +3469,19 @@ def _navigate_external_form(  # noqa: C901
             _dump_form_debug(page, job.get("id", ""), "Error page")
             return "failed: ATS error page"
 
+        if classification["page_type"] == "job_search":
+            log.info("   ⏭  Page is a job search/listing page, not an application form")
+            return "failed: landed on job search page instead of application form"
+
+        # Also catch job search pages by URL pattern (fast path, no AI needed)
+        _url_lower = page.url.lower()
+        if any(
+            pattern in _url_lower
+            for pattern in ("/jobs/search", "/search?query=", "/job-search", "kiosk+mode")
+        ):
+            log.info("   ⏭  URL looks like a job search page, skipping")
+            return "failed: landed on job search page instead of application form"
+
         # Detect email verification code prompt and handle it before filling fields
         if profile.gmail_app_password:
             has_verification_prompt = page.evaluate("""() => {
@@ -3074,8 +3831,16 @@ def auto_apply_workflow(  # noqa: C901
     min_match_score: float = 0.30,
     dry_run: bool = False,
     proxy: Optional[str] = None,
+    source: str = "linkedin",
 ) -> Dict:
-    log.info("🚀 LinkedIn job apply workflow (Easy Apply + External)")
+    source_labels = {
+        "linkedin": "LinkedIn",
+        "remoteok": "RemoteOK",
+        "hn": "HackerNews Who's Hiring",
+        "biotech": "Biotech/Pharma Careers",
+    }
+    label = source_labels.get(source, source)
+    log.info(f"🚀 {label} job apply workflow (Easy Apply + External)")
     log.info(f"   dry_run={dry_run}  max={max_applications}  min_score={min_match_score}")
     log.info(f"   AI: {'enabled' if _AI_AVAILABLE else 'disabled (install anthropic)'}\n")
 
@@ -3083,9 +3848,16 @@ def auto_apply_workflow(  # noqa: C901
     if applied_urls:
         log.info(f"   Skipping {len(applied_urls)} already-applied jobs\n")
 
-    log.info(f"🔍 Searching LinkedIn for '{params.title}'...")
+    log.info(f"🔍 Searching {label} for '{params.title}'...")
     try:
-        jobs = search_linkedin(params, proxy=proxy)
+        if source == "remoteok":
+            jobs = search_remoteok(params)
+        elif source == "hn":
+            jobs = search_hn_whos_hiring(params)
+        elif source == "biotech":
+            jobs = search_biotech(params)
+        else:
+            jobs = search_linkedin(params, proxy=proxy)
     except RuntimeError as e:
         log.error(f"❌ Search failed: {e}")
         return {"applications": [], "total": 0, "jobs_found": 0}
@@ -3178,6 +3950,20 @@ def auto_apply_workflow(  # noqa: C901
         # AI-generated notes for the log
         notes = ai_build_notes(job, compat)
 
+        # Message hiring manager after successful application
+        msg_status = None
+        msg_text = None
+        msg_poster = None
+        if status.startswith("submitted") and profile.message_hiring_manager:
+            try:
+                msg_status, msg_text, msg_poster = _message_hiring_manager_after_apply(
+                    job, profile, proxy=proxy
+                )
+                if msg_status:
+                    log.info(f"   📨 Hiring manager message: {msg_status}")
+            except Exception as exc:
+                log.info("   ⚠️  Hiring manager message failed: %s", exc)
+
         applications.append(
             {
                 "job_id": job["id"],
@@ -3193,10 +3979,17 @@ def auto_apply_workflow(  # noqa: C901
                 "deal_breakers": compat.get("deal_breakers", []),
                 "cover_letter_path": str(cl_file),
                 "notes": notes,
+                "hiring_manager_messaged": msg_status,
+                "hiring_manager_message_text": msg_text,
+                "hiring_manager_name": msg_poster,
             }
         )
         applied += 1
-        time.sleep(3)
+        # Human-like delay between applications (longer for Easy Apply to avoid spam flags)
+        if job.get("easy_apply"):
+            _human_delay(base=8.0, jitter=12.0)  # 8-20s, occasionally 20-35s
+        else:
+            _human_delay(base=3.0, jitter=5.0)  # 3-8s for external ATS
 
     save_log(applications)
 
@@ -3573,6 +4366,12 @@ def main():
     )
     parser.add_argument("--job-title", default=None, help="Job title for --external-url")
     parser.add_argument("--company", default=None, help="Company name for --external-url")
+    parser.add_argument(
+        "--source",
+        choices=["linkedin", "remoteok", "hn", "biotech", "all"],
+        default="linkedin",
+        help="Job source: linkedin, remoteok, hn, biotech (pharma career sites), or all",
+    )
     args = parser.parse_args()
 
     if args.setup:
@@ -3632,37 +4431,46 @@ def main():
     else:
         remote = args.remote
 
-    for i, title in enumerate(titles):
-        if i > 0:
-            delay = 8 + (i * 2)  # Increasing delay between searches to avoid bot detection
-            log.info(f"⏳ Waiting {delay}s before next search...")
-            time.sleep(delay)
+    sources = ["linkedin", "remoteok", "hn", "biotech"] if args.source == "all" else [args.source]
 
-        params = JobSearchParams(
-            title=title,
-            location=args.location,
-            remote=remote,
-            max_age_days=_criteria.get("max_age_days", 14),
-            keywords_excluded=_criteria.get("keywords_excluded", []),
-            company_blacklist=_criteria.get("company_blacklist", []),
-        )
+    for source in sources:
+        if len(sources) > 1:
+            log.info(f"\n{'=' * 50}")
+            log.info(f"📡 Source: {source.upper()}")
+            log.info(f"{'=' * 50}\n")
 
-        try:
-            auto_apply_workflow(
-                params=params,
-                profile=profile,
-                max_applications=max_applications,
-                min_match_score=min_score,
-                dry_run=args.dry_run,
-                proxy=args.proxy,
+        for i, title in enumerate(titles):
+            if i > 0:
+                delay = random.randint(15, 30) + (i * random.randint(3, 8))
+                log.info(f"⏳ Waiting {delay}s before next search...")
+                time.sleep(delay)
+
+            params = JobSearchParams(
+                title=title,
+                location=args.location,
+                remote=remote,
+                max_age_days=_criteria.get("max_age_days", 14),
+                keywords_excluded=_criteria.get("keywords_excluded", []),
+                company_blacklist=_criteria.get("company_blacklist", []),
             )
-        except RuntimeError as exc:
-            if "session expired" in str(exc).lower():
-                log.error(
-                    f"❌ Session expired during '{title}' — stopping. Re-authenticate and retry."
+
+            try:
+                auto_apply_workflow(
+                    params=params,
+                    profile=profile,
+                    max_applications=max_applications,
+                    min_match_score=min_score,
+                    dry_run=args.dry_run,
+                    proxy=args.proxy,
+                    source=source,
                 )
-                break
-            log.error(f"❌ Error during '{title}': {exc}")
+            except RuntimeError as exc:
+                if "session expired" in str(exc).lower():
+                    log.error(
+                        f"❌ Session expired during '{title}' — stopping. Re-authenticate and retry."
+                    )
+                    break
+                log.error(f"❌ Error during '{title}': {exc}")
             continue
 
 
