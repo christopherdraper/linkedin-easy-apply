@@ -18,7 +18,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install linters
-        run: pip install ruff bandit vulture
+        run: pip install ruff bandit vulture -r requirements.txt
 
       - name: Ruff lint
         run: ruff check .
