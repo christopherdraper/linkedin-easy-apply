@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Timer
 
-from flask import Flask, render_template
+from flask import Flask, abort, render_template
 
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
@@ -122,6 +122,26 @@ def index():
         total_snapshots=len(search_entries),
         log_file=str(LOG_FILE),
     )
+
+
+@app.route("/report/<job_id>")
+def report(job_id):
+    entries = _load_applications()
+    entry = next((e for e in entries if e.get("job_id") == job_id), None)
+    if not entry:
+        abort(404)
+
+    cover_letter = ""
+    cl_path = entry.get("cover_letter_path", "")
+    if cl_path:
+        p = Path(cl_path)
+        if p.exists():
+            try:
+                cover_letter = p.read_text()
+            except Exception:
+                cover_letter = "(unable to read file)"
+
+    return render_template("report.html", entry=entry, cover_letter=cover_letter)
 
 
 @app.route("/api/data")

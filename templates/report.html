@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Report — {{ entry.title }} at {{ entry.company }}</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --border: #2a2d3a;
+            --text: #e4e6eb;
+            --text-muted: #8b8fa3;
+            --accent: #4f8ff7;
+            --green: #34d399;
+            --red: #f87171;
+            --amber: #fbbf24;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .back-link {
+            display: inline-block;
+            margin-bottom: 1.5rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .back-link:hover { color: var(--text); }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .company {
+            font-size: 1.1rem;
+            color: var(--text-muted);
+            margin-bottom: 1.5rem;
+        }
+
+        .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .meta-item {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .meta-item .label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.25rem;
+        }
+
+        .meta-item .value {
+            font-size: 0.95rem;
+            font-weight: 500;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .badge-submitted { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .badge-failed    { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+        .badge-aborted   { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+        .badge-dryrun    { background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
+
+        .section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.25rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .section h2 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .section pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            line-height: 1.7;
+            color: var(--text);
+        }
+
+        .section p {
+            font-size: 0.9rem;
+            color: var(--text);
+        }
+
+        .empty {
+            color: var(--text-muted);
+            font-style: italic;
+            font-size: 0.85rem;
+        }
+
+        .score-big {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body>
+
+<a href="/" class="back-link">&larr; Back to Dashboard</a>
+
+<h1>{{ entry.title }}</h1>
+<p class="company">{{ entry.company }}{% if entry.location %} &middot; {{ entry.location }}{% endif %}</p>
+
+<div class="meta-grid">
+    <div class="meta-item">
+        <div class="label">Status</div>
+        <div class="value">
+            {% set st = entry.status|default('unknown') %}
+            {% if st.startswith('submitted') %}
+                <span class="badge badge-submitted">{{ st }}</span>
+            {% elif st.startswith('failed') %}
+                <span class="badge badge-failed">{{ st }}</span>
+            {% elif st.startswith('aborted') %}
+                <span class="badge badge-aborted">{{ st }}</span>
+            {% elif st == 'dry_run' %}
+                <span class="badge badge-dryrun">Dry Run</span>
+            {% else %}
+                {{ st }}
+            {% endif %}
+        </div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Match Score</div>
+        <div class="value">
+            {% set score = entry.match_score|default(0) %}
+            {% set pct = (score * 100)|int %}
+            {% if score >= 0.7 %}
+                <span class="score-big" style="color: var(--green)">{{ pct }}%</span>
+            {% elif score >= 0.4 %}
+                <span class="score-big" style="color: var(--amber)">{{ pct }}%</span>
+            {% else %}
+                <span class="score-big" style="color: var(--red)">{{ pct }}%</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Date Applied</div>
+        <div class="value">{{ entry.timestamp or '—' }}</div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Platform</div>
+        <div class="value">{{ entry.platform or '—' }}{% if entry.apply_type %} ({{ entry.apply_type }}){% endif %}</div>
+    </div>
+</div>
+
+{% if entry.url %}
+<div class="meta-grid" style="margin-bottom: 1.5rem;">
+    <div class="meta-item" style="grid-column: 1 / -1;">
+        <div class="label">Job Posting</div>
+        <div class="value"><a href="{{ entry.url }}" target="_blank">{{ entry.url[:100] }}{% if entry.url|length > 100 %}...{% endif %}</a></div>
+    </div>
+</div>
+{% endif %}
+
+{% if entry.reasoning %}
+<div class="section">
+    <h2>Match Reasoning</h2>
+    <p>{{ entry.reasoning }}</p>
+</div>
+{% endif %}
+
+{% if entry.deal_breakers %}
+<div class="section">
+    <h2>Deal Breakers</h2>
+    <p>{{ entry.deal_breakers|join(', ') }}</p>
+</div>
+{% endif %}
+
+<div class="section">
+    <h2>Cover Letter</h2>
+    {% if cover_letter %}
+    <pre>{{ cover_letter }}</pre>
+    {% else %}
+    <p class="empty">No cover letter on file.</p>
+    {% endif %}
+</div>
+
+{% if entry.fields_filled %}
+<div class="section">
+    <h2>Form Fields Filled ({{ entry.fields_filled|length }})</h2>
+    <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+        <thead>
+            <tr>
+                <th style="text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-muted); font-weight: 500;">Field</th>
+                <th style="text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-muted); font-weight: 500;">Value</th>
+                <th style="text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-muted); font-weight: 500;">Source</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for f in entry.fields_filled %}
+            <tr>
+                <td style="padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border);">{{ f.field }}</td>
+                <td style="padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border);">{{ f.value }}</td>
+                <td style="padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border);">
+                    {% if f.source == 'ai' or f.source.startswith('ai_') %}
+                        <span style="color: var(--amber);">{{ f.source }}</span>
+                    {% elif f.source == 'screening_answers' %}
+                        <span style="color: var(--green);">profile</span>
+                    {% elif f.source == 'contact' %}
+                        <span style="color: var(--accent);">contact</span>
+                    {% elif f.source == 'radio' %}
+                        <span style="color: var(--green);">auto</span>
+                    {% else %}
+                        {{ f.source }}
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if entry.notes %}
+<div class="section">
+    <h2>Debrief Notes</h2>
+    <pre>{{ entry.notes }}</pre>
+</div>
+{% endif %}
+
+{% if entry.hiring_manager_messaged %}
+<div class="section">
+    <h2>Hiring Manager Outreach</h2>
+    {% if entry.hiring_manager_name %}
+    <p style="margin-bottom: 0.5rem; color: var(--text-muted); font-size: 0.85rem;">
+        Sent to: {{ entry.hiring_manager_name }} &middot; Status: {{ entry.hiring_manager_messaged }}
+    </p>
+    {% endif %}
+    {% if entry.hiring_manager_message_text %}
+    <pre>{{ entry.hiring_manager_message_text }}</pre>
+    {% else %}
+    <p class="empty">Message sent but text not recorded.</p>
+    {% endif %}
+</div>
+{% endif %}
+
+</body>
+</html>

@@ -38,6 +38,9 @@ def _get_ai_client():
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
 SEARCH_LOG_FILE = DATA_DIR / "search_log.json"
+
+# Per-application field fill tracker — cleared at start of each application
+_field_fills: List[Dict[str, str]] = []
 COVER_LETTER_DIR = DATA_DIR / "cover-letters"
 SESSION_FILE = DATA_DIR / "sessions" / "linkedin.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
@@ -2027,6 +2030,7 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
     Submit a LinkedIn Easy Apply application.
     Returns 'submitted' on success, 'failed: <reason>' on failure.
     """
+    _field_fills.clear()
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -2119,6 +2123,9 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:  # noqa: C90
                 if lbl_text.startswith(answer):
                     labels[i].click()
                     log.info(f"   📻 Radio '{question_text[:50]}' → '{answer}'")
+                    _field_fills.append(
+                        {"field": question_text[:100], "value": answer, "source": "radio"}
+                    )
                     break
         elif _AI_AVAILABLE:
             # Multi-choice: use AI to pick the best option
@@ -2152,6 +2159,13 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:  # noqa: C90
                 if picked is not None:
                     labels[picked].click()
                     log.info(f"   📻 Radio '{question_text[:50]}' → '{option_texts[picked][:60]}'")
+                    _field_fills.append(
+                        {
+                            "field": question_text[:100],
+                            "value": option_texts[picked][:100],
+                            "source": "ai_radio",
+                        }
+                    )
 
 
 def _determine_radio_answer(question: str, profile: ApplicantProfile) -> str:
@@ -2216,6 +2230,9 @@ def _answer_textareas(page, profile: ApplicantProfile) -> None:
                     label_text = label_el.inner_text().lower()
             if question.lower() in placeholder or question.lower() in label_text:
                 textarea.fill(answer)
+                _field_fills.append(
+                    {"field": question, "value": answer[:200], "source": "screening_answers"}
+                )
 
 
 def _contact_value_for_label(label_text: str, profile: ApplicantProfile) -> Optional[str]:
@@ -2340,6 +2357,7 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
     if matched is not None:
         inp.fill(matched)
         _dismiss_typeahead(page, inp)
+        _field_fills.append({"field": label_text, "value": matched, "source": "screening_answers"})
         return
 
     # Direct contact fields — never send these to AI
@@ -2366,6 +2384,7 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
             else:
                 inp.fill(contact_value)
             _dismiss_typeahead(page, inp)
+            _field_fills.append({"field": label_text, "value": contact_value, "source": "contact"})
             return
 
     # AI fallback for anything unmatched
@@ -2391,6 +2410,7 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
             else:
                 inp.fill(answer)
             _dismiss_typeahead(page, inp)
+            _field_fills.append({"field": label_text, "value": answer, "source": "ai"})
 
 
 def _get_field_label(page, element) -> str:
@@ -2470,6 +2490,9 @@ def _answer_select_dropdowns(page, profile: ApplicantProfile) -> None:
                 if matched.lower() in text.lower() or text.lower() in matched.lower():
                     select.select_option(val)
                     log.debug("   Select '%s' → '%s' (from screening answers)", label_text, text)
+                    _field_fills.append(
+                        {"field": label_text, "value": text, "source": "screening_answers"}
+                    )
                     break
             else:
                 # Screening answer didn't match an option — try AI
@@ -2483,6 +2506,9 @@ def _answer_select_dropdowns(page, profile: ApplicantProfile) -> None:
                     if answer.lower() in text.lower() or text.lower() in answer.lower():
                         select.select_option(val)
                         log.info(f"   🤖 AI selected '{label_text}' → '{text}'")
+                        _field_fills.append(
+                            {"field": label_text, "value": text, "source": "ai_select"}
+                        )
                         break
 
 
@@ -3172,6 +3198,9 @@ def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int
             if answer:
                 textarea.fill(answer)
                 filled += 1
+                _field_fills.append(
+                    {"field": label_text, "value": answer[:200], "source": "ai_textarea"}
+                )
     except ApplicationAbortError:
         raise
     except Exception as exc:
@@ -3394,6 +3423,7 @@ def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int
             if answer:
                 inp.fill(answer)
                 filled += 1
+                _field_fills.append({"field": label_text, "value": answer, "source": "ai_date"})
         except ApplicationAbortError:
             raise
         except Exception as exc:
@@ -3961,6 +3991,7 @@ def submit_external_apply(
     Works on any ATS (Workday, Greenhouse, Lever, iCIMS, etc.).
     Returns status string.
     """
+    _field_fills.clear()
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -4226,6 +4257,7 @@ def auto_apply_workflow(  # noqa: C901
                 "hiring_manager_messaged": msg_status,
                 "hiring_manager_message_text": msg_text,
                 "hiring_manager_name": msg_poster,
+                "fields_filled": list(_field_fills),
             }
         )
         applied += 1

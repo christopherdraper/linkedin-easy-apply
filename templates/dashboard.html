@@ -355,6 +355,7 @@
                 <th onclick="sortTable(4)">Score</th>
                 <th onclick="sortTable(5)">Status</th>
                 <th>Reasoning</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
@@ -394,6 +395,7 @@
                     {% endif %}
                 </td>
                 <td class="truncate" title="{{ e.reasoning or '' }}">{{ e.reasoning or '—' }}</td>
+                <td><a href="/report/{{ e.job_id }}" target="_blank">Report</a></td>
             </tr>
             {% endfor %}
         </tbody>
