@@ -2796,6 +2796,50 @@ def _detect_ats_platform(url: str) -> str:
     return "unknown"
 
 
+def _categorize_failure(status: str) -> str:
+    """Map a freeform failure status string to a structured category."""
+    s = status.lower()
+    if "form stuck" in s or "form steps" in s or "lost track" in s:
+        return "form_stuck"
+    if "validation error" in s:
+        return "validation_error"
+    if "no apply button" in s:
+        return "no_apply_button"
+    if "requires account" in s or "login" in s:
+        return "login_wall"
+    if "spam" in s or "captcha" in s or "security check" in s:
+        return "captcha"
+    if "modal" in s:
+        return "modal_lost"
+    if "max steps" in s or "too many" in s:
+        return "max_steps"
+    if "timeout" in s or "timed out" in s:
+        return "timeout"
+    return "other"
+
+
+def _categorize_failure(status: str) -> str:
+    """Map a freeform failure status string to a structured category."""
+    lower = status.lower()
+    if "form stuck" in lower or "form steps" in lower:
+        return "form_stuck"
+    if "validation error" in lower:
+        return "validation_error"
+    if "no apply button" in lower:
+        return "no_apply_button"
+    if "requires account" in lower or "login" in lower:
+        return "login_wall"
+    if "spam" in lower or "captcha" in lower or "security check" in lower:
+        return "captcha"
+    if "modal" in lower or "lost track" in lower:
+        return "modal_lost"
+    if "max steps" in lower or "too many" in lower:
+        return "max_steps"
+    if "timeout" in lower or "timed out" in lower:
+        return "timeout"
+    return "other"
+
+
 _PAGE_CLASSIFIER_SYSTEM = (
     "You classify job application web pages to determine what automated actions are needed. "
     "Output ONLY valid JSON. Never add explanation or markdown."
@@ -4435,6 +4479,9 @@ def auto_apply_workflow(  # noqa: C901
                 if _apply_start_time
                 else None,
                 "ats_platform": _detect_ats_platform(job.get("url", "")),
+                "failure_category": _categorize_failure(status)
+                if status.startswith("failed")
+                else None,
             }
         )
         applied += 1

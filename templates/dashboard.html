@@ -84,6 +84,17 @@
             margin-bottom: 2rem;
         }
 
+        .charts-row-triple {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (max-width: 1100px) {
+            .charts-row-triple { grid-template-columns: 1fr; }
+        }
+
         .charts-full {
             margin-bottom: 2rem;
         }
@@ -337,6 +348,32 @@
     </div>
 </div>
 
+<!-- Failure & Platform charts -->
+<div class="charts-row">
+    <div class="chart-card">
+        <h2>Success Rate by ATS Platform</h2>
+        <p class="chart-subtitle">Submitted vs failed applications per platform</p>
+        <div class="chart-wrap">
+            {% if platform_stats %}
+            <canvas id="platformChart"></canvas>
+            {% else %}
+            <div class="empty-chart">No platform data yet.</div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="chart-card">
+        <h2>Failure Breakdown</h2>
+        <p class="chart-subtitle">Application failures by category</p>
+        <div class="chart-wrap">
+            {% if failure_categories %}
+            <canvas id="failureChart"></canvas>
+            {% else %}
+            <div class="empty-chart">No failures recorded yet.</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
 <!-- Application table -->
 <div class="table-card">
     <div class="table-header">
@@ -578,6 +615,135 @@ if (statusLabels.length > 0) {
                     labels: { color: chartTextColor, font: { size: 12 }, padding: 16 }
                 }
             }
+        },
+    });
+}
+
+// -- Failure breakdown horizontal bar chart --
+const failureCategories = {{ failure_categories | tojson }};
+const failureLabelMap = {
+    form_stuck: 'Form Stuck',
+    validation_error: 'Validation Error',
+    no_apply_button: 'No Apply Button',
+    login_wall: 'Login Wall',
+    captcha: 'CAPTCHA / Security',
+    modal_lost: 'Modal Lost',
+    max_steps: 'Max Steps',
+    timeout: 'Timeout',
+    other: 'Other',
+};
+const failureColors = {
+    form_stuck: '#ef4444',
+    validation_error: '#f97316',
+    no_apply_button: '#f59e0b',
+    login_wall: '#dc2626',
+    captcha: '#ea580c',
+    modal_lost: '#d97706',
+    max_steps: '#b91c1c',
+    timeout: '#c2410c',
+    other: '#92400e',
+};
+
+const failureEntries = Object.entries(failureCategories)
+    .sort((a, b) => b[1] - a[1]);
+const failureLabels = failureEntries.map(([k]) => failureLabelMap[k] || k);
+const failureValues = failureEntries.map(([, v]) => v);
+const failureBgColors = failureEntries.map(([k]) => failureColors[k] || '#92400e');
+
+if (failureLabels.length > 0) {
+    const ctxFail = document.getElementById('failureChart').getContext('2d');
+    new Chart(ctxFail, {
+        type: 'bar',
+        data: {
+            labels: failureLabels,
+            datasets: [{
+                label: 'Failures',
+                data: failureValues,
+                backgroundColor: failureBgColors,
+                borderRadius: 4,
+            }],
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => `${ctx.parsed.x} failure${ctx.parsed.x !== 1 ? 's' : ''}`
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    beginAtZero: true,
+                    ticks: { color: chartTextColor, stepSize: 1 },
+                    grid: { color: chartGridColor },
+                },
+                y: {
+                    ticks: { color: chartTextColor },
+                    grid: { display: false },
+                },
+            },
+        },
+    });
+}
+
+// -- Platform success rate grouped bar chart --
+const platformStats = {{ platform_stats | tojson }};
+const platformNames = Object.keys(platformStats)
+    .filter(p => (platformStats[p].submitted + platformStats[p].failed) > 0)
+    .sort((a, b) =>
+        (platformStats[b].submitted + platformStats[b].failed) -
+        (platformStats[a].submitted + platformStats[a].failed)
+    );
+const platformSubmitted = platformNames.map(p => platformStats[p].submitted);
+const platformFailed = platformNames.map(p => platformStats[p].failed);
+
+if (platformNames.length > 0) {
+    const ctxPlat = document.getElementById('platformChart').getContext('2d');
+    new Chart(ctxPlat, {
+        type: 'bar',
+        data: {
+            labels: platformNames,
+            datasets: [
+                {
+                    label: 'Submitted',
+                    data: platformSubmitted,
+                    backgroundColor: 'rgba(52, 211, 153, 0.8)',
+                    borderRadius: 4,
+                },
+                {
+                    label: 'Failed',
+                    data: platformFailed,
+                    backgroundColor: 'rgba(248, 113, 113, 0.8)',
+                    borderRadius: 4,
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    labels: { color: chartTextColor, font: { size: 12 } }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y}`
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    ticks: { color: chartTextColor },
+                    grid: { color: chartGridColor },
+                },
+                y: {
+                    beginAtZero: true,
+                    ticks: { color: chartTextColor, stepSize: 1 },
+                    grid: { color: chartGridColor },
+                },
+            },
         },
     });
 }

@@ -113,6 +113,24 @@ def index():
     market_stats = _build_market_stats(search_entries)
     status_counts = _build_status_counts(entries)
 
+    # Failure category breakdown
+    failure_categories = Counter()
+    for e in entries:
+        cat = e.get("failure_category")
+        if cat:
+            failure_categories[cat] += 1
+
+    # Success rate by ATS platform
+    platform_stats = defaultdict(lambda: {"submitted": 0, "failed": 0})
+    for e in entries:
+        plat = e.get("ats_platform", "unknown")
+        if not plat or plat == "unknown":
+            continue
+        if e.get("status", "").startswith("submitted"):
+            platform_stats[plat]["submitted"] += 1
+        elif e.get("status", "").startswith("failed"):
+            platform_stats[plat]["failed"] += 1
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
 
     return render_template(
@@ -120,6 +138,8 @@ def index():
         entries=entries,
         market_stats=market_stats,
         status_counts=status_counts,
+        failure_categories=dict(failure_categories),
+        platform_stats=dict(platform_stats),
         total_applications=len(entries),
         total_snapshots=len(search_entries),
         log_file=str(LOG_FILE),
@@ -153,11 +173,30 @@ def api_data():
     search_entries = _load_search_log()
     market_stats = _build_market_stats(search_entries)
     status_counts = _build_status_counts(entries)
+
+    failure_categories = Counter()
+    for e in entries:
+        cat = e.get("failure_category")
+        if cat:
+            failure_categories[cat] += 1
+
+    platform_stats = defaultdict(lambda: {"submitted": 0, "failed": 0})
+    for e in entries:
+        plat = e.get("ats_platform", "unknown")
+        if not plat or plat == "unknown":
+            continue
+        if e.get("status", "").startswith("submitted"):
+            platform_stats[plat]["submitted"] += 1
+        elif e.get("status", "").startswith("failed"):
+            platform_stats[plat]["failed"] += 1
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
     return {
         "entries": entries,
         "market_stats": market_stats,
         "status_counts": status_counts,
+        "failure_categories": dict(failure_categories),
+        "platform_stats": dict(platform_stats),
         "total_applications": len(entries),
         "total_snapshots": len(search_entries),
     }
