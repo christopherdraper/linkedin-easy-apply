@@ -416,7 +416,7 @@ const statusCounts = {{ status_counts | tojson }};
 const chartTextColor = '#8b8fa3';
 const chartGridColor = 'rgba(42, 45, 58, 0.5)';
 
-// -- Market pulse bar chart (total vs past 2 weeks) --
+// -- Market pulse bar chart (total vs 1 week vs 1 day) --
 if (marketStats.roles.length > 0) {
     const ctx1 = document.getElementById('marketChart').getContext('2d');
     new Chart(ctx1, {
@@ -431,9 +431,15 @@ if (marketStats.roles.length > 0) {
                     borderRadius: 4,
                 },
                 {
-                    label: 'Posted in Last 2 Weeks',
-                    data: marketStats.past_two_weeks,
+                    label: 'Past Week',
+                    data: marketStats.past_week,
                     backgroundColor: 'rgba(52, 211, 153, 0.75)',
+                    borderRadius: 4,
+                },
+                {
+                    label: 'Past 24 Hours',
+                    data: marketStats.past_day,
+                    backgroundColor: 'rgba(251, 191, 36, 0.75)',
                     borderRadius: 4,
                 },
             ],

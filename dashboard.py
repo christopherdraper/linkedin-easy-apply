@@ -3,7 +3,7 @@
 Dashboard for tracking LinkedIn Easy Apply job applications.
 
 Reads the application log and market snapshot log to display:
-  - Market pulse: total job postings per role (all results vs past 2 weeks)
+  - Market pulse: total job postings per role (total vs past week vs past 24h)
   - Application status table (searchable, sortable)
   - Application status breakdown
 
@@ -58,7 +58,8 @@ def _parse_ts(ts_str):
 def _build_market_stats(search_entries):
     """Build market data from search_log.json snapshots.
 
-    Each snapshot has: search_title, total_results, past_two_weeks_results, timestamp.
+    Each snapshot has: search_title, total_results, past_week_results,
+    past_day_results, timestamp.
     We take the most recent snapshot per role for the chart, and keep the full
     history for the timeline.
     """
@@ -80,7 +81,8 @@ def _build_market_stats(search_entries):
     return {
         "roles": roles,
         "total_results": [latest[r].get("total_results") or 0 for r in roles],
-        "past_two_weeks": [latest[r].get("past_two_weeks_results") or 0 for r in roles],
+        "past_week": [latest[r].get("past_week_results") or 0 for r in roles],
+        "past_day": [latest[r].get("past_day_results") or 0 for r in roles],
         "latest": {r: latest[r] for r in roles},
         "history": dict(history),
     }

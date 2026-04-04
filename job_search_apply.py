@@ -1150,9 +1150,9 @@ def market_snapshot(
     proxy: Optional[str] = None,
 ) -> List[Dict]:
     """
-    Lightweight market scan: for each job title, query LinkedIn twice
-    (all results, then filtered to past 2 weeks) and record the total
-    result count — no job cards parsed, no descriptions fetched.
+    Lightweight market scan: for each job title, query LinkedIn three times
+    (all results, past week, past 24 hours) and record the result
+    counts — no job cards parsed, no descriptions fetched.
 
     Returns list of snapshot entries saved to search_log.json.
     """
@@ -1192,22 +1192,33 @@ def market_snapshot(
                 total_count = _extract_results_count(page)
                 log.info(f"   Total results: {total_count or 'unknown'}")
 
-                # --- Past 2 weeks count (f_TPR = r1209600 = 14 days in seconds) ---
-                recent_params = {**base_params, "f_TPR": "r1209600"}
-                url_recent = f"https://www.linkedin.com/jobs/search/?{urlencode(recent_params)}"
-                page.goto(url_recent, wait_until="domcontentloaded", timeout=30000)
-                _ensure_logged_in(page, url_recent)
+                # --- Past 1 week count (f_TPR = r604800 = 7 days in seconds) ---
+                week_params = {**base_params, "f_TPR": "r604800"}
+                url_week = f"https://www.linkedin.com/jobs/search/?{urlencode(week_params)}"
+                page.goto(url_week, wait_until="domcontentloaded", timeout=30000)
+                _ensure_logged_in(page, url_week)
                 page.wait_for_timeout(3000)
 
-                recent_count = _extract_results_count(page)
-                log.info(f"   Past 2 weeks:  {recent_count or 'unknown'}")
+                week_count = _extract_results_count(page)
+                log.info(f"   Past week:     {week_count or 'unknown'}")
+
+                # --- Past 24 hours count (f_TPR = r86400 = 1 day in seconds) ---
+                day_params = {**base_params, "f_TPR": "r86400"}
+                url_day = f"https://www.linkedin.com/jobs/search/?{urlencode(day_params)}"
+                page.goto(url_day, wait_until="domcontentloaded", timeout=30000)
+                _ensure_logged_in(page, url_day)
+                page.wait_for_timeout(3000)
+
+                day_count = _extract_results_count(page)
+                log.info(f"   Past 24 hours: {day_count or 'unknown'}")
 
                 snapshots.append(
                     {
                         "search_title": title,
                         "source": "linkedin",
                         "total_results": total_count,
-                        "past_two_weeks_results": recent_count,
+                        "past_week_results": week_count,
+                        "past_day_results": day_count,
                         "location": location or "",
                         "remote": remote,
                         "timestamp": now,
@@ -2611,7 +2622,7 @@ Screening answers: {json.dumps(profile.screening_answers, indent=2)}
 Field label: "{question}"
 
 Rules:
-- "years of experience with X": single whole number. Use total years for related skills (DevOps=9, cloud=5, Linux=9, SRE=9, infrastructure=9, CI/CD=9). Use 0 for unknown tools.
+- "years of experience with X": single whole number. Use total years for related skills (DevOps=12, cloud=5, Linux=12, SRE=12, infrastructure=12, CI/CD=12). Use 0 for unknown tools.
 - "salary" / "desired salary" / "compensation": just the number (e.g. "150000")
 - "travel" / "willing to travel" / "percentage": just a number (e.g. "10")
 - Yes/No questions: just "Yes" or "No"
@@ -2620,43 +2631,12 @@ Rules:
 - Output ONLY the value. No quotes, no units, no explanation, no sentences."""
 
 
-def _answer_looks_bad(answer: str) -> bool:
-    """Return True if an AI-generated form answer looks like prose instead of a terse value."""
-    if len(answer) > 80:
-        return True
-    # Contains multiple sentences
-    if answer.count(".") >= 2 and len(answer) > 30:
-        return True
-    # Third-person references to the applicant
-    bad_phrases = [
-        "the applicant",
-        "the candidate",
-        "this field",
-        "cannot provide",
-        "not contain",
-        "not available",
-        "does not",
-        "profile does not",
-        "based on the",
-        "information about",
-        "market rate",
-        "flexible based",
-        "accommodate",
-    ]
-    lower = answer.lower()
-    if any(p in lower for p in bad_phrases):
-        return True
-    # Starts with "I " followed by a long explanation
-    if lower.startswith("i ") and len(answer) > 40:
-        return True
-    return False
-
-
 def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[str]:
     """
     Use Claude to answer a screening question not found in profile.screening_answers.
 
-    Uses Claude Sonnet for reliable, terse answers.
+    Uses Claude Sonnet for reliable, terse answers. Retries once with a stricter
+    prompt if the first attempt exceeds the character limit.
     """
     if not _AI_AVAILABLE:
         return None
@@ -2670,16 +2650,37 @@ def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[st
 
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=60,
+            max_tokens=25,
             system=_FORM_FILL_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
         answer = response.content[0].text.strip()
 
-        # Final guard: still too long after correction
+        # Retry once with ultra-strict prompt if too long
         if len(answer) > 100:
-            log.warning(f"   🛡️  Answer still too long ({len(answer)} chars), skipping")
-            return None
+            log.info(f"   🔄 Answer too long ({len(answer)} chars), retrying with strict prompt")
+            retry_response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=15,
+                system=(
+                    "Output ONLY 1-3 words. A number, a name, or a short phrase. "
+                    "NOTHING else. No sentences."
+                ),
+                messages=[
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": answer},
+                    {
+                        "role": "user",
+                        "content": "Too long. Give ONLY the value in 1-3 words max.",
+                    },
+                ],
+            )
+            answer = retry_response.content[0].text.strip()
+            if len(answer) > 100:
+                log.warning(
+                    f"   🛡️  Answer still too long after retry ({len(answer)} chars), skipping"
+                )
+                return None
 
         if _looks_like_injection(answer):
             log.warning(f"   🛡️  AI answer looks injected, skipping: {answer[:80]!r}")

@@ -1,7 +1,6 @@
 """Tests for screening question matching and answer validation."""
 
 from job_search_apply import (
-    _answer_looks_bad,
     _determine_radio_answer,
     _match_screening_answer,
 )
@@ -73,51 +72,3 @@ class TestDetermineRadioAnswer:
     def test_unknown_defaults_to_yes(self, profile):
         # Unknown questions with no AI should default to "yes"
         assert _determine_radio_answer("some completely unknown question?", profile) == "yes"
-
-
-class TestAnswerLooksBad:
-    def test_short_number(self):
-        assert _answer_looks_bad("5") is False
-
-    def test_short_word(self):
-        assert _answer_looks_bad("Yes") is False
-
-    def test_short_phrase(self):
-        assert _answer_looks_bad("Indianapolis, IN") is False
-
-    def test_long_prose(self):
-        assert (
-            _answer_looks_bad(
-                "The applicant has extensive experience in DevOps and would be happy to discuss "
-                "their qualifications in more detail during an interview."
-            )
-            is True
-        )
-
-    def test_too_long(self):
-        assert _answer_looks_bad("x" * 81) is True
-
-    def test_multiple_sentences(self):
-        assert _answer_looks_bad("I have 5 years. I also have Docker. Plus Kubernetes.") is True
-
-    def test_bad_phrases(self):
-        assert _answer_looks_bad("The applicant has 5 years") is True
-        assert _answer_looks_bad("Cannot provide this information") is True
-        assert _answer_looks_bad("Profile does not contain salary info") is True
-        assert _answer_looks_bad("Based on the job description") is True
-        assert _answer_looks_bad("Market rate for this position") is True
-
-    def test_i_prefix_long(self):
-        assert (
-            _answer_looks_bad("I have extensive experience in cloud infrastructure and automation")
-            is True
-        )
-
-    def test_i_prefix_short(self):
-        # Short "I ..." answers are fine
-        assert _answer_looks_bad("I understand") is False
-
-    def test_reasonable_answers(self):
-        good_answers = ["150000", "9", "Yes", "No", "2 weeks", "LinkedIn", "Bachelor's", "10"]
-        for answer in good_answers:
-            assert _answer_looks_bad(answer) is False, f"Falsely flagged: {answer!r}"
