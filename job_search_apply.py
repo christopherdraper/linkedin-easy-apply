@@ -24,6 +24,13 @@ try:
 except ImportError:
     _AI_AVAILABLE = False
 
+try:
+    from playwright_stealth import Stealth
+
+    _STEALTH = Stealth()
+except ImportError:
+    _STEALTH = None
+
 _ai_client = None
 
 
@@ -512,6 +519,15 @@ def _login_linkedin(page) -> bool:
     return False
 
 
+def _stealth_playwright():
+    """Return a stealth-wrapped sync_playwright() context manager if available."""
+    from playwright.sync_api import sync_playwright
+
+    if _STEALTH is not None:
+        return _STEALTH.use_sync(sync_playwright())
+    return sync_playwright()
+
+
 def _playwright_context(p, proxy: Optional[str] = None):
     """
     Connect to an existing Chromium via CDP if available, otherwise launch a new one.
@@ -554,10 +570,12 @@ def _playwright_context(p, proxy: Optional[str] = None):
         locale="en-US",
         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
     )
-    # Remove the webdriver navigator flag that automation detectors check
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-    """)
+    # Stealth plugin handles webdriver override + fingerprint evasions automatically
+    # Only add manual fallback if stealth is not available
+    if _STEALTH is None:
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        """)
     page = context.new_page()
     log.debug("Launched standalone headless Chromium (cookie file)")
     return browser, context, page, True
@@ -1088,7 +1106,7 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
     Fetches full job descriptions for AI scoring.
     """
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
         raise RuntimeError("Run: pip install playwright && playwright install chromium") from None
 
@@ -1105,7 +1123,7 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
     url = f"https://www.linkedin.com/jobs/search/?{urlencode(query_parts)}"
 
     jobs = []
-    with sync_playwright() as p:
+    with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(p, proxy)
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -1196,7 +1214,7 @@ def market_snapshot(
     Returns list of snapshot entries saved to search_log.json.
     """
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
         raise RuntimeError("Run: pip install playwright && playwright install chromium") from None
 
@@ -1205,7 +1223,7 @@ def market_snapshot(
     snapshots = []
     now = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    with sync_playwright() as p:
+    with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(p, proxy)
         try:
             for i, title in enumerate(titles):
@@ -1676,11 +1694,11 @@ def _message_hiring_manager_after_apply(
         return None, None, None
 
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
         return None, None, None
 
-    with sync_playwright() as p:
+    with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(p, proxy)
         try:
             page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
@@ -2099,11 +2117,11 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
     _ai_tokens_in = 0
     _ai_tokens_out = 0
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
         raise RuntimeError("Playwright not installed") from None
 
-    with sync_playwright() as p:
+    with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(p, proxy)
         try:
             page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
@@ -4249,11 +4267,11 @@ def submit_external_apply(
     _ai_tokens_in = 0
     _ai_tokens_out = 0
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
         raise RuntimeError("Playwright not installed") from None
 
-    with sync_playwright() as p:
+    with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(p, proxy)
         try:
             page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
@@ -4594,7 +4612,7 @@ def _sync_linkedin_profile(profile_path: str) -> None:
     """Scrape the user's LinkedIn profile and update profile.json with full work history."""
     global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
         raise RuntimeError("Playwright not installed") from None
 
@@ -4606,7 +4624,7 @@ def _sync_linkedin_profile(profile_path: str) -> None:
 
     log.info(f"🔄 Syncing profile from LinkedIn: {profile_url}")
 
-    with sync_playwright() as p:
+    with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(p)
         try:
             page.goto(profile_url, wait_until="domcontentloaded", timeout=20000)
