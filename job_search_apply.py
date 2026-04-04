@@ -41,6 +41,10 @@ SEARCH_LOG_FILE = DATA_DIR / "search_log.json"
 
 # Per-application field fill tracker — cleared at start of each application
 _field_fills: List[Dict[str, str]] = []
+# Per-application AI answer failure tracker — cleared alongside _field_fills
+_ai_answer_failures: List[Dict[str, str]] = []
+# Per-application timing — set at start of submit, read at log time
+_apply_start_time: float = 0.0
 COVER_LETTER_DIR = DATA_DIR / "cover-letters"
 SESSION_FILE = DATA_DIR / "sessions" / "linkedin.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
@@ -2024,7 +2028,7 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
                     err_hint = f" errors={errors}" if errors else ""
                     log.debug("Review click didn't change modal (stalled=%d)%s", stalled, err_hint)
                     if stalled >= 3:
-                        reason = "Review not advancing"
+                        reason = f"Review not advancing (step {_step + 1}/{max_steps})"
                         if errors:
                             reason += f" (validation: {'; '.join(errors)[:200]})"
                         _dump_form_debug(page, job_id, reason)
@@ -2050,7 +2054,7 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
                     err_hint = f" errors={errors}" if errors else ""
                     log.debug("Next click didn't change modal (stalled=%d)%s", stalled, err_hint)
                     if stalled >= 3:
-                        reason = "Next not advancing"
+                        reason = f"Next not advancing (step {_step + 1}/{max_steps})"
                         if errors:
                             reason += f" (validation: {'; '.join(errors)[:200]})"
                         _dump_form_debug(page, job_id, reason)
@@ -2073,7 +2077,10 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
     Submit a LinkedIn Easy Apply application.
     Returns 'submitted' on success, 'failed: <reason>' on failure.
     """
+    global _apply_start_time  # noqa: PLW0603
+    _apply_start_time = time.time()
     _field_fills.clear()
+    _ai_answer_failures.clear()
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -2742,6 +2749,9 @@ def _ai_answer_question(
                 log.warning(
                     f"   🛡️  Answer still too long after retry ({len(answer)} chars), skipping"
                 )
+                _ai_answer_failures.append(
+                    {"field": question[:100], "answer": answer[:200], "reason": "too_long"}
+                )
                 return None
 
         if _looks_like_injection(answer):
@@ -2760,6 +2770,31 @@ def _ai_answer_question(
 # ---------------------------------------------------------------------------
 
 _MAX_EXTERNAL_STEPS = 20
+
+_ATS_PATTERNS = [
+    ("Workday", "myworkdayjobs.com"),
+    ("Workday", "myworkday.com"),
+    ("Greenhouse", "greenhouse.io"),
+    ("Greenhouse", "boards.greenhouse.io"),
+    ("Lever", "jobs.lever.co"),
+    ("iCIMS", "icims.com"),
+    ("Ashby", "ashbyhq.com"),
+    ("SmartRecruiters", "smartrecruiters.com"),
+    ("Jobvite", "jobvite.com"),
+    ("BambooHR", "bamboohr.com"),
+    ("JazzHR", "applytojob.com"),
+    ("Rippling", "ats.rippling.com"),
+]
+
+
+def _detect_ats_platform(url: str) -> str:
+    """Detect the ATS platform from a URL."""
+    lower = url.lower()
+    for name, pattern in _ATS_PATTERNS:
+        if pattern in lower:
+            return name
+    return "unknown"
+
 
 _PAGE_CLASSIFIER_SYSTEM = (
     "You classify job application web pages to determine what automated actions are needed. "
@@ -3830,7 +3865,7 @@ def _navigate_external_form(  # noqa: C901
                 stalled += 1
                 if stalled >= 3:
                     _dump_form_debug(page, job.get("id", ""), "External form stalled")
-                    return "failed: external form stuck (same page for 3 steps)"
+                    return f"failed: external form stuck (step {step + 1}/{_MAX_EXTERNAL_STEPS})"
         else:
             stalled = 0
         prev_snapshot = snapshot
@@ -4119,7 +4154,10 @@ def submit_external_apply(
     Works on any ATS (Workday, Greenhouse, Lever, iCIMS, etc.).
     Returns status string.
     """
+    global _apply_start_time  # noqa: PLW0603
+    _apply_start_time = time.time()
     _field_fills.clear()
+    _ai_answer_failures.clear()
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -4149,6 +4187,7 @@ def submit_external_apply(
                     if vision_result:
                         _, apply_btn = vision_result
                     if not apply_btn:
+                        _dump_form_debug(page, job.get("id", ""), "No Apply button found")
                         return "failed: no Apply button found on LinkedIn job page"
 
                 _safe_click(apply_btn, page)
@@ -4391,6 +4430,11 @@ def auto_apply_workflow(  # noqa: C901
                 "hiring_manager_message_text": msg_text,
                 "hiring_manager_name": msg_poster,
                 "fields_filled": list(_field_fills),
+                "ai_answer_failures": list(_ai_answer_failures),
+                "duration_seconds": round(time.time() - _apply_start_time, 1)
+                if _apply_start_time
+                else None,
+                "ats_platform": _detect_ats_platform(job.get("url", "")),
             }
         )
         applied += 1
