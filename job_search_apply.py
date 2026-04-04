@@ -2791,6 +2791,29 @@ def _ai_answer_question(
 # External ATS form filler (Workday, Greenhouse, Lever, iCIMS, etc.)
 # ---------------------------------------------------------------------------
 
+
+def _detect_captcha(page) -> bool:
+    """Check if the page has a CAPTCHA/reCAPTCHA challenge blocking submission."""
+    try:
+        return page.evaluate("""() => {
+            // reCAPTCHA v2 iframe
+            if (document.querySelector('iframe[src*="recaptcha"]')) return true;
+            // reCAPTCHA v3 badge
+            if (document.querySelector('.grecaptcha-badge')) return true;
+            // hCaptcha
+            if (document.querySelector('iframe[src*="hcaptcha"]')) return true;
+            // Cloudflare Turnstile
+            if (document.querySelector('iframe[src*="challenges.cloudflare"]')) return true;
+            // Generic captcha indicators in error messages
+            const body = document.body.innerText.toLowerCase();
+            if (body.includes('flagged as possible spam')) return true;
+            if (body.includes('perform the security check')) return true;
+            return false;
+        }""")
+    except Exception:
+        return False
+
+
 _MAX_EXTERNAL_STEPS = 20
 
 _ATS_PATTERNS = [
@@ -2821,6 +2844,10 @@ def _detect_ats_platform(url: str) -> str:
 def _categorize_failure(status: str) -> str:
     """Map a freeform failure status string to a structured category."""
     s = status.lower()
+    # Check captcha/spam BEFORE validation_error — spam flags often arrive
+    # wrapped in a validation error message
+    if "spam" in s or "captcha" in s or "security check" in s or "recaptcha" in s:
+        return "captcha"
     if "form stuck" in s or "form steps" in s or "lost track" in s:
         return "form_stuck"
     if "validation error" in s:
@@ -2829,35 +2856,11 @@ def _categorize_failure(status: str) -> str:
         return "no_apply_button"
     if "requires account" in s or "login" in s:
         return "login_wall"
-    if "spam" in s or "captcha" in s or "security check" in s:
-        return "captcha"
     if "modal" in s:
         return "modal_lost"
     if "max steps" in s or "too many" in s:
         return "max_steps"
     if "timeout" in s or "timed out" in s:
-        return "timeout"
-    return "other"
-
-
-def _categorize_failure(status: str) -> str:
-    """Map a freeform failure status string to a structured category."""
-    lower = status.lower()
-    if "form stuck" in lower or "form steps" in lower:
-        return "form_stuck"
-    if "validation error" in lower:
-        return "validation_error"
-    if "no apply button" in lower:
-        return "no_apply_button"
-    if "requires account" in lower or "login" in lower:
-        return "login_wall"
-    if "spam" in lower or "captcha" in lower or "security check" in lower:
-        return "captcha"
-    if "modal" in lower or "lost track" in lower:
-        return "modal_lost"
-    if "max steps" in lower or "too many" in lower:
-        return "max_steps"
-    if "timeout" in lower or "timed out" in lower:
         return "timeout"
     return "other"
 
@@ -3916,6 +3919,12 @@ def _navigate_external_form(  # noqa: C901
             log.info(f"   🔒 Requires account: {page.url[:60]}")
             return "skipped: requires account"
 
+        # Early captcha detection — bail immediately instead of filling the form
+        if _detect_captcha(page):
+            log.warning("   🛡️  CAPTCHA/reCAPTCHA detected — cannot proceed")
+            _dump_form_debug(page, job.get("id", ""), "CAPTCHA detected")
+            return "failed: captcha required"
+
         # Take snapshot and check for success
         snapshot = _extract_page_snapshot(page)
 
@@ -4114,7 +4123,14 @@ def _navigate_external_form(  # noqa: C901
                         "verify you're a human",
                         "confirm you're a human",
                     )
-                    captcha_patterns = ("captcha", "recaptcha", "hcaptcha")
+                    captcha_patterns = (
+                        "captcha",
+                        "recaptcha",
+                        "hcaptcha",
+                        "flagged as possible spam",
+                        "perform the security check",
+                        "bot detection",
+                    )
                     if any(bp in es_lower for bp in email_code_patterns):
                         # Try to fetch the code from Gmail via IMAP
                         if profile.gmail_app_password:
