@@ -197,6 +197,11 @@ class ApplicantProfile:
     city: Optional[str] = None
     state: Optional[str] = None
     zip_code: Optional[str] = None
+    country: Optional[str] = None
+    degree: Optional[str] = None
+    university: Optional[str] = None
+    graduation_year: Optional[int] = None
+    clearance: Optional[str] = None
     skills: List[str] = field(default_factory=list)
     specializations: List[str] = field(default_factory=list)
     authorized_to_work: bool = True
@@ -232,6 +237,15 @@ class ApplicantProfile:
             if cl_file.exists():
                 cover_letter_template = cl_file.read_text()
 
+        edu = p.get("education", {})
+        screening = p.get("screening_answers", {})
+        # Derive clearance from screening answers
+        clearance = None
+        for key in ("security clearance", "do you have a security clearance", "clearance"):
+            if key in screening:
+                clearance = screening[key]
+                break
+
         return cls(
             full_name=personal.get("full_name", ""),
             email=personal.get("email", ""),
@@ -247,11 +261,16 @@ class ApplicantProfile:
             city=location.get("city"),
             state=location.get("state"),
             zip_code=location.get("zip_code"),
+            country=location.get("country"),
+            degree=edu.get("highest_degree"),
+            university=edu.get("university"),
+            graduation_year=edu.get("graduation_year"),
+            clearance=clearance,
             skills=all_skills,
             specializations=exp.get("specializations", []),
             authorized_to_work=work_auth.get("authorized_to_work_us", True),
             requires_sponsorship=work_auth.get("requires_visa_sponsorship", False),
-            screening_answers=p.get("screening_answers", {}),
+            screening_answers=screening,
             gmail_app_password=(
                 p.get("application_settings", {}).get("gmail_app_password")
                 if p.get("application_settings", {}).get("auto_fetch_verification_codes")
@@ -282,6 +301,14 @@ def _format_previous_employers(profile: ApplicantProfile) -> str:
 def _profile_summary(profile: ApplicantProfile) -> str:
     """Build a text summary of the applicant for use in AI prompts."""
     location_parts = [p for p in [profile.city, profile.state] if p]
+    edu_parts = []
+    if profile.degree:
+        edu_parts.append(profile.degree)
+    if profile.university:
+        edu_parts.append(f"from {profile.university}")
+    if profile.graduation_year:
+        edu_parts.append(f"({profile.graduation_year})")
+    education_line = " ".join(edu_parts) if edu_parts else "not provided"
     return f"""Name: {profile.full_name}
 Email: {profile.email}
 Phone: {profile.phone}
@@ -292,6 +319,8 @@ Current title: {profile.current_title or "not provided"}
 Current employer: {profile.current_employer or "not provided"}
 Previous roles: {_format_previous_employers(profile)}
 Total years of experience: {profile.years_experience}
+Education: {education_line}
+Security clearance: {profile.clearance or "none"}
 Specializations: {", ".join(profile.specializations)}
 Skills & tools: {", ".join(profile.skills)}
 Authorized to work in US: {profile.authorized_to_work}
@@ -1910,7 +1939,15 @@ def _get_modal_text(page) -> str:
     return ""
 
 
-def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> str:  # noqa: C901
+def _navigate_form(  # noqa: C901
+    page,
+    profile,
+    owns_browser,
+    context,
+    job_id: str = "",
+    job_title: Optional[str] = None,
+    company: Optional[str] = None,
+) -> str:
     """Navigate through multi-step Easy Apply form. Returns status string."""
     max_steps = 15
     stalled = 0
@@ -1927,7 +1964,7 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
             return "failed: lost track of form steps"
 
         # Fill screening questions on EVERY page (new fields appear after each Next)
-        _answer_screening_questions(page, profile)
+        _answer_screening_questions(page, profile, job_title=job_title, company=company)
 
         submit_btn = page.query_selector(
             "button[aria-label='Submit application'], button[aria-label*='Submit']"
@@ -2072,8 +2109,18 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
             if resume_input:
                 resume_input.set_input_files(resume_path)
 
-            _answer_screening_questions(page, profile)
-            return _navigate_form(page, profile, owns_browser, context, job_id=job.get("id", ""))
+            jt = job.get("title")
+            jc = job.get("company")
+            _answer_screening_questions(page, profile, job_title=jt, company=jc)
+            return _navigate_form(
+                page,
+                profile,
+                owns_browser,
+                context,
+                job_id=job.get("id", ""),
+                job_title=jt,
+                company=jc,
+            )
 
         except ApplicationAbortError as e:
             log.warning(f"   🛡️  Application aborted: {e}")
@@ -2228,8 +2275,13 @@ def _determine_radio_answer(question: str, profile: ApplicantProfile) -> str:
     return "yes"
 
 
-def _answer_textareas(page, profile: ApplicantProfile) -> None:
-    """Fill textarea fields from profile.screening_answers."""
+def _answer_textareas(
+    page,
+    profile: ApplicantProfile,
+    job_title: Optional[str] = None,
+    company: Optional[str] = None,
+) -> None:
+    """Fill textarea fields from profile.screening_answers, then AI for unmatched."""
     for question, answer in profile.screening_answers.items():
         for textarea in page.query_selector_all("textarea"):
             placeholder = (textarea.get_attribute("placeholder") or "").lower()
@@ -2245,6 +2297,31 @@ def _answer_textareas(page, profile: ApplicantProfile) -> None:
                     {"field": question, "value": answer[:200], "source": "screening_answers"}
                 )
 
+    # AI fallback for unfilled textareas (e.g. "Why are you interested in this role?")
+    for textarea in page.query_selector_all("textarea"):
+        try:
+            if textarea.input_value():
+                continue
+            if not textarea.is_visible():
+                continue
+        except Exception:
+            continue
+        label_text = ""
+        label_id = textarea.get_attribute("id")
+        if label_id:
+            label_el = page.query_selector(f"label[for='{label_id}']")
+            if label_el:
+                label_text = label_el.inner_text().strip()
+        if not label_text:
+            continue
+        _check_field_label(label_text)
+        ai_answer = _ai_answer_textarea(label_text, profile, job_title=job_title, company=company)
+        if ai_answer:
+            textarea.fill(ai_answer)
+            _field_fills.append(
+                {"field": label_text, "value": ai_answer[:200], "source": "ai_textarea"}
+            )
+
 
 def _contact_value_for_label(label_text: str, profile: ApplicantProfile) -> Optional[str]:
     """Return the matching contact field value for a label, or None if not a contact field."""
@@ -2256,6 +2333,7 @@ def _contact_value_for_label(label_text: str, profile: ApplicantProfile) -> Opti
         (("city",), profile.city or ""),
         (("state", "region", "province"), state_value),
         (("zip", "postal"), profile.zip_code or ""),
+        (("country",), profile.country or ""),
         (("linkedin",), profile.linkedin_url or ""),
         (("github",), profile.github_url or ""),
         (("email",), profile.email),
@@ -2575,12 +2653,17 @@ def _get_form_container(page):
     return modal if modal else page
 
 
-def _answer_screening_questions(page, profile: ApplicantProfile) -> None:
+def _answer_screening_questions(
+    page,
+    profile: ApplicantProfile,
+    job_title: Optional[str] = None,
+    company: Optional[str] = None,
+) -> None:
     """Answer all screening questions on the current form step."""
     # Scope all queries to the modal to avoid picking up video player / page inputs
     form = _get_form_container(page)
     _answer_radio_buttons(form, profile)
-    _answer_textareas(form, profile)
+    _answer_textareas(form, profile, job_title=job_title, company=company)
     _answer_select_dropdowns(form, profile)
     _check_mandatory_checkboxes(form)
 
@@ -2614,9 +2697,22 @@ _FORM_FILL_SYSTEM = (
 )
 
 
-def _build_form_prompt(question: str, profile: ApplicantProfile) -> str:
+def _build_form_prompt(
+    question: str,
+    profile: ApplicantProfile,
+    job_title: Optional[str] = None,
+    company: Optional[str] = None,
+) -> str:
+    job_context = ""
+    if job_title or company:
+        parts = []
+        if job_title:
+            parts.append(job_title)
+        if company:
+            parts.append(f"at {company}")
+        job_context = f"\nApplying for: {' '.join(parts)}\n"
     return f"""Applicant profile:
-{_profile_summary(profile)}
+{_profile_summary(profile)}{job_context}
 Screening answers: {json.dumps(profile.screening_answers, indent=2)}
 
 Field label: "{question}"
@@ -2631,7 +2727,12 @@ Rules:
 - Output ONLY the value. No quotes, no units, no explanation, no sentences."""
 
 
-def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[str]:
+def _ai_answer_question(
+    question: str,
+    profile: ApplicantProfile,
+    job_title: Optional[str] = None,
+    company: Optional[str] = None,
+) -> Optional[str]:
     """
     Use Claude to answer a screening question not found in profile.screening_answers.
 
@@ -2646,7 +2747,7 @@ def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[st
 
     try:
         client = _get_ai_client()
-        prompt = _build_form_prompt(question, profile)
+        prompt = _build_form_prompt(question, profile, job_title=job_title, company=company)
 
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -2690,6 +2791,57 @@ def _ai_answer_question(question: str, profile: ApplicantProfile) -> Optional[st
         return answer
     except Exception as e:
         log.warning(f"   AI answer failed for '{question[:60]}': {e}")
+        return None
+
+
+_TEXTAREA_FILL_SYSTEM = (
+    "You answer job application textarea questions with a brief, professional paragraph "
+    "(2-4 sentences). Be specific and reference the applicant's actual experience. "
+    "Never refuse to answer."
+)
+
+
+def _ai_answer_textarea(
+    question: str,
+    profile: ApplicantProfile,
+    job_title: Optional[str] = None,
+    company: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Use Claude to answer a textarea question with a paragraph-length response.
+
+    Unlike _ai_answer_question (which targets short fields with max_tokens=25),
+    this uses max_tokens=200 and a system prompt tuned for 2-4 sentence answers.
+    """
+    if not _AI_AVAILABLE:
+        return None
+
+    if _looks_like_injection(question):
+        raise ApplicationAbortError(f"Prompt injection detected in form field: {question[:80]!r}")
+
+    try:
+        client = _get_ai_client()
+        prompt = _build_form_prompt(question, profile, job_title=job_title, company=company)
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            system=_TEXTAREA_FILL_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        answer = response.content[0].text.strip()
+
+        if len(answer) > 500:
+            answer = answer[:497] + "..."
+
+        if _looks_like_injection(answer):
+            log.warning(f"   🛡️  AI textarea answer looks injected, skipping: {answer[:80]!r}")
+            return None
+
+        log.info(f"   🤖 AI textarea answered '{question[:60]}' → '{answer[:80]}...'")
+        return answer
+    except Exception as e:
+        log.warning(f"   AI textarea answer failed for '{question[:60]}': {e}")
         return None
 
 
@@ -2875,7 +3027,7 @@ Interactive elements found on page:
 
 Return ONLY this JSON structure:
 {{
-  "page_type": "form" | "login" | "file_upload" | "confirmation" | "error" | "unknown",
+  "page_type": "form" | "login" | "file_upload" | "confirmation" | "error" | "job_search" | "unknown",
   "has_required_login": true | false,
   "has_file_upload": true | false,
   "has_form_fields": true | false,
@@ -3162,7 +3314,12 @@ def _fill_custom_dropdown(
     return False
 
 
-def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int:  # noqa: C901
+def _answer_external_screening_questions(  # noqa: C901
+    page,
+    profile: ApplicantProfile,
+    job_title: Optional[str] = None,
+    company: Optional[str] = None,
+) -> int:
     """
     Fill all form fields on an external ATS page using generic selectors.
     Reuses the existing field-filling pipeline. Returns count of fields filled.
@@ -3181,7 +3338,7 @@ def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int
     except Exception as exc:
         log.debug("External select dropdowns failed: %s", exc)
 
-    # Textareas — fill with AI (the built-in handler only matches exact screening_answers)
+    # Textareas — fill with AI textarea handler (paragraph-length answers)
     try:
         for textarea in page.query_selector_all("textarea"):
             try:
@@ -3195,7 +3352,7 @@ def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int
             if not label_text:
                 continue
             _check_field_label(label_text)
-            answer = _ai_answer_question(label_text, profile)
+            answer = _ai_answer_textarea(label_text, profile, job_title=job_title, company=company)
             if answer:
                 textarea.fill(answer)
                 filled += 1
@@ -3214,9 +3371,11 @@ def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int
         log.debug("External checkboxes failed: %s", exc)
 
     # Custom dropdowns (non-native, ARIA-based)
-    # Skip phone country-code widgets (intl-tel-input) and location autocompletes
-    _SKIP_COMBOBOX_IDS = {"iti-0__search-input", "iti-1__search-input", "candidate-location"}
+    # Skip phone country-code widgets (intl-tel-input)
+    _SKIP_COMBOBOX_IDS = {"iti-0__search-input", "iti-1__search-input"}
     _SKIP_COMBOBOX_CLASSES = {"iti__search-input"}
+    # Location autocomplete fields — type city, wait for suggestions, click first match
+    _LOCATION_COMBOBOX_IDS = {"candidate-location"}
     try:
         for combo in page.query_selector_all("[role='combobox']"):
             combo_id = combo.get_attribute("id") or ""
@@ -3225,6 +3384,41 @@ def _answer_external_screening_questions(page, profile: ApplicantProfile) -> int
             if combo_id in _SKIP_COMBOBOX_IDS or any(
                 c in combo_cls for c in _SKIP_COMBOBOX_CLASSES
             ):
+                continue
+            # Handle location autocomplete with type-wait-click
+            if combo_id in _LOCATION_COMBOBOX_IDS:
+                try:
+                    if combo.input_value():
+                        continue
+                except Exception:
+                    pass
+                location_str = f"{profile.city or 'Indianapolis'}, {profile.state or 'IN'}"
+                try:
+                    combo.click()
+                    combo.fill("")
+                    combo.type(location_str, delay=50)
+                    page.wait_for_timeout(2000)
+                    # Click first matching suggestion in the autocomplete dropdown
+                    suggestion = page.query_selector(
+                        "[role='listbox'] [role='option'], "
+                        "[class*='autocomplete'] li, "
+                        "[class*='suggestion'] li, "
+                        "[id*='location'] [role='option'], "
+                        "ul[id*='location'] li, "
+                        "div[id*='location-autocomplete'] li"
+                    )
+                    if suggestion and suggestion.is_visible():
+                        suggestion.click()
+                        page.wait_for_timeout(500)
+                        filled += 1
+                        _field_fills.append(
+                            {"field": "location", "value": location_str, "source": "autocomplete"}
+                        )
+                        log.info(f"   📍 Filled location autocomplete: {location_str}")
+                    else:
+                        log.debug("Location autocomplete: no suggestion appeared")
+                except Exception as exc:
+                    log.debug("Location autocomplete failed: %s", exc)
                 continue
             # Skip location autocomplete inputs (geocoding, not a fixed dropdown)
             aria_controls = combo.get_attribute("aria-controls") or ""
@@ -3696,7 +3890,12 @@ def _navigate_external_form(  # noqa: C901
         # Stall detection — try filling missed fields before giving up
         if snapshot == prev_snapshot:
             # Re-attempt field filling on stall (fields may have appeared after click)
-            n_refilled = _answer_external_screening_questions(page, profile)
+            n_refilled = _answer_external_screening_questions(
+                page,
+                profile,
+                job_title=job.get("title"),
+                company=job.get("company"),
+            )
             if n_refilled > 0:
                 log.debug("External form stalled but filled %d new fields, retrying", n_refilled)
                 fields_filled_total += n_refilled
@@ -3819,7 +4018,12 @@ def _navigate_external_form(  # noqa: C901
 
         # Fill form fields
         if classification.get("has_form_fields") or classification["page_type"] == "form":
-            n = _answer_external_screening_questions(page, profile)
+            n = _answer_external_screening_questions(
+                page,
+                profile,
+                job_title=job.get("title"),
+                company=job.get("company"),
+            )
             fields_filled_total += n
             if n > 0:
                 stalled = 0  # filling fields counts as progress
@@ -4016,6 +4220,11 @@ def submit_external_apply(
                     "a.jobs-apply-button, "
                     "button:has-text('Apply'):not(:has-text('Easy'))"
                 )
+                if not apply_btn and _AI_AVAILABLE:
+                    log.info("   👁️ CSS selectors missed Apply button, trying vision fallback")
+                    vision_result = _ai_find_navigation_button(page)
+                    if vision_result:
+                        _role, apply_btn = vision_result
                 if not apply_btn:
                     return "failed: no Apply button found on LinkedIn job page"
 
