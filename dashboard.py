@@ -131,6 +131,18 @@ def index():
         elif e.get("status", "").startswith("failed"):
             platform_stats[plat]["failed"] += 1
 
+    # Score distribution histogram (10 bins)
+    score_bins = [0] * 10  # 0-10%, 10-20%, ..., 90-100%
+    for e in entries:
+        s = e.get("match_score")
+        if s is not None and s > 0:
+            idx = min(int(s * 10), 9)
+            score_bins[idx] += 1
+
+    # Hiring manager message stats
+    hm_sent = sum(1 for e in entries if e.get("hiring_manager_messaged") == "sent")
+    hm_eligible = sum(1 for e in entries if e.get("status", "").startswith("submitted"))
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
 
     return render_template(
@@ -143,6 +155,9 @@ def index():
         total_applications=len(entries),
         total_snapshots=len(search_entries),
         log_file=str(LOG_FILE),
+        score_bins=score_bins,
+        hm_sent=hm_sent,
+        hm_eligible=hm_eligible,
     )
 
 
@@ -190,6 +205,16 @@ def api_data():
         elif e.get("status", "").startswith("failed"):
             platform_stats[plat]["failed"] += 1
 
+    score_bins = [0] * 10
+    for e in entries:
+        s = e.get("match_score")
+        if s is not None and s > 0:
+            idx = min(int(s * 10), 9)
+            score_bins[idx] += 1
+
+    hm_sent = sum(1 for e in entries if e.get("hiring_manager_messaged") == "sent")
+    hm_eligible = sum(1 for e in entries if e.get("status", "").startswith("submitted"))
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
     return {
         "entries": entries,
@@ -199,6 +224,9 @@ def api_data():
         "platform_stats": dict(platform_stats),
         "total_applications": len(entries),
         "total_snapshots": len(search_entries),
+        "score_bins": score_bins,
+        "hm_sent": hm_sent,
+        "hm_eligible": hm_eligible,
     }
 
 

@@ -45,6 +45,9 @@ _field_fills: List[Dict[str, str]] = []
 _ai_answer_failures: List[Dict[str, str]] = []
 # Per-application timing — set at start of submit, read at log time
 _apply_start_time: float = 0.0
+# Per-application AI token usage — cleared at start of each submit
+_ai_tokens_in: int = 0
+_ai_tokens_out: int = 0
 COVER_LETTER_DIR = DATA_DIR / "cover-letters"
 SESSION_FILE = DATA_DIR / "sessions" / "linkedin.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
@@ -1300,6 +1303,7 @@ def ai_score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     Returns score (0-1), reasoning, matched skills, and any deal-breakers.
     Falls back to keyword scoring if AI is unavailable.
     """
+    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE:
         return score_job(job, profile)
 
@@ -1332,6 +1336,8 @@ STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or tale
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
         )
+        _ai_tokens_in += response.usage.input_tokens
+        _ai_tokens_out += response.usage.output_tokens
         raw = response.content[0].text.strip()
         # Extract JSON even if Claude wraps it in markdown code fences
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -1350,6 +1356,7 @@ def ai_generate_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
     Generate a personalized cover letter using Claude, guided by the template and its instructions.
     Falls back to basic template substitution if AI is unavailable.
     """
+    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE or not profile.cover_letter_template:
         return _basic_cover_letter(job, profile)
 
@@ -1391,6 +1398,8 @@ Fill in every {{PLACEHOLDER}} in the template using the job description and cand
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
+        _ai_tokens_in += response.usage.input_tokens
+        _ai_tokens_out += response.usage.output_tokens
         return response.content[0].text.strip()
     except Exception as e:
         log.warning(f"   AI cover letter failed, using basic template: {e}")
@@ -1427,6 +1436,7 @@ def ai_build_notes(job: Dict, compat: Dict) -> str:
     what the role is, what they're looking for, and any flags.
     Falls back to raw field dump if AI is unavailable.
     """
+    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE:
         return _basic_notes(job, compat)
 
@@ -1451,6 +1461,8 @@ Cover: what the company does, what the role involves day-to-day, what stack/tool
             max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
         )
+        _ai_tokens_in += response.usage.input_tokens
+        _ai_tokens_out += response.usage.output_tokens
         notes = response.content[0].text.strip()
         # Append deal-breakers if any, so they're always visible
         if deal_breakers:
@@ -1539,6 +1551,7 @@ def _ai_draft_hiring_message(
     job: Dict, profile: "ApplicantProfile", poster_name: str
 ) -> Optional[str]:
     """Draft a short personalized message to the hiring manager using Claude."""
+    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE:
         return None
     try:
@@ -1569,6 +1582,8 @@ Guidelines:
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
+        _ai_tokens_in += response.usage.input_tokens
+        _ai_tokens_out += response.usage.output_tokens
         msg = response.content[0].text.strip()
         # Strip any AI preamble, self-corrections, or extra lines
         lines = msg.split("\n")
@@ -2077,10 +2092,12 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
     Submit a LinkedIn Easy Apply application.
     Returns 'submitted' on success, 'failed: <reason>' on failure.
     """
-    global _apply_start_time  # noqa: PLW0603
+    global _apply_start_time, _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     _apply_start_time = time.time()
     _field_fills.clear()
     _ai_answer_failures.clear()
+    _ai_tokens_in = 0
+    _ai_tokens_out = 0
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -2702,6 +2719,7 @@ def _ai_answer_question(
     2-3 sentence answers with job context. Retries once with a stricter prompt
     if the first attempt exceeds the character limit (text fields only).
     """
+    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE:
         return None
 
@@ -2723,6 +2741,8 @@ def _ai_answer_question(
             system=system_prompt,
             messages=[{"role": "user", "content": prompt}],
         )
+        _ai_tokens_in += response.usage.input_tokens
+        _ai_tokens_out += response.usage.output_tokens
         answer = response.content[0].text.strip()
 
         # Retry once with ultra-strict prompt if too long (text fields only)
@@ -2744,6 +2764,8 @@ def _ai_answer_question(
                     },
                 ],
             )
+            _ai_tokens_in += retry_response.usage.input_tokens
+            _ai_tokens_out += retry_response.usage.output_tokens
             answer = retry_response.content[0].text.strip()
             if len(answer) > 100:
                 log.warning(
@@ -2997,6 +3019,7 @@ def _extract_page_snapshot(page, max_chars: int = 8000) -> str:
 
 def _classify_page(snapshot: str, url: str) -> dict:
     """Classify a page as login/form/confirmation/error using AI."""
+    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     default = {
         "page_type": "form",
         "has_required_login": False,
@@ -3040,6 +3063,8 @@ A page may have has_file_upload=true AND has_form_fields=true."""
             system=_PAGE_CLASSIFIER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
+        _ai_tokens_in += response.usage.input_tokens
+        _ai_tokens_out += response.usage.output_tokens
         raw = response.content[0].text.strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
@@ -3778,6 +3803,7 @@ def _find_navigation_button(page):  # noqa: C901
 
 def _ai_find_navigation_button(page):
     """Use Claude vision to identify a submit/next button from a screenshot."""
+    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     import base64
 
     try:
@@ -3813,6 +3839,8 @@ def _ai_find_navigation_button(page):
                 }
             ],
         )
+        _ai_tokens_in += response.usage.input_tokens
+        _ai_tokens_out += response.usage.output_tokens
         button_text = response.content[0].text.strip().strip('"').strip("'")
         log.info(f"   👁️ AI vision found button: '{button_text}'")
 
@@ -4198,10 +4226,12 @@ def submit_external_apply(
     Works on any ATS (Workday, Greenhouse, Lever, iCIMS, etc.).
     Returns status string.
     """
-    global _apply_start_time  # noqa: PLW0603
+    global _apply_start_time, _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     _apply_start_time = time.time()
     _field_fills.clear()
     _ai_answer_failures.clear()
+    _ai_tokens_in = 0
+    _ai_tokens_out = 0
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -4475,6 +4505,7 @@ def auto_apply_workflow(  # noqa: C901
                 "hiring_manager_name": msg_poster,
                 "fields_filled": list(_field_fills),
                 "ai_answer_failures": list(_ai_answer_failures),
+                "ai_tokens": {"input": _ai_tokens_in, "output": _ai_tokens_out},
                 "duration_seconds": round(time.time() - _apply_start_time, 1)
                 if _apply_start_time
                 else None,
@@ -4545,6 +4576,7 @@ def _run_setup():
 
 def _sync_linkedin_profile(profile_path: str) -> None:
     """Scrape the user's LinkedIn profile and update profile.json with full work history."""
+    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -4724,6 +4756,8 @@ Rules:
                     max_tokens=3000,
                     messages=[{"role": "user", "content": parse_prompt}],
                 )
+                _ai_tokens_in += response.usage.input_tokens
+                _ai_tokens_out += response.usage.output_tokens
                 parsed_text = response.content[0].text.strip()
                 json_match = re.search(r"\{.*\}", parsed_text, re.DOTALL)
                 if json_match:
