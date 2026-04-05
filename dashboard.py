@@ -26,6 +26,7 @@ from flask import Flask, abort, render_template
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
 SEARCH_LOG_FILE = DATA_DIR / "search_log.json"
+DEEP_APPLY_QUEUE_FILE = DATA_DIR / "deep_apply_queue.json"
 
 app = Flask(__name__)
 
@@ -174,6 +175,12 @@ def index():
 
     total_cost, avg_cost_submitted, avg_cost_failed = _compute_cost_stats(entries)
 
+    # Deep-apply queue
+    deep_queue = _load_json(DEEP_APPLY_QUEUE_FILE)
+    deep_pending = [q for q in deep_queue if q.get("status") == "pending"]
+    deep_done = [q for q in deep_queue if q.get("status") == "done"]
+    deep_success = sum(1 for q in deep_done if q.get("deep_apply_status") == "submitted")
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
 
     return render_template(
@@ -192,6 +199,10 @@ def index():
         total_cost=round(total_cost, 2),
         avg_cost_submitted=avg_cost_submitted,
         avg_cost_failed=avg_cost_failed,
+        deep_queue=deep_queue,
+        deep_pending_count=len(deep_pending),
+        deep_success_count=deep_success,
+        deep_done_count=len(deep_done),
     )
 
 
@@ -251,6 +262,12 @@ def api_data():
 
     total_cost, avg_cost_submitted, avg_cost_failed = _compute_cost_stats(entries)
 
+    # Deep-apply queue
+    deep_queue = _load_json(DEEP_APPLY_QUEUE_FILE)
+    deep_pending = [q for q in deep_queue if q.get("status") == "pending"]
+    deep_done = [q for q in deep_queue if q.get("status") == "done"]
+    deep_success = sum(1 for q in deep_done if q.get("deep_apply_status") == "submitted")
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
     return {
         "entries": entries,
@@ -266,6 +283,9 @@ def api_data():
         "total_cost": round(total_cost, 2),
         "avg_cost_submitted": avg_cost_submitted,
         "avg_cost_failed": avg_cost_failed,
+        "deep_pending_count": len(deep_pending),
+        "deep_success_count": deep_success,
+        "deep_done_count": len(deep_done),
     }
 
 

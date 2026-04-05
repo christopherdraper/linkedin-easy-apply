@@ -319,6 +319,14 @@
         <div class="label">Avg Cost / Failed</div>
         <div class="value red">${{ '%.4f'|format(avg_cost_failed) }}</div>
     </div>
+    <div class="stat-card">
+        <div class="label">Deep-Apply Pending</div>
+        <div class="value amber">{{ deep_pending_count }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Deep-Apply Success</div>
+        <div class="value green">{{ deep_success_count }} / {{ deep_done_count }} attempted</div>
+    </div>
 </div>
 
 <!-- Market pulse chart -->
@@ -405,6 +413,51 @@
     </div>
 </div>
 
+<!-- Deep-Apply Queue -->
+{% if deep_queue %}
+<div class="table-card" style="margin-bottom: 2rem;">
+    <div class="table-header">
+        <h2>Deep-Apply Queue</h2>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Company</th>
+                <th>Score</th>
+                <th>Failure</th>
+                <th>Queued</th>
+                <th>Status</th>
+                <th>ID</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for q in deep_queue %}
+            <tr>
+                <td class="truncate"><a href="{{ q.url }}" target="_blank">{{ q.title }}</a></td>
+                <td>{{ q.company }}</td>
+                <td>{{ '%.0f'|format((q.match_score or 0) * 100) }}%</td>
+                <td>{{ q.failure_reason }}</td>
+                <td style="white-space:nowrap">{{ q.queued_at[:10] if q.queued_at else '—' }}</td>
+                <td>
+                    {% if q.status == 'pending' %}
+                        <span class="badge badge-dryrun">Pending</span>
+                    {% elif q.deep_apply_status == 'submitted' %}
+                        <span class="badge badge-submitted">Submitted</span>
+                    {% elif q.deep_apply_status == 'failed' %}
+                        <span class="badge badge-failed">Failed</span>
+                    {% else %}
+                        <span class="badge badge-other">{{ q.status }}</span>
+                    {% endif %}
+                </td>
+                <td style="font-size:0.75rem;color:var(--text-muted)">{{ q.job_id }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
 <!-- Application table -->
 <div class="table-card">
     <div class="table-header">
@@ -468,6 +521,11 @@
                         <span class="badge badge-dryrun">Dry Run</span>
                     {% else %}
                         <span class="badge badge-other">{{ st }}</span>
+                    {% endif %}
+                    {% if e.deep_apply_status %}
+                        <br><span style="font-size:0.7rem;color:var(--text-muted)">
+                            deep-apply: <span style="color:{% if e.deep_apply_status == 'submitted' %}var(--green){% else %}var(--red){% endif %}">{{ e.deep_apply_status }}</span>
+                        </span>
                     {% endif %}
                 </td>
                 <td class="truncate" title="{{ e.reasoning or '' }}">{{ e.reasoning or '—' }}</td>
