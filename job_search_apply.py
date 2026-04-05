@@ -2749,7 +2749,6 @@ def _build_form_prompt(
 
     return f"""Applicant profile:
 {_profile_summary(profile)}
-Screening answers: {json.dumps(profile.screening_answers, indent=2)}
 {job_context}
 Field label: "{question}"
 
