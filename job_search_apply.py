@@ -3369,6 +3369,36 @@ Use your judgment to complete the application. Key facts:
 - Current title: {profile.current_title or "N/A"}"""
 
 
+def _mark_deep_apply_done(job_id: str, status: str, reason: Optional[str]) -> bool:
+    """Mark a deep-apply queue entry as done and update the application log."""
+    queue = _load_deep_apply_queue()
+    found = False
+    for entry in queue:
+        if entry["job_id"] == job_id:
+            entry["status"] = "done"
+            entry["deep_apply_status"] = status
+            entry["deep_apply_timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            found = True
+            break
+    if not found:
+        return False
+    _save_deep_apply_queue(queue)
+
+    # Update the original application log entry
+    all_apps = load_log() if LOG_FILE.exists() else []
+    for app in all_apps:
+        if app.get("job_id") == job_id:
+            app["deep_apply_status"] = status
+            app["deep_apply_timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            if reason:
+                app["deep_apply_reason"] = reason
+            break
+    if all_apps:
+        LOG_FILE.write_text(json.dumps(all_apps, indent=2))
+
+    return True
+
+
 # ---------------------------------------------------------------------------
 # ATS account management — create/store/reuse accounts on external job sites
 # ---------------------------------------------------------------------------
@@ -5977,7 +6007,7 @@ def _maybe_sync_profile(profile_path: str) -> None:
         log.warning(f"⚠️  Auto profile sync failed (non-critical): {exc}")
 
 
-def main():
+def main():  # noqa: C901
     parser = argparse.ArgumentParser(
         description="LinkedIn job apply automation (Easy Apply + External)"
     )
@@ -6032,7 +6062,87 @@ def main():
         default="linkedin",
         help="Job source: linkedin, remoteok, hn, biotech (pharma career sites), or all",
     )
+    parser.add_argument(
+        "--deep-apply",
+        nargs="*",
+        default=None,
+        metavar="CMD",
+        help="Deep-apply queue: list | prompt <job_id> | prompt-all | done <job_id> --status <s>",
+    )
     args = parser.parse_args()
+
+    if args.deep_apply is not None:
+        cmds = args.deep_apply
+        cmd = cmds[0] if cmds else "list"
+
+        if cmd == "list":
+            queue = _load_deep_apply_queue()
+            pending = [q for q in queue if q["status"] == "pending"]
+            if not pending:
+                print("No pending deep-apply entries.")
+                return
+            print(f"\n{'ID':<20} {'Company':<25} {'Title':<30} {'Score':>5}  {'Failure'}")
+            print("-" * 110)
+            for q in pending:
+                print(
+                    f"{q['job_id']:<20} {q['company'][:24]:<25} "
+                    f"{q['title'][:29]:<30} {q['match_score']:>5.0%}  {q['failure_reason']}"
+                )
+            print(f"\n{len(pending)} pending entries.")
+            return
+
+        if cmd == "prompt" and len(cmds) >= 2:
+            job_id = cmds[1]
+            queue = _load_deep_apply_queue()
+            entry = next((q for q in queue if q["job_id"] == job_id), None)
+            if not entry:
+                print(f"Job ID '{job_id}' not found in deep-apply queue.")
+                return
+            _raw = json.loads(Path(args.profile).expanduser().read_text())
+            profile = ApplicantProfile.from_dict(_raw)
+            print(_generate_deep_apply_prompt(entry, profile))
+            return
+
+        if cmd == "prompt-all":
+            queue = _load_deep_apply_queue()
+            pending = [q for q in queue if q["status"] == "pending"]
+            if not pending:
+                print("No pending deep-apply entries.")
+                return
+            _raw = json.loads(Path(args.profile).expanduser().read_text())
+            profile = ApplicantProfile.from_dict(_raw)
+            for q in pending:
+                print(f"\n{'=' * 80}")
+                print(f"# {q['company']} — {q['title']} (ID: {q['job_id']})")
+                print(f"{'=' * 80}\n")
+                print(_generate_deep_apply_prompt(q, profile))
+            return
+
+        if cmd == "done" and len(cmds) >= 2:
+            job_id = cmds[1]
+            # Parse --status and --reason from remaining args
+            done_status = "submitted"
+            done_reason = None
+            i = 2
+            while i < len(cmds):
+                if cmds[i] == "--status" and i + 1 < len(cmds):
+                    done_status = cmds[i + 1]
+                    i += 2
+                elif cmds[i] == "--reason" and i + 1 < len(cmds):
+                    done_reason = cmds[i + 1]
+                    i += 2
+                else:
+                    i += 1
+            ok = _mark_deep_apply_done(job_id, done_status, done_reason)
+            if ok:
+                print(f"Marked {job_id} as deep-apply {done_status}.")
+            else:
+                print(f"Job ID '{job_id}' not found in deep-apply queue.")
+            return
+
+        parser.error(
+            f"Unknown deep-apply command: {cmd}. Use: list, prompt <id>, prompt-all, done <id>"
+        )
 
     if args.setup:
         _run_setup()

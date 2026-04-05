@@ -105,8 +105,8 @@ class TestIsLoginWall:
         with patch("job_search_apply.Path") as mock_path:
             mock_path.return_value.expanduser.return_value.exists.return_value = True
             mock_path.return_value.expanduser.return_value.name = "fake_resume.pdf"
-            mock_path.return_value.expanduser.return_value.__str__ = (
-                lambda s: "/tmp/fake_resume.pdf"
+            mock_path.return_value.expanduser.return_value.__str__ = lambda s: (
+                "/tmp/fake_resume.pdf"
             )
             # Mock file chooser context manager
             fc_mock = MagicMock()

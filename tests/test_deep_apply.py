@@ -13,6 +13,7 @@ from job_search_apply import (  # noqa: E402
     _deep_apply_queue_path,
     _generate_deep_apply_prompt,
     _load_deep_apply_queue,
+    _mark_deep_apply_done,
     _queue_for_deep_apply,
     _save_deep_apply_queue,
 )
@@ -288,3 +289,59 @@ class TestGenerateDeepApplyPrompt:
         assert "Senior SRE" in prompt
         assert "12" in prompt
         assert "/home/user/resume.pdf" in prompt
+
+
+class TestMarkDeepApplyDone:
+    def test_marks_submitted(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        queue = [
+            {
+                "job_id": "li_abc",
+                "status": "pending",
+                "deep_apply_status": None,
+                "deep_apply_timestamp": None,
+                "deep_apply_cost": None,
+            },
+        ]
+        queue_file.write_text(json.dumps(queue))
+
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                result = _mark_deep_apply_done("li_abc", "submitted", None)
+
+        assert result is True
+        updated = json.loads(queue_file.read_text())
+        assert updated[0]["status"] == "done"
+        assert updated[0]["deep_apply_status"] == "submitted"
+        assert updated[0]["deep_apply_timestamp"] is not None
+
+    def test_marks_failed_with_reason(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        queue = [
+            {
+                "job_id": "li_abc",
+                "status": "pending",
+                "deep_apply_status": None,
+                "deep_apply_timestamp": None,
+                "deep_apply_cost": None,
+            },
+        ]
+        queue_file.write_text(json.dumps(queue))
+
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                result = _mark_deep_apply_done("li_abc", "failed", "site was down")
+
+        assert result is True
+        updated = json.loads(queue_file.read_text())
+        assert updated[0]["deep_apply_status"] == "failed"
+
+    def test_returns_false_if_not_found(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        queue_file.write_text("[]")
+
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                result = _mark_deep_apply_done("li_nonexist", "submitted", None)
+
+        assert result is False
