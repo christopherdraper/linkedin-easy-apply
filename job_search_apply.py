@@ -3317,10 +3317,18 @@ def _generate_deep_apply_prompt(queue_entry: Dict, profile: ApplicantProfile) ->
         screening_lines.append(f"- {k}: {v}")
     screening_section = "\n".join(screening_lines) if screening_lines else "(none)"
 
-    # Cover letter instruction
+    # Cover letter — embed the text directly since Chrome extension can't read files
     cl_path = pre.get("cover_letter_path", "")
+    cover_text = ""
     if cl_path:
-        cover_section = f"If a cover letter field appears, paste the contents of:\n{cl_path}"
+        try:
+            cover_text = Path(cl_path).read_text().strip()
+        except Exception:
+            pass
+    if cover_text:
+        cover_section = (
+            f"If a cover letter field appears, paste the following:\n\n---\n{cover_text}\n---"
+        )
     else:
         cover_section = "No cover letter was generated for this application."
 
@@ -3349,7 +3357,7 @@ Additional screening answers (from profile):
 {screening_section}
 
 ## Step 4: Resume
-Upload my resume from: {profile.resume_path}
+When you reach a resume upload field, STOP and tell me to upload my resume manually. You cannot interact with the native file picker dialog. Wait for me to confirm before continuing.
 
 ## Step 5: Cover Letter
 {cover_section}
