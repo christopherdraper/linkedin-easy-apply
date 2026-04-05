@@ -307,6 +307,18 @@
         <div class="label">Messages Sent</div>
         <div class="value accent">{{ hm_sent }} / {{ hm_eligible }} submitted</div>
     </div>
+    <div class="stat-card">
+        <div class="label">Total API Spend</div>
+        <div class="value accent">${{ '%.2f'|format(total_cost) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Avg Cost / Submitted</div>
+        <div class="value green">${{ '%.4f'|format(avg_cost_submitted) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Avg Cost / Failed</div>
+        <div class="value red">${{ '%.4f'|format(avg_cost_failed) }}</div>
+    </div>
 </div>
 
 <!-- Market pulse chart -->
@@ -409,7 +421,8 @@
                 <th onclick="sortTable(2)">Company</th>
                 <th onclick="sortTable(3)">Location</th>
                 <th onclick="sortTable(4)">Score</th>
-                <th onclick="sortTable(5)">Status</th>
+                <th onclick="sortTable(5)">Cost</th>
+                <th onclick="sortTable(6)">Status</th>
                 <th>Reasoning</th>
                 <th></th>
             </tr>
@@ -435,6 +448,13 @@
                         <span class="bar"><span class="fill" style="width:{{ pct }}%;background:{{ color }}"></span></span>
                         {{ '%.0f'|format(pct) }}%
                     </span>
+                </td>
+                <td style="white-space:nowrap">
+                    {% if e.cost_usd %}
+                        ${{ '%.4f'|format(e.cost_usd) }}
+                    {% else %}
+                        —
+                    {% endif %}
                 </td>
                 <td>
                     {% set st = e.status|default('unknown') %}

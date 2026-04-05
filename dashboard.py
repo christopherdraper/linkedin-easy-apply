@@ -106,6 +106,35 @@ def _build_status_counts(entries):
     return dict(counts)
 
 
+def _compute_cost_stats(entries):
+    """Compute cost totals/averages and backfill cost_usd on historical entries."""
+    total_cost = 0.0
+    submitted_costs = []
+    failed_costs = []
+    for e in entries:
+        cost = e.get("cost_usd")
+        if cost is None:
+            tokens = e.get("ai_tokens", {})
+            if tokens.get("input") or tokens.get("output"):
+                cost = round(
+                    (tokens.get("input", 0) * 2.40 / 1_000_000)
+                    + (tokens.get("output", 0) * 12.00 / 1_000_000),
+                    4,
+                )
+                e["cost_usd"] = cost  # backfill for template use
+        if cost is not None:
+            total_cost += cost
+            if e.get("status", "").startswith("submitted"):
+                submitted_costs.append(cost)
+            elif e.get("status", "").startswith("failed"):
+                failed_costs.append(cost)
+    avg_submitted = (
+        round(sum(submitted_costs) / len(submitted_costs), 4) if submitted_costs else 0.0
+    )
+    avg_failed = round(sum(failed_costs) / len(failed_costs), 4) if failed_costs else 0.0
+    return round(total_cost, 2), avg_submitted, avg_failed
+
+
 @app.route("/")
 def index():
     entries = _load_applications()
@@ -143,6 +172,8 @@ def index():
     hm_sent = sum(1 for e in entries if e.get("hiring_manager_messaged") == "sent")
     hm_eligible = sum(1 for e in entries if e.get("status", "").startswith("submitted"))
 
+    total_cost, avg_cost_submitted, avg_cost_failed = _compute_cost_stats(entries)
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
 
     return render_template(
@@ -158,6 +189,9 @@ def index():
         score_bins=score_bins,
         hm_sent=hm_sent,
         hm_eligible=hm_eligible,
+        total_cost=round(total_cost, 2),
+        avg_cost_submitted=avg_cost_submitted,
+        avg_cost_failed=avg_cost_failed,
     )
 
 
@@ -215,6 +249,8 @@ def api_data():
     hm_sent = sum(1 for e in entries if e.get("hiring_manager_messaged") == "sent")
     hm_eligible = sum(1 for e in entries if e.get("status", "").startswith("submitted"))
 
+    total_cost, avg_cost_submitted, avg_cost_failed = _compute_cost_stats(entries)
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
     return {
         "entries": entries,
@@ -227,6 +263,9 @@ def api_data():
         "score_bins": score_bins,
         "hm_sent": hm_sent,
         "hm_eligible": hm_eligible,
+        "total_cost": round(total_cost, 2),
+        "avg_cost_submitted": avg_cost_submitted,
+        "avg_cost_failed": avg_cost_failed,
     }
 
 
