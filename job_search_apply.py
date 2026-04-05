@@ -6067,7 +6067,7 @@ def main():  # noqa: C901
         nargs="*",
         default=None,
         metavar="CMD",
-        help="Deep-apply queue: list | prompt <job_id> | prompt-all | done <job_id> --status <s>",
+        help="Deep-apply queue: list | prompt <job_id> | prompt-all | done <job_id> <status> [reason]",
     )
     args = parser.parse_args()
 
@@ -6120,19 +6120,8 @@ def main():  # noqa: C901
 
         if cmd == "done" and len(cmds) >= 2:
             job_id = cmds[1]
-            # Parse --status and --reason from remaining args
-            done_status = "submitted"
-            done_reason = None
-            i = 2
-            while i < len(cmds):
-                if cmds[i] == "--status" and i + 1 < len(cmds):
-                    done_status = cmds[i + 1]
-                    i += 2
-                elif cmds[i] == "--reason" and i + 1 < len(cmds):
-                    done_reason = cmds[i + 1]
-                    i += 2
-                else:
-                    i += 1
+            done_status = cmds[2] if len(cmds) >= 3 else "submitted"
+            done_reason = cmds[3] if len(cmds) >= 4 else None
             ok = _mark_deep_apply_done(job_id, done_status, done_reason)
             if ok:
                 print(f"Marked {job_id} as deep-apply {done_status}.")
