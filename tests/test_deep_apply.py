@@ -345,3 +345,74 @@ class TestMarkDeepApplyDone:
                 result = _mark_deep_apply_done("li_nonexist", "submitted", None)
 
         assert result is False
+
+
+class TestDeepApplyIntegration:
+    def test_full_queue_prompt_done_flow(self, tmp_path):
+        """End-to-end: queue an entry, generate prompt, mark done."""
+        queue_file = tmp_path / "queue.json"
+        log_file = tmp_path / "applications.json"
+
+        app_entry = {
+            "job_id": "li_integ",
+            "title": "Platform Engineer",
+            "company": "TestCo",
+            "url": "https://example.com/apply/123",
+            "match_score": 0.92,
+            "status": "failed: external form stuck (step 4/15)",
+            "failure_category": "form_stuck",
+            "cover_letter_path": "/tmp/cl_integ.txt",
+            "reasoning": "Strong K8s and AWS match",
+        }
+
+        # Write a mock application log
+        log_file.write_text(json.dumps([app_entry]))
+
+        profile = ApplicantProfile(
+            full_name="Test User",
+            email="test@example.com",
+            phone="555-0000",
+            resume_path="/tmp/resume.pdf",
+            current_title="SRE",
+            current_employer="CurrentCo",
+            years_experience=10,
+            screening_answers={"salary": "150000"},
+        )
+
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                with patch(
+                    "job_search_apply._field_fills",
+                    [
+                        {"field": "city", "value": "Indy", "source": "contact"},
+                    ],
+                ):
+                    # Step 1: Check eligibility
+                    assert _deep_apply_eligible(app_entry, set()) is True
+
+                    # Step 2: Queue it
+                    _queue_for_deep_apply(app_entry)
+                    queue = _load_deep_apply_queue()
+                    assert len(queue) == 1
+                    assert queue[0]["status"] == "pending"
+
+                    # Step 3: Generate prompt
+                    prompt = _generate_deep_apply_prompt(queue[0], profile)
+                    assert "Platform Engineer" in prompt
+                    assert "TestCo" in prompt
+                    assert "city" in prompt
+                    assert "/tmp/resume.pdf" in prompt
+
+                    # Step 4: Mark done
+                    with patch("job_search_apply.LOG_FILE", log_file):
+                        ok = _mark_deep_apply_done("li_integ", "submitted", None)
+                    assert ok is True
+
+                    # Verify queue updated
+                    updated_queue = _load_deep_apply_queue()
+                    assert updated_queue[0]["status"] == "done"
+                    assert updated_queue[0]["deep_apply_status"] == "submitted"
+
+                    # Verify app log updated
+                    updated_log = json.loads(log_file.read_text())
+                    assert updated_log[0]["deep_apply_status"] == "submitted"
