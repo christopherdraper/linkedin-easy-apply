@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import sys
 import webbrowser
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -22,6 +23,9 @@ from pathlib import Path
 from threading import Timer
 
 from flask import Flask, abort, render_template
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from job_search_apply import ApplicantProfile, _generate_deep_apply_prompt  # noqa: E402
 
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
@@ -224,6 +228,20 @@ def report(job_id):
                 cover_letter = "(unable to read file)"
 
     return render_template("report.html", entry=entry, cover_letter=cover_letter)
+
+
+@app.route("/deep-apply/<job_id>")
+def deep_apply_prompt(job_id):
+    queue = _load_json(DEEP_APPLY_QUEUE_FILE)
+    entry = next((q for q in queue if q.get("job_id") == job_id), None)
+    if not entry:
+        abort(404)
+
+    profile_path = DATA_DIR / "profile.json"
+    profile = ApplicantProfile.from_dict(json.loads(profile_path.read_text()))
+    prompt = _generate_deep_apply_prompt(entry, profile)
+
+    return render_template("deep_apply_prompt.html", entry=entry, prompt=prompt)
 
 
 @app.route("/api/data")

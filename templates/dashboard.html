@@ -429,6 +429,7 @@
                 <th>Queued</th>
                 <th>Status</th>
                 <th>ID</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
@@ -451,6 +452,7 @@
                     {% endif %}
                 </td>
                 <td style="font-size:0.75rem;color:var(--text-muted)">{{ q.job_id }}</td>
+                <td>{% if q.status == 'pending' %}<a href="/deep-apply/{{ q.job_id }}" target="_blank">Prompt</a>{% endif %}</td>
             </tr>
             {% endfor %}
         </tbody>

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep-Apply Prompt — {{ entry.title }} at {{ entry.company }}</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --border: #2a2d3a;
+            --text: #e4e6eb;
+            --text-muted: #8b8fa3;
+            --accent: #4f8ff7;
+            --green: #34d399;
+            --red: #f87171;
+            --amber: #fbbf24;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .back-link {
+            display: inline-block;
+            margin-bottom: 1.5rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.25rem; }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .meta-row {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+
+        .meta-item {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+        }
+
+        .meta-item .label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .meta-item .value { font-size: 0.95rem; font-weight: 500; }
+
+        .prompt-section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.25rem;
+            position: relative;
+        }
+
+        .prompt-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.75rem;
+        }
+
+        .prompt-header h2 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .copy-btn {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            padding: 0.5rem 1.25rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .copy-btn:hover { opacity: 0.9; }
+        .copy-btn.copied { background: var(--green); }
+
+        .prompt-text {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.82rem;
+            line-height: 1.7;
+            color: var(--text);
+            max-height: 70vh;
+            overflow-y: auto;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .badge-pending  { background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
+        .badge-submitted { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .badge-failed   { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+    </style>
+</head>
+<body>
+
+<a href="/" class="back-link">&larr; Back to Dashboard</a>
+
+<h1>{{ entry.title }}</h1>
+<p class="subtitle">{{ entry.company }} &middot; Deep-Apply Prompt</p>
+
+<div class="meta-row">
+    <div class="meta-item">
+        <div class="label">Score</div>
+        <div class="value" style="color: var(--green)">{{ '%.0f'|format((entry.match_score or 0) * 100) }}%</div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Failure</div>
+        <div class="value" style="color: var(--red)">{{ entry.failure_reason }}</div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Status</div>
+        <div class="value">
+            {% if entry.status == 'pending' %}
+                <span class="badge badge-pending">Pending</span>
+            {% elif entry.deep_apply_status == 'submitted' %}
+                <span class="badge badge-submitted">Submitted</span>
+            {% elif entry.deep_apply_status == 'failed' %}
+                <span class="badge badge-failed">Failed</span>
+            {% else %}
+                {{ entry.status }}
+            {% endif %}
+        </div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Queued</div>
+        <div class="value">{{ entry.queued_at or '—' }}</div>
+    </div>
+</div>
+
+<div class="prompt-section">
+    <div class="prompt-header">
+        <h2>Prompt for Claude</h2>
+        <button class="copy-btn" onclick="copyPrompt(this)">Copy to Clipboard</button>
+    </div>
+    <pre class="prompt-text" id="promptText">{{ prompt }}</pre>
+</div>
+
+<script>
+function copyPrompt(btn) {
+    const text = document.getElementById('promptText').textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+            btn.textContent = 'Copy to Clipboard';
+            btn.classList.remove('copied');
+        }, 2000);
+    });
+}
+</script>
+
+</body>
+</html>
