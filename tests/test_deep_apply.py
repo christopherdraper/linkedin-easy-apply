@@ -8,8 +8,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from job_search_apply import (  # noqa: E402
+    ApplicantProfile,
     _deep_apply_eligible,
     _deep_apply_queue_path,
+    _generate_deep_apply_prompt,
     _load_deep_apply_queue,
     _queue_for_deep_apply,
     _save_deep_apply_queue,
@@ -189,3 +191,100 @@ class TestQueueForDeepApply:
         assert len(queue) == 2
         assert queue[0]["job_id"] == "existing"
         assert queue[1]["job_id"] == "li_new"
+
+
+class TestGenerateDeepApplyPrompt:
+    def _make_profile(self):
+        return ApplicantProfile(
+            full_name="Chris Draper",
+            email="chris@example.com",
+            phone="555-1234",
+            resume_path="/home/user/resume.pdf",
+            current_title="Senior SRE",
+            current_employer="Acme Inc",
+            years_experience=12,
+            screening_answers={"salary": "150000", "city": "Indianapolis"},
+        )
+
+    def test_prompt_contains_job_details(self):
+        profile = self._make_profile()
+        queue_entry = {
+            "job_id": "li_abc",
+            "title": "Staff SRE",
+            "company": "BigCo",
+            "url": "https://example.com/apply",
+            "match_score": 0.94,
+            "pre_computed": {
+                "cover_letter_path": "/tmp/cl.txt",
+                "field_answers": [
+                    {"field": "city*", "value": "Indianapolis", "source": "contact"},
+                ],
+                "scoring_reasoning": "Great match",
+            },
+        }
+        prompt = _generate_deep_apply_prompt(queue_entry, profile)
+        assert "Staff SRE" in prompt
+        assert "BigCo" in prompt
+        assert "https://example.com/apply" in prompt
+        assert "94%" in prompt
+
+    def test_prompt_contains_field_answers(self):
+        profile = self._make_profile()
+        queue_entry = {
+            "job_id": "li_abc",
+            "title": "SRE",
+            "company": "Co",
+            "url": "https://example.com",
+            "match_score": 0.90,
+            "pre_computed": {
+                "cover_letter_path": "",
+                "field_answers": [
+                    {"field": "state*", "value": "Indiana", "source": "extjs_boxselect"},
+                    {"field": "city*", "value": "Indianapolis", "source": "contact"},
+                ],
+                "scoring_reasoning": "",
+            },
+        }
+        prompt = _generate_deep_apply_prompt(queue_entry, profile)
+        assert "state*" in prompt
+        assert "Indiana" in prompt
+        assert "city*" in prompt
+        assert "Indianapolis" in prompt
+
+    def test_prompt_contains_screening_answers(self):
+        profile = self._make_profile()
+        queue_entry = {
+            "job_id": "li_abc",
+            "title": "SRE",
+            "company": "Co",
+            "url": "https://example.com",
+            "match_score": 0.90,
+            "pre_computed": {
+                "cover_letter_path": "",
+                "field_answers": [],
+                "scoring_reasoning": "",
+            },
+        }
+        prompt = _generate_deep_apply_prompt(queue_entry, profile)
+        assert "salary" in prompt
+        assert "150000" in prompt
+
+    def test_prompt_contains_profile_facts(self):
+        profile = self._make_profile()
+        queue_entry = {
+            "job_id": "li_abc",
+            "title": "SRE",
+            "company": "Co",
+            "url": "https://example.com",
+            "match_score": 0.90,
+            "pre_computed": {
+                "cover_letter_path": "",
+                "field_answers": [],
+                "scoring_reasoning": "",
+            },
+        }
+        prompt = _generate_deep_apply_prompt(queue_entry, profile)
+        assert "Acme Inc" in prompt
+        assert "Senior SRE" in prompt
+        assert "12" in prompt
+        assert "/home/user/resume.pdf" in prompt

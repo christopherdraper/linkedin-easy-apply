@@ -3301,6 +3301,74 @@ def _queue_for_deep_apply(app_entry: Dict) -> None:
     )
 
 
+def _generate_deep_apply_prompt(queue_entry: Dict, profile: ApplicantProfile) -> str:
+    """Generate a structured prompt for the Claude Chrome extension to complete an application."""
+    pre = queue_entry.get("pre_computed", {})
+    pct = int(queue_entry.get("match_score", 0) * 100)
+
+    # Build field answers section
+    field_lines = []
+    for fa in pre.get("field_answers", []):
+        field_lines.append(f"- {fa['field']}: {fa['value']}")
+    field_section = "\n".join(field_lines) if field_lines else "(no pre-filled answers available)"
+
+    # Build screening answers section
+    screening_lines = []
+    for k, v in profile.screening_answers.items():
+        screening_lines.append(f"- {k}: {v}")
+    screening_section = "\n".join(screening_lines) if screening_lines else "(none)"
+
+    # Cover letter instruction
+    cl_path = pre.get("cover_letter_path", "")
+    if cl_path:
+        cover_section = f"If a cover letter field appears, paste the contents of:\n{cl_path}"
+    else:
+        cover_section = "No cover letter was generated for this application."
+
+    return f"""I need you to complete a job application. Follow these steps:
+
+## Job Details
+- Position: {queue_entry.get("title", "Unknown")} at {queue_entry.get("company", "Unknown")}
+- Application URL: {queue_entry.get("url", "")}
+- Match Score: {pct}%
+
+## Step 1: Navigate
+Open the application URL above.
+
+## Step 2: Account/Login
+If you see a login wall or account creation requirement:
+- Create an account using: {profile.email}
+- Generate a secure password
+- If email verification is needed, open Gmail in a new tab, find the verification email, get the code, return and enter it
+
+## Step 3: Fill the Application
+Use these answers for form fields:
+
+{field_section}
+
+Additional screening answers (from profile):
+{screening_section}
+
+## Step 4: Resume
+Upload my resume from: {profile.resume_path}
+
+## Step 5: Cover Letter
+{cover_section}
+
+## Step 6: Submit
+Check any consent/terms checkboxes, then click Submit.
+
+## If you encounter anything not covered above
+Use your judgment to complete the application. Key facts:
+- Authorized to work in US: Yes
+- Requires sponsorship: No
+- Willing to relocate: No
+- Open to remote: Yes
+- Years of experience: {profile.years_experience or 12}
+- Current employer: {profile.current_employer or "N/A"}
+- Current title: {profile.current_title or "N/A"}"""
+
+
 # ---------------------------------------------------------------------------
 # ATS account management — create/store/reuse accounts on external job sites
 # ---------------------------------------------------------------------------
