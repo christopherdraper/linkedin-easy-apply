@@ -22,15 +22,10 @@
 
 ## Running Batches
 
-Always launch batch runs inside `tmux` so they survive SSH disconnections:
-
 ```bash
-tmux new-session -d -s jobrun "python ~/.openclaw/skills/job-apply/job_search_apply.py \
-  --max-applications 50 --min-score 0.5 2>&1 | tee ~/.local/share/job-apply/batch.log"
+python ~/.openclaw/skills/job-apply/job_search_apply.py \
+  --max-applications 50 --min-score 0.5
 ```
-
-To check on a running batch: `tmux attach -t jobrun`
-To view output without attaching: `tail -f ~/.local/share/job-apply/batch.log`
 
 ## Key CLI Flags
 

@@ -58,6 +58,7 @@ _ai_tokens_out: int = 0
 COVER_LETTER_DIR = DATA_DIR / "cover-letters"
 SESSION_FILE = DATA_DIR / "sessions" / "linkedin.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
+ATS_ACCOUNTS_FILE = DATA_DIR / "ats_accounts.json"
 CDP_URL = "http://localhost:9222"
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -222,6 +223,9 @@ class ApplicantProfile:
     education_degree: Optional[str] = None
     education_university: Optional[str] = None
     education_year: Optional[int] = None
+    auto_create_accounts: bool = False
+    captcha_api_key: Optional[str] = None
+    captcha_service: str = "2captcha"
 
     @classmethod
     def from_dict(cls, data: dict) -> "ApplicantProfile":
@@ -284,6 +288,11 @@ class ApplicantProfile:
             education_degree=edu.get("highest_degree"),
             education_university=edu.get("university"),
             education_year=edu.get("graduation_year"),
+            auto_create_accounts=bool(
+                p.get("application_settings", {}).get("auto_create_accounts")
+            ),
+            captcha_api_key=p.get("application_settings", {}).get("captcha_api_key"),
+            captcha_service=p.get("application_settings", {}).get("captcha_service", "2captcha"),
         )
 
     @classmethod
@@ -2433,6 +2442,17 @@ def _match_screening_answer(label_text: str, screening_answers: Dict[str, str]) 
     return None
 
 
+def _clamp_to_maxlength(inp, value: str) -> str:
+    """Truncate value to the input's maxlength attribute if present."""
+    try:
+        ml = inp.get_attribute("maxlength") or inp.get_attribute("maxLength")
+        if ml and len(value) > int(ml):
+            return value[: int(ml)]
+    except Exception:
+        pass
+    return value
+
+
 def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> None:
     """Fill a single input field: injection check → screening answers → contact fields → AI."""
     if label_text:
@@ -2441,6 +2461,7 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
     # Screening answers (both numeric and text)
     matched = _match_screening_answer(label_text, profile.screening_answers)
     if matched is not None:
+        matched = _clamp_to_maxlength(inp, matched)
         inp.fill(matched)
         _dismiss_typeahead(page, inp)
         _field_fills.append({"field": label_text, "value": matched, "source": "screening_answers"})
@@ -2600,6 +2621,25 @@ def _answer_select_dropdowns(page, profile: ApplicantProfile) -> None:
 
 def _check_mandatory_checkboxes(page) -> None:
     """Check any unchecked mandatory checkboxes (e.g. 'I understand', terms, consent)."""
+    # ExtJS-style button checkboxes (GR8People, etc.)
+    for btn_cb in page.query_selector_all("input.x-form-checkbox[type='button']"):
+        try:
+            if not btn_cb.is_visible():
+                continue
+            # Check if already checked (ExtJS adds x-form-cb-checked to wrapper)
+            is_checked = btn_cb.evaluate(
+                "el => el.closest('.x-form-cb-wrap')?.classList.contains('x-form-cb-checked')"
+                " || el.getAttribute('aria-checked') === 'true'"
+            )
+            if is_checked:
+                continue
+            label = _get_field_label(page, btn_cb)
+            if not label:
+                label = btn_cb.evaluate("el => el.closest('.x-field')?.innerText || ''").strip()
+            btn_cb.click()
+            log.info("   ☑️  Checked ExtJS: '%s'", (label or "checkbox")[:50])
+        except Exception as exc:
+            log.debug("ExtJS checkbox failed: %s", exc)
     for checkbox in page.query_selector_all("input[type='checkbox']"):
         try:
             if checkbox.is_checked():
@@ -2810,25 +2850,306 @@ def _ai_answer_question(
 # ---------------------------------------------------------------------------
 
 
-def _detect_captcha(page) -> bool:
-    """Check if the page has a CAPTCHA/reCAPTCHA challenge blocking submission."""
+def _detect_captcha(page) -> Optional[Dict[str, str]]:
+    """Detect CAPTCHA on page. Returns dict with type/sitekey/url, or None."""
     try:
-        return page.evaluate("""() => {
-            // reCAPTCHA v2 iframe
-            if (document.querySelector('iframe[src*="recaptcha"]')) return true;
-            // reCAPTCHA v3 badge
-            if (document.querySelector('.grecaptcha-badge')) return true;
+        info = page.evaluate("""() => {
+            // reCAPTCHA v2/v3
+            const recapFrame = document.querySelector('iframe[src*="recaptcha"]');
+            const recapDiv = document.querySelector('.g-recaptcha, [data-sitekey]');
+            const recapBadge = document.querySelector('.grecaptcha-badge');
+            if (recapFrame || recapDiv || recapBadge) {
+                let sitekey = '';
+                if (recapDiv) sitekey = recapDiv.getAttribute('data-sitekey') || '';
+                if (!sitekey && recapFrame) {
+                    const m = recapFrame.src.match(/[?&]k=([^&]+)/);
+                    if (m) sitekey = m[1];
+                }
+                if (!sitekey) {
+                    // Check grecaptcha.enterprise or grecaptcha render params
+                    const scripts = document.querySelectorAll('script[src*="recaptcha"]');
+                    for (const s of scripts) {
+                        const m = s.src.match(/render=([^&]+)/);
+                        if (m && m[1] !== 'explicit') { sitekey = m[1]; break; }
+                    }
+                }
+                const isV3 = !!recapBadge && !recapFrame;
+                return {type: isV3 ? 'recaptchav3' : 'recaptchav2', sitekey};
+            }
             // hCaptcha
-            if (document.querySelector('iframe[src*="hcaptcha"]')) return true;
+            const hcapFrame = document.querySelector('iframe[src*="hcaptcha"]');
+            const hcapDiv = document.querySelector('.h-captcha, [data-hcaptcha-sitekey]');
+            if (hcapFrame || hcapDiv) {
+                let sitekey = '';
+                if (hcapDiv) sitekey = hcapDiv.getAttribute('data-sitekey')
+                    || hcapDiv.getAttribute('data-hcaptcha-sitekey') || '';
+                if (!sitekey && hcapFrame) {
+                    const m = hcapFrame.src.match(/sitekey=([^&]+)/);
+                    if (m) sitekey = m[1];
+                }
+                return {type: 'hcaptcha', sitekey};
+            }
             // Cloudflare Turnstile
-            if (document.querySelector('iframe[src*="challenges.cloudflare"]')) return true;
-            // Generic captcha indicators in error messages
+            const cfFrame = document.querySelector('iframe[src*="challenges.cloudflare"]');
+            const cfDiv = document.querySelector('.cf-turnstile, [data-turnstile-sitekey]');
+            if (cfFrame || cfDiv) {
+                let sitekey = '';
+                if (cfDiv) sitekey = cfDiv.getAttribute('data-sitekey')
+                    || cfDiv.getAttribute('data-turnstile-sitekey') || '';
+                return {type: 'turnstile', sitekey};
+            }
+            // Generic text-based detection (no sitekey available)
             const body = document.body.innerText.toLowerCase();
-            if (body.includes('flagged as possible spam')) return true;
-            if (body.includes('perform the security check')) return true;
-            return false;
+            if (body.includes('flagged as possible spam')) return {type: 'unknown', sitekey: ''};
+            if (body.includes('perform the security check'))
+                return {type: 'unknown', sitekey: ''};
+            if (body.includes('security checkpoint'))
+                return {type: 'unknown', sitekey: ''};
+            return null;
         }""")
+        return info
     except Exception:
+        return None
+
+
+def _solve_captcha(
+    page, captcha_info: Dict[str, str], api_key: str, service: str = "2captcha"
+) -> bool:
+    """Solve a CAPTCHA using a third-party solving service and inject the token."""
+    ctype = captcha_info.get("type", "unknown")
+    sitekey = captcha_info.get("sitekey", "")
+    page_url = page.url
+
+    if not sitekey:
+        log.warning("   🧩 CAPTCHA detected (%s) but no sitekey found — cannot solve", ctype)
+        return False
+
+    if ctype == "unknown":
+        log.warning("   🧩 Unknown CAPTCHA type — cannot solve")
+        return False
+
+    base = "https://2captcha.com" if service == "2captcha" else "https://api.capsolver.com"
+
+    log.info("   🧩 Solving %s CAPTCHA via %s ...", ctype, service)
+
+    # --- Submit task ---
+    try:
+        if service == "capsolver":
+            solved = _capsolver_solve(api_key, ctype, sitekey, page_url)
+        else:
+            solved = _2captcha_solve(api_key, base, ctype, sitekey, page_url)
+    except Exception as e:
+        log.warning("   🧩 CAPTCHA solve failed: %s", e)
+        return False
+
+    if not solved:
+        return False
+
+    # --- Inject token ---
+    return _inject_captcha_token(page, ctype, solved)
+
+
+def _2captcha_solve(
+    api_key: str, base: str, ctype: str, sitekey: str, page_url: str
+) -> Optional[str]:
+    """Submit and poll 2Captcha for a solution token."""
+    import urllib.parse
+    import urllib.request
+
+    # Build request params
+    params: Dict[str, str] = {
+        "key": api_key,
+        "method": "userrecaptcha",
+        "googlekey": sitekey,
+        "pageurl": page_url,
+        "json": "1",
+    }
+    if ctype == "recaptchav3":
+        params["version"] = "v3"
+        params["action"] = "verify"
+        params["min_score"] = "0.3"
+    elif ctype == "hcaptcha":
+        params["method"] = "hcaptcha"
+        params["sitekey"] = sitekey
+        del params["googlekey"]
+    elif ctype == "turnstile":
+        params["method"] = "turnstile"
+        params["sitekey"] = sitekey
+        del params["googlekey"]
+
+    submit_url = f"{base}/in.php?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(submit_url)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read())
+
+    if result.get("status") != 1:
+        log.warning("   🧩 2Captcha submit error: %s", result.get("request", "unknown"))
+        return None
+
+    task_id = result["request"]
+    log.info("   🧩 Task submitted (id=%s), polling for solution...", task_id)
+
+    # Poll for result (max ~180s)
+    for attempt in range(36):
+        time.sleep(5)
+        poll_url = f"{base}/res.php?key={api_key}&action=get&id={task_id}&json=1"
+        try:
+            with urllib.request.urlopen(poll_url, timeout=15) as resp:
+                result = json.loads(resp.read())
+        except Exception:
+            continue
+
+        if result.get("status") == 1:
+            token = result["request"]
+            log.info("   🧩 CAPTCHA solved (attempt %d)", attempt + 1)
+            return token
+        if result.get("request") != "CAPCHA_NOT_READY":
+            log.warning("   🧩 2Captcha error: %s", result.get("request", "unknown"))
+            return None
+
+    log.warning("   🧩 2Captcha timed out after 180s")
+    return None
+
+
+def _capsolver_solve(api_key: str, ctype: str, sitekey: str, page_url: str) -> Optional[str]:
+    """Submit and poll CapSolver for a solution token."""
+    import urllib.request
+
+    task_type_map = {
+        "recaptchav2": "ReCaptchaV2TaskProxyLess",
+        "recaptchav3": "ReCaptchaV3TaskProxyLess",
+        "hcaptcha": "HCaptchaTaskProxyLess",
+        "turnstile": "AntiTurnstileTaskProxyLess",
+    }
+    task_type = task_type_map.get(ctype)
+    if not task_type:
+        return None
+
+    task: Dict = {
+        "type": task_type,
+        "websiteURL": page_url,
+        "websiteKey": sitekey,
+    }
+    if ctype == "recaptchav3":
+        task["pageAction"] = "verify"
+        task["minScore"] = 0.3
+
+    body = json.dumps({"clientKey": api_key, "task": task}).encode()
+    req = urllib.request.Request(
+        "https://api.capsolver.com/createTask",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read())
+    if result.get("errorId", 0) != 0:
+        log.warning("   🧩 CapSolver error: %s", result.get("errorDescription", "unknown"))
+        return None
+
+    task_id = result.get("taskId")
+    if not task_id:
+        return None
+    log.info("   🧩 Task submitted (id=%s), polling...", task_id)
+
+    for attempt in range(36):
+        time.sleep(5)
+        poll_body = json.dumps({"clientKey": api_key, "taskId": task_id}).encode()
+        poll_req = urllib.request.Request(
+            "https://api.capsolver.com/getTaskResult",
+            data=poll_body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(poll_req, timeout=15) as resp:
+                result = json.loads(resp.read())
+        except Exception:
+            continue
+
+        status = result.get("status")
+        if status == "ready":
+            solution = result.get("solution", {})
+            token = solution.get("gRecaptchaResponse") or solution.get("token", "")
+            if token:
+                log.info("   🧩 CAPTCHA solved (attempt %d)", attempt + 1)
+                return token
+            return None
+        if status != "processing":
+            log.warning("   🧩 CapSolver error: %s", result.get("errorDescription", status))
+            return None
+
+    log.warning("   🧩 CapSolver timed out after 180s")
+    return None
+
+
+def _inject_captcha_token(page, ctype: str, token: str) -> bool:
+    """Inject a solved CAPTCHA token into the page and trigger callbacks."""
+    try:
+        if ctype in ("recaptchav2", "recaptchav3"):
+            page.evaluate(
+                """(token) => {
+                const ta = document.querySelector('#g-recaptcha-response, '
+                    + '[name="g-recaptcha-response"]');
+                if (ta) { ta.style.display = 'block'; ta.value = token; }
+                document.querySelectorAll('textarea[id^="g-recaptcha-response"]')
+                    .forEach(el => { el.value = token; });
+                if (typeof ___grecaptcha_cfg !== 'undefined') {
+                    const clients = ___grecaptcha_cfg.clients || {};
+                    for (const key of Object.keys(clients)) {
+                        const c = clients[key];
+                        for (const k2 of Object.keys(c)) {
+                            const v = c[k2];
+                            if (v && typeof v === 'object') {
+                                for (const k3 of Object.keys(v)) {
+                                    const cb = v[k3];
+                                    if (cb && typeof cb.callback === 'function') {
+                                        cb.callback(token);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (window.captchaCallback) window.captchaCallback(token);
+                if (window.onRecaptchaSuccess) window.onRecaptchaSuccess(token);
+            }""",
+                token,
+            )
+        elif ctype == "hcaptcha":
+            page.evaluate(
+                """(token) => {
+                const ta = document.querySelector('[name="h-captcha-response"], '
+                    + 'textarea[name="g-recaptcha-response"]');
+                if (ta) { ta.style.display = 'block'; ta.value = token; }
+                document.querySelectorAll('textarea[name*="captcha"]')
+                    .forEach(el => { el.value = token; });
+            }""",
+                token,
+            )
+        elif ctype == "turnstile":
+            page.evaluate(
+                """(token) => {
+                const inp = document.querySelector(
+                    '[name="cf-turnstile-response"], input[name*="turnstile"]');
+                if (inp) inp.value = token;
+                if (window.turnstile) {
+                    const widgets = document.querySelectorAll('.cf-turnstile');
+                    widgets.forEach(w => {
+                        const cb = w.getAttribute('data-callback');
+                        if (cb && typeof window[cb] === 'function') window[cb](token);
+                    });
+                }
+            }""",
+                token,
+            )
+        else:
+            return False
+
+        log.info("   🧩 CAPTCHA token injected into page")
+        page.wait_for_timeout(1000)
+        return True
+    except Exception as e:
+        log.warning("   🧩 Failed to inject CAPTCHA token: %s", e)
         return False
 
 
@@ -2883,66 +3204,531 @@ def _categorize_failure(status: str) -> str:
     return "other"
 
 
+# Blended token-to-dollar rates (70% Sonnet 4.6 / 30% Haiku 4.5)
+_COST_INPUT_PER_M = 2.40  # $/M input tokens
+_COST_OUTPUT_PER_M = 12.00  # $/M output tokens
+
+
+def _compute_cost_usd(tokens_in: int, tokens_out: int) -> float:
+    """Compute estimated API cost from token counts using blended rates."""
+    return round(
+        (tokens_in * _COST_INPUT_PER_M / 1_000_000) + (tokens_out * _COST_OUTPUT_PER_M / 1_000_000),
+        4,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATS account management — create/store/reuse accounts on external job sites
+# ---------------------------------------------------------------------------
+
+
+def _load_ats_accounts() -> Dict[str, Dict[str, str]]:
+    """Load stored ATS accounts keyed by domain."""
+    if ATS_ACCOUNTS_FILE.exists():
+        try:
+            return json.loads(ATS_ACCOUNTS_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_ats_account(domain: str, email: str, password: str) -> None:
+    """Store ATS credentials for a domain."""
+    accounts = _load_ats_accounts()
+    accounts[domain] = {"email": email, "password": password}
+    ATS_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ATS_ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
+    os.chmod(ATS_ACCOUNTS_FILE, 0o600)
+    log.info(f"   🔑 Stored ATS account for {domain}")
+
+
+def _generate_ats_password() -> str:
+    """Generate a strong password that satisfies most ATS requirements."""
+    import secrets
+    import string
+
+    # 16 chars: mix of upper, lower, digits, special — meets virtually all policies
+    alphabet = string.ascii_letters + string.digits + "!@#$%&*"
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(16))
+        # Ensure at least one of each required category
+        if (
+            any(c.isupper() for c in pw)
+            and any(c.islower() for c in pw)
+            and any(c.isdigit() for c in pw)
+            and any(c in "!@#$%&*" for c in pw)
+        ):
+            return pw
+
+
+def _get_domain(url: str) -> str:
+    """Extract domain from URL for account keying."""
+    from urllib.parse import urlparse
+
+    return urlparse(url).netloc.lower()
+
+
+def _attempt_ats_login(page, domain: str) -> bool:
+    """Try to log in using stored ATS credentials. Returns True if login succeeded."""
+    accounts = _load_ats_accounts()
+    if domain not in accounts:
+        return False
+
+    acct = accounts[domain]
+    log.info(f"   🔑 Found stored account for {domain}, attempting login")
+
+    try:
+        # Find and fill email/username field
+        email_field = page.query_selector(
+            "input[type='email'], input[name*='email'], input[name*='user'], "
+            "input[id*='email'], input[id*='user'], input[autocomplete='email'], "
+            "input[autocomplete='username']"
+        )
+        if not email_field:
+            log.debug("No email/username field found for ATS login")
+            return False
+        email_field.fill(acct["email"])
+
+        # Find and fill password field
+        pass_field = page.query_selector("input[type='password']")
+        if not pass_field:
+            log.debug("No password field found for ATS login")
+            return False
+        pass_field.fill(acct["password"])
+
+        # Find and click login/sign-in button
+        login_btn = page.query_selector(
+            "button[type='submit'], button:has-text('Log in'), button:has-text('Sign in'), "
+            "button:has-text('Login'), input[type='submit']"
+        )
+        if login_btn:
+            _safe_click(login_btn, page)
+            page.wait_for_timeout(3000)
+
+            # Check if login succeeded (no longer on login page)
+            if not any(p in page.url.lower() for p in ("login", "signin", "sign-in", "/auth")):
+                log.info("   ✅ ATS login succeeded")
+                return True
+
+            # Check for error messages
+            errors = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
+            if any(e in errors for e in ("invalid", "incorrect", "wrong password", "failed")):
+                log.warning("   ⚠️ ATS login failed — credentials may be outdated")
+                return False
+
+        return False
+    except Exception as exc:
+        log.debug("ATS login attempt failed: %s", exc)
+        return False
+
+
+def _fill_registration_form(page, profile: "ApplicantProfile", password: str) -> int:
+    """Fill registration form fields. Returns count of fields filled."""
+    filled = 0
+    try:
+        # Name fields (try split first, then combined)
+        first_f = page.query_selector(
+            "input[name*='first' i], input[id*='first' i], "
+            "input[autocomplete='given-name'], input[placeholder*='First' i]"
+        )
+        last_f = page.query_selector(
+            "input[name*='last' i], input[id*='last' i], "
+            "input[autocomplete='family-name'], input[placeholder*='Last' i]"
+        )
+        if first_f and last_f:
+            parts = profile.full_name.split(None, 1)
+            first_f.fill(parts[0])
+            last_f.fill(parts[1] if len(parts) > 1 else "")
+            filled += 2
+        else:
+            name_f = page.query_selector(
+                "input[name*='name' i]:not([name*='user']):not([type='password']), "
+                "input[autocomplete='name']"
+            )
+            if name_f:
+                name_f.fill(profile.full_name)
+                filled += 1
+
+        # Email
+        email_f = page.query_selector(
+            "input[type='email'], input[name*='email' i], input[id*='email' i], "
+            "input[autocomplete='email'], input[placeholder*='email' i]"
+        )
+        if email_f:
+            email_f.fill(profile.email)
+            filled += 1
+
+        # Password fields (password + confirm)
+        for pf in page.query_selector_all("input[type='password']"):
+            if pf.is_visible():
+                pf.fill(password)
+                filled += 1
+
+        # Phone
+        phone_f = page.query_selector(
+            "input[type='tel'], input[name*='phone' i], input[id*='phone' i]"
+        )
+        if phone_f and phone_f.is_visible():
+            phone_f.fill(profile.phone)
+            filled += 1
+
+        # Terms checkbox
+        terms_cb = page.query_selector(
+            "input[type='checkbox'][name*='terms' i], "
+            "input[type='checkbox'][name*='agree' i], "
+            "input[type='checkbox'][id*='terms' i], "
+            "input[type='checkbox'][id*='agree' i], "
+            "input[type='checkbox'][name*='policy' i]"
+        )
+        if terms_cb and not terms_cb.is_checked():
+            terms_cb.check()
+    except Exception as exc:
+        log.debug("Error filling registration fields: %s", exc)
+    return filled
+
+
+def _handle_registration_verification(page, profile: "ApplicantProfile") -> bool:
+    """Handle email verification after registration. Returns False if blocked."""
+    try:
+        body_text = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 3000) || ''")
+        verification_phrases = (
+            "verification email",
+            "verify your email",
+            "check your email",
+            "confirmation email",
+            "sent you an email",
+            "verify your account",
+        )
+        if not any(p in body_text for p in verification_phrases):
+            return True  # No verification needed
+
+        if not profile.gmail_app_password:
+            log.warning("   ⚠️ Email verification required but no gmail_app_password")
+            return False
+
+        log.info("   📧 Email verification required, checking Gmail...")
+        code = _fetch_verification_code_from_gmail(
+            profile.email, profile.gmail_app_password, max_wait=45
+        )
+        if code:
+            code_field = page.query_selector(
+                "input[name*='code' i], input[name*='verif' i], "
+                "input[placeholder*='code' i], input[type='text']:visible"
+            )
+            if code_field:
+                code_field.fill(code)
+                verify_btn = page.query_selector(
+                    "button:has-text('Verify'), button:has-text('Confirm'), button[type='submit']"
+                )
+                if verify_btn:
+                    _safe_click(verify_btn, page)
+                    page.wait_for_timeout(3000)
+            return True
+
+        # No code found — check if it's a link-click verification
+        page.wait_for_timeout(5000)
+        body_text = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 3000) || ''")
+        if any(w in body_text for w in ("click the link", "follow the link")):
+            log.warning("   ⚠️ Email verification requires link click — cannot automate")
+            return False
+        return True
+    except Exception as exc:
+        log.debug("Verification handling failed: %s", exc)
+        return True
+
+
+def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
+    """Try to create an account on the current ATS page.
+
+    Looks for registration form or 'Create Account' link, fills it using
+    profile data, handles email verification, and stores credentials.
+    Returns True if account creation succeeded and we're past the login wall.
+    """
+    domain = _get_domain(page.url)
+
+    # Step 1: Navigate to registration form
+    try:
+        create_link = page.query_selector(
+            "a:has-text('Create Account'), a:has-text('Create an Account'), "
+            "a:has-text('Register'), a:has-text('Sign Up'), a:has-text('Sign up'), "
+            "button:has-text('Create Account'), button:has-text('Register'), "
+            "button:has-text('Sign Up'), button:has-text('Sign up'), "
+            "a:has-text('New User'), a:has-text('Create a new account'), "
+            "a:has-text('Don\\'t have an account')"
+        )
+        if create_link:
+            log.info("   📝 Found account creation option, clicking...")
+            _safe_click(create_link, page)
+            page.wait_for_timeout(2000)
+    except Exception as exc:
+        log.debug("Could not find create account link: %s", exc)
+
+    # Step 2: Fill and submit registration form
+    password = _generate_ats_password()
+    fields_filled = _fill_registration_form(page, profile, password)
+
+    # Find submit/continue button
+    submit_btn = None
+    try:
+        submit_btn = page.query_selector(
+            "button[type='submit'], button:has-text('Continue'), "
+            "button:has-text('Create'), button:has-text('Register'), "
+            "button:has-text('Sign Up'), button:has-text('Submit'), "
+            "input[type='submit']"
+        )
+    except Exception:  # noqa: S110
+        pass
+
+    # Email-first flows (ADP, etc.): only email field + Continue button
+    if fields_filled == 1 and submit_btn:
+        log.info("   📝 Email-first auth flow — clicking Continue...")
+        _safe_click(submit_btn, page)
+        page.wait_for_timeout(3000)
+        # After Continue, we may get a password creation page
+        pw_fields = page.query_selector_all("input[type='password']")
+        if pw_fields:
+            for pf in pw_fields:
+                if pf.is_visible():
+                    pf.fill(password)
+            # Look for name fields that may have appeared
+            _fill_registration_form(page, profile, password)
+            submit_btn = page.query_selector(
+                "button[type='submit'], button:has-text('Continue'), "
+                "button:has-text('Create'), button:has-text('Submit')"
+            )
+            if submit_btn:
+                _safe_click(submit_btn, page)
+                page.wait_for_timeout(3000)
+    elif fields_filled < 2:
+        log.info("   ⚠️ Could not fill enough registration fields (%d)", fields_filled)
+        _dump_form_debug(page, domain, "Account creation: too few fields filled")
+        return False
+    else:
+        log.info(f"   📝 Filled {fields_filled} registration fields, submitting...")
+        if not submit_btn:
+            log.info("   ⚠️ No submit button found for registration")
+            return False
+        _safe_click(submit_btn, page)
+        page.wait_for_timeout(3000)
+
+    # Step 3: Handle email verification
+    if not _handle_registration_verification(page, profile):
+        return False
+
+    # Step 4: Check outcome
+    page.wait_for_timeout(2000)
+    still_login = any(
+        p in page.url.lower() for p in ("login", "signin", "sign-in", "register", "/auth")
+    )
+    if still_login:
+        body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
+        if any(s in body for s in ("already exists", "already registered")):
+            log.info("   ℹ️ Account already exists for %s, trying login", domain)
+            return _attempt_ats_login(page, domain)
+        if not any(s in body for s in ("account created", "registration successful", "welcome")):
+            log.info("   ⚠️ Registration may not have succeeded")
+            return False
+        page.wait_for_timeout(3000)
+
+    _save_ats_account(domain, profile.email, password)
+    log.info(f"   ✅ Account created on {domain}")
+    return True
+
+
 _PAGE_CLASSIFIER_SYSTEM = (
     "You classify job application web pages to determine what automated actions are needed. "
     "Output ONLY valid JSON. Never add explanation or markdown."
 )
 
 
-def _is_login_wall(page) -> bool:
-    """Return True if the current page requires login or account creation."""
+_GUEST_SELECTORS = (
+    "a:has-text('Continue as guest'), a:has-text('Apply without account'), "
+    "a:has-text('Guest'), button:has-text('Continue as guest'), "
+    "button:has-text('Apply without'), a:has-text('continue without'), "
+    # Common alternatives
+    "a:has-text('Apply as guest'), button:has-text('Apply as guest'), "
+    "a:has-text('Apply manually'), button:has-text('Apply manually'), "
+    "button:has-text('Skip sign in'), "
+    "a:has-text('No thanks'), button:has-text('No thanks')"
+)
+
+# Avature/BMC-style pages show login + "First time here?" with resume upload options.
+# These are not guest bypasses — they're resume upload triggers that need special handling.
+_RESUME_UPLOAD_BYPASS_SELECTORS = (
+    "button:has-text('From Device'), a:has-text('From Device'), "
+    "button:has-text('Copy & Paste'), a:has-text('Copy & Paste')"
+)
+
+
+def _wait_and_dismiss_cookies(page) -> None:
+    """Wait for JS rendering, dismiss cookie consent banners, and wait for form elements."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:  # noqa: S110
+        pass
+    try:
+        cookie_btn = page.query_selector(
+            "button:has-text('Accept'), button:has-text('Accept All'), "
+            "button:has-text('Accept all'), button:has-text('I agree'), "
+            "button:has-text('Got it'), button:has-text('OK'), "
+            "button:has-text('Agree'), a:has-text('Accept All')"
+        )
+        if cookie_btn and cookie_btn.is_visible():
+            _safe_click(cookie_btn, page)
+            page.wait_for_timeout(1500)
+    except Exception:  # noqa: S110
+        pass
+    # Wait for JS-rendered form elements (SPA portals like Avature render via JS)
+    try:
+        page.wait_for_selector("input, textarea, select", timeout=10000)
+    except Exception:  # noqa: S110
+        # If no form elements appear after 10s, the page might be an SPA still loading.
+        # Give it more time for JS framework hydration.
+        page.wait_for_timeout(3000)
+
+
+def _try_guest_bypass(page) -> bool:
+    """Look for guest/bypass links on a login page and click if found."""
+    try:
+        guest_link = page.query_selector(_GUEST_SELECTORS)
+        if guest_link and guest_link.is_visible():
+            log.info("   🚪 Found guest/bypass option, clicking...")
+            _safe_click(guest_link, page)
+            page.wait_for_timeout(2000)
+            return True
+    except Exception:  # noqa: S110
+        pass
+    return False
+
+
+def _try_resume_upload_bypass(page, profile: Optional["ApplicantProfile"]) -> bool:
+    """Handle Avature/BMC-style pages where 'From Device' triggers resume upload.
+
+    These pages show login + 'First time here?' section. Clicking 'From Device'
+    opens a file picker or reveals a file input. We try the Playwright file chooser
+    API first, then fall back to finding the underlying <input type='file'>.
+    """
+    if not profile or not profile.resume_path:
+        return False
+    resume_path = Path(profile.resume_path).expanduser()
+    if not resume_path.exists():
+        return False
+    try:
+        btn = page.query_selector(_RESUME_UPLOAD_BYPASS_SELECTORS)
+        if not btn or not btn.is_visible():
+            return False
+        log.info("   📄 Found 'From Device' upload bypass, uploading resume...")
+        # Try 1: Playwright file chooser API (handles native file dialogs)
+        try:
+            with page.expect_file_chooser(timeout=3000) as fc_info:
+                _safe_click(btn, page)
+            fc_info.value.set_files(str(resume_path))
+            log.info(f"   📄 Uploaded resume via file chooser: {resume_path.name}")
+            page.wait_for_timeout(3000)
+            return True
+        except Exception:
+            pass
+        # Try 2: Click revealed a file input — find and fill it
+        _safe_click(btn, page)
+        page.wait_for_timeout(2000)
+        file_input = page.query_selector("input[type='file']")
+        if file_input:
+            file_input.set_input_files(str(resume_path))
+            log.info(f"   📄 Uploaded resume via file input: {resume_path.name}")
+            # Wait for the ATS to process the resume and navigate to the form
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:  # noqa: S110
+                pass
+            page.wait_for_timeout(3000)
+            return True
+        # Try 3: Clicking may have navigated to the form directly
+        if "login" not in page.url.lower() and "signin" not in page.url.lower():
+            log.info("   🚪 'From Device' navigated past login wall")
+            return True
+    except Exception as exc:
+        log.debug("Resume upload bypass failed: %s", exc)
+    return False
+
+
+def _resolve_login_wall(page, profile: Optional["ApplicantProfile"]) -> bool:
+    """Try to get past a login wall. Returns True if resolved (not blocked)."""
+    if _try_guest_bypass(page):
+        return True
+    if _try_resume_upload_bypass(page, profile):
+        return True
+    if not profile:
+        return False
+    domain = _get_domain(page.url)
+    if _attempt_ats_login(page, domain):
+        return True
+    if profile.auto_create_accounts:
+        return _attempt_account_creation(page, profile)
+    return False
+
+
+def _detect_login_page(page) -> bool:
+    """Return True if the current page appears to be a login/registration page.
+
+    Detection only — does not attempt to resolve the login wall.
+    """
     url = page.url.lower()
     if any(p in url for p in ("login", "signin", "sign-in", "register", "/auth", "/sso")):
-        # Check for "continue as guest" / "apply without account" first
-        try:
-            guest_link = page.query_selector(
-                "a:has-text('Continue as guest'), a:has-text('Apply without account'), "
-                "a:has-text('Guest'), button:has-text('Continue as guest'), "
-                "button:has-text('Apply without'), a:has-text('continue without')"
-            )
-            if guest_link:
-                _safe_click(guest_link, page)
-                page.wait_for_timeout(2000)
-                return False
-        except Exception:  # noqa: S110
-            pass
         return True
 
-    # Check for password field on the page
+    # JS-based: check for password/username inputs + login text phrases
     try:
-        password_field = page.query_selector("input[type='password']")
-        if password_field and password_field.is_visible():
-            # Double-check: a job form wouldn't have a password field
-            guest_link = page.query_selector(
-                "a:has-text('Continue as guest'), a:has-text('Apply without account'), "
-                "button:has-text('Continue as guest')"
-            )
-            if guest_link:
-                _safe_click(guest_link, page)
-                page.wait_for_timeout(2000)
-                return False
+        if page.evaluate("""() => {
+            const inputs = [...document.querySelectorAll('input')];
+            if (inputs.some(i => i.type === 'password')) return true;
+            if (inputs.some(i =>
+                /user|login/i.test((i.name||'')+(i.id||'')+(i.placeholder||''))
+            )) return true;
+            const t = (document.body?.innerText || '').toLowerCase().slice(0, 5000);
+            const phrases = [
+                'sign in to apply', 'log in to apply',
+                'create an account to apply', 'create account to apply',
+                'register to apply', 'sign in or create', 'log in or create',
+                'first time here', 'forgot your password'
+            ];
+            return phrases.some(p => t.includes(p));
+        }"""):
             return True
     except Exception:  # noqa: S110
         pass
 
-    # Check page text for login/registration prompts
+    # HTML source scan (catches late-rendered forms)
     try:
-        body_text = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 3000) || ''")
-        login_phrases = [
-            "sign in to apply",
-            "log in to apply",
-            "create an account to apply",
-            "create account to apply",
-            "register to apply",
-            "sign in or create",
-            "log in or create",
-        ]
-        if any(p in body_text for p in login_phrases):
+        html = page.content().lower()
+        if 'type="password"' in html or "type='password'" in html:
             return True
+        if "first time here" in html and ("log in" in html or "username" in html):
+            return True
+    except Exception:  # noqa: S110
+        pass
+
+    # Check iframes
+    try:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            if frame.query_selector("input[type='password']"):
+                return True
     except Exception:  # noqa: S110
         pass
 
     return False
+
+
+def _is_login_wall(page, profile: Optional["ApplicantProfile"] = None) -> bool:
+    """Return True if the current page requires login or account creation.
+
+    When *profile* is provided and auto_create_accounts is enabled, attempts
+    to log in with stored credentials or create a new account before giving up.
+    """
+    if not _detect_login_page(page):
+        return False
+    return not _resolve_login_wall(page, profile)
 
 
 def _extract_page_snapshot(page, max_chars: int = 8000) -> str:
@@ -3411,6 +4197,90 @@ def _answer_external_screening_questions(  # noqa: C901
     except Exception as exc:
         log.debug("External checkboxes failed: %s", exc)
 
+    # ExtJS boxselect widgets (GR8People and similar ATS platforms)
+    # These render as <input class="x-form-field"> inside a .x-boxselect wrapper.
+    # Standard .fill() doesn't trigger the ExtJS selection — must type + click option.
+    try:
+        for bs_input in page.query_selector_all(".x-boxselect input.x-form-field"):
+            try:
+                if not bs_input.is_visible():
+                    continue
+                # Skip if already has a selected tag (x-tagfield-item / x-boxselect-item)
+                has_tag = bs_input.evaluate(
+                    "el => !!el.closest('.x-boxselect')?.querySelector('.x-tagfield-item, "
+                    "li.x-boxselect-item')"
+                )
+                if has_tag:
+                    continue
+                # Check if parent has "has-value" class — ExtJS sets this on filled selects
+                has_value_cls = bs_input.evaluate(
+                    "el => el.closest('.x-boxselect')?.className?.includes('has-valu') || false"
+                )
+                if has_value_cls:
+                    continue
+                # Skip phone country-code widgets
+                aria_lbl = bs_input.get_attribute("aria-label") or ""
+                if "country code" in aria_lbl.lower():
+                    continue
+            except Exception:
+                continue
+            label = _get_field_label(page, bs_input)
+            if not label:
+                continue
+            _check_field_label(label)
+            # Type a prefix to trigger the filter dropdown
+            answer = _ai_answer_question(label, profile)
+            if not answer:
+                continue
+            try:
+                bs_input.click()
+                bs_input.evaluate("el => el.value = ''")
+                bs_input.type(answer[:20], delay=50)
+                page.wait_for_timeout(1000)
+                # Find the visible boundlist item
+                option = page.query_selector(
+                    ".x-boundlist-item:visible, .x-boundlist .x-boundlist-item"
+                )
+                if option and option.is_visible():
+                    opt_text = option.inner_text().strip()
+                    _safe_click(option, page)
+                    page.wait_for_timeout(300)
+                    log.info("   📋 ExtJS select '%s' → '%s'", label[:40], opt_text[:40])
+                    filled += 1
+                    _field_fills.append(
+                        {"field": label, "value": opt_text, "source": "extjs_boxselect"}
+                    )
+                else:
+                    # No match — clear and try shorter prefix
+                    bs_input.evaluate("el => el.value = ''")
+                    bs_input.type(answer[:5], delay=50)
+                    page.wait_for_timeout(1000)
+                    option = page.query_selector(
+                        ".x-boundlist-item:visible, .x-boundlist .x-boundlist-item"
+                    )
+                    if option and option.is_visible():
+                        opt_text = option.inner_text().strip()
+                        _safe_click(option, page)
+                        page.wait_for_timeout(300)
+                        log.info("   📋 ExtJS select '%s' → '%s'", label[:40], opt_text[:40])
+                        filled += 1
+                        _field_fills.append(
+                            {"field": label, "value": opt_text, "source": "extjs_boxselect"}
+                        )
+                    else:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(200)
+            except ApplicationAbortError:
+                raise
+            except Exception as exc:
+                log.debug("ExtJS boxselect failed for '%s': %s", label[:40], exc)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.debug("ExtJS boxselect scan failed: %s", exc)
+
     # Custom dropdowns (non-native, ARIA-based)
     # Skip phone country-code widgets (intl-tel-input); handle location autocompletes specially
     _SKIP_COMBOBOX_IDS = {"iti-0__search-input", "iti-1__search-input"}
@@ -3602,10 +4472,16 @@ def _answer_external_screening_questions(  # noqa: C901
             # Skip combobox inputs — already handled by the custom dropdown loop
             if inp.get_attribute("role") == "combobox":
                 continue
+            # Skip ExtJS boxselect inputs — handled by the ExtJS boxselect loop
+            inp_cls = inp.get_attribute("class") or ""
+            try:
+                if inp.evaluate("el => !!el.closest('.x-boxselect')"):
+                    continue
+            except Exception:
+                pass
             # Skip intl-tel-input country *search* inputs (iti__search-input),
             # but NOT the main phone input (iti__tel-input).
             inp_id = inp.get_attribute("id") or ""
-            inp_cls = inp.get_attribute("class") or ""
             if "iti__search-input" in inp_cls or "iti-search" in inp_id:
                 continue
             if not inp.is_visible():
@@ -3717,6 +4593,7 @@ def _find_navigation_button(page):  # noqa: C901
         "Apply for this job",
         "Confirm",
         "Submit my application",
+        "Save",
     ]
     next_texts = [
         "Next",
@@ -3928,20 +4805,39 @@ def _navigate_external_form(  # noqa: C901
     no_button_stalled = 0
     prev_snapshot = ""
     fields_filled_total = 0
+    captcha_solved_urls: set = set()  # track URLs where we already solved a CAPTCHA
 
     for step in range(_MAX_EXTERNAL_STEPS):
         page.wait_for_timeout(1500)
 
         # Login wall check on every step (some sites redirect mid-form)
-        if _is_login_wall(page):
+        if _is_login_wall(page, profile):
             log.info(f"   🔒 Requires account: {page.url[:60]}")
             return "skipped: requires account"
 
-        # Early captcha detection — bail immediately instead of filling the form
-        if _detect_captcha(page):
-            log.warning("   🛡️  CAPTCHA/reCAPTCHA detected — cannot proceed")
-            _dump_form_debug(page, job.get("id", ""), "CAPTCHA detected")
-            return "failed: captcha required"
+        # CAPTCHA detection — only attempt solve once per page URL
+        captcha_info = _detect_captcha(page)
+        if captcha_info and page.url not in captcha_solved_urls:
+            if profile.captcha_api_key:
+                solved = _solve_captcha(
+                    page, captcha_info, profile.captcha_api_key, profile.captcha_service
+                )
+                if solved:
+                    captcha_solved_urls.add(page.url)
+                    _btn_role, _btn_el = _find_navigation_button(page)
+                    if _btn_el:
+                        _safe_click(_btn_el, page)
+                        page.wait_for_timeout(3000)
+                    log.info("   🧩 CAPTCHA solved, continuing form flow")
+                    continue
+                else:
+                    log.warning("   🛡️  CAPTCHA solve failed — cannot proceed")
+                    _dump_form_debug(page, job.get("id", ""), "CAPTCHA solve failed")
+                    return "failed: captcha solve failed"
+            else:
+                log.warning("   🛡️  CAPTCHA detected but no captcha_api_key configured")
+                _dump_form_debug(page, job.get("id", ""), "CAPTCHA detected")
+                return "failed: captcha required"
 
         # Take snapshot and check for success
         snapshot = _extract_page_snapshot(page)
@@ -4228,6 +5124,22 @@ def _navigate_external_form(  # noqa: C901
                         )
                         return f"failed: human verification required: {error_summary[:200]}"
                     if any(bp in es_lower for bp in captcha_patterns):
+                        captcha_info = _detect_captcha(page)
+                        if captcha_info and profile.captcha_api_key:
+                            solved = _solve_captcha(
+                                page,
+                                captcha_info,
+                                profile.captcha_api_key,
+                                profile.captcha_service,
+                            )
+                            if solved:
+                                page.wait_for_timeout(2000)
+                                # Click submit again after solving
+                                _btn_role, _btn_el = _find_navigation_button(page)
+                                if _btn_el:
+                                    _safe_click(_btn_el, page)
+                                    page.wait_for_timeout(3000)
+                                continue  # re-enter loop to check outcome
                         _dump_form_debug(
                             page,
                             job.get("id", ""),
@@ -4236,6 +5148,17 @@ def _navigate_external_form(  # noqa: C901
                         return f"failed: captcha required: {error_summary[:200]}"
                     # If we can't fill any more fields, bail out
                     if fields_filled_total == 0 or stalled >= 2:
+                        # Recheck — page may have navigated to login wall
+                        # _is_login_wall may resolve it (guest bypass, login,
+                        # account creation) — if so, continue the form loop
+                        if _detect_login_page(page):
+                            resolved = _resolve_login_wall(page, profile)
+                            if resolved:
+                                stalled = 0
+                                fields_filled_total = 0
+                                continue  # retry from the new page state
+                            log.info("   🔒 Requires account: %s", page.url[:60])
+                            return "skipped: requires account"
                         _dump_form_debug(
                             page, job.get("id", ""), f"Validation errors: {error_summary[:200]}"
                         )
@@ -4310,8 +5233,11 @@ def submit_external_apply(
                     except Exception:  # noqa: S110
                         pass
 
+            # Wait for JS rendering and dismiss cookie banners
+            _wait_and_dismiss_cookies(page)
+
             # Immediate login wall check
-            if _is_login_wall(page):
+            if _is_login_wall(page, profile):
                 log.info(f"   🔒 Skipped: requires account ({page.url[:60]})")
                 return "skipped: requires account"
 
@@ -4540,6 +5466,7 @@ def auto_apply_workflow(  # noqa: C901
                 "fields_filled": list(_field_fills),
                 "ai_answer_failures": list(_ai_answer_failures),
                 "ai_tokens": {"input": _ai_tokens_in, "output": _ai_tokens_out},
+                "cost_usd": _compute_cost_usd(_ai_tokens_in, _ai_tokens_out),
                 "duration_seconds": round(time.time() - _apply_start_time, 1)
                 if _apply_start_time
                 else None,
