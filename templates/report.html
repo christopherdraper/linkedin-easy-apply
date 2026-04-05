@@ -183,6 +183,28 @@
         <div class="label">Platform</div>
         <div class="value">{{ entry.platform or '—' }}{% if entry.apply_type %} ({{ entry.apply_type }}){% endif %}</div>
     </div>
+    <div class="meta-item">
+        <div class="label">AI Tokens</div>
+        <div class="value">
+            {% if entry.ai_tokens %}
+                {{ '{:,}'.format(entry.ai_tokens.input) }} in / {{ '{:,}'.format(entry.ai_tokens.output) }} out
+            {% else %}
+                —
+            {% endif %}
+        </div>
+    </div>
+    <div class="meta-item">
+        <div class="label">API Cost</div>
+        <div class="value">
+            {% if entry.cost_usd is defined and entry.cost_usd is not none %}
+                ${{ '%.4f'|format(entry.cost_usd) }}
+            {% elif entry.ai_tokens and (entry.ai_tokens.input or entry.ai_tokens.output) %}
+                ${{ '%.4f'|format((entry.ai_tokens.input * 2.4 / 1000000) + (entry.ai_tokens.output * 12.0 / 1000000)) }}
+            {% else %}
+                —
+            {% endif %}
+        </div>
+    </div>
 </div>
 
 {% if entry.url %}
