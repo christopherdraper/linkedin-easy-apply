@@ -288,7 +288,7 @@ class TestGenerateDeepApplyPrompt:
         assert "Acme Inc" in prompt
         assert "Senior SRE" in prompt
         assert "12" in prompt
-        assert "upload my resume manually" in prompt
+        assert "/home/user/resume.pdf" in prompt
 
 
 class TestMarkDeepApplyDone:
@@ -401,7 +401,7 @@ class TestDeepApplyIntegration:
                     assert "Platform Engineer" in prompt
                     assert "TestCo" in prompt
                     assert "city" in prompt
-                    assert "upload my resume manually" in prompt
+                    assert "/tmp/resume.pdf" in prompt
 
                     # Step 4: Mark done
                     with patch("job_search_apply.LOG_FILE", log_file):
