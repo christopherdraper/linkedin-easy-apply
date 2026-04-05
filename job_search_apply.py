@@ -3218,6 +3218,90 @@ def _compute_cost_usd(tokens_in: int, tokens_out: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Deep-apply queue — re-queue high-match failures for manual/vision retry
+# ---------------------------------------------------------------------------
+
+DEEP_APPLY_QUEUE_FILE = DATA_DIR / "deep_apply_queue.json"
+
+# Failure categories eligible for deep-apply retry
+_DEEP_APPLY_ELIGIBLE_CATEGORIES = frozenset(
+    {
+        "form_stuck",
+        "validation_error",
+        "captcha",
+        "no_apply_button",
+        "login_wall",
+        "modal_lost",
+        "max_steps",
+    }
+)
+
+
+def _deep_apply_queue_path() -> Path:
+    return DEEP_APPLY_QUEUE_FILE
+
+
+def _load_deep_apply_queue() -> List[Dict]:
+    if DEEP_APPLY_QUEUE_FILE.exists():
+        try:
+            return json.loads(DEEP_APPLY_QUEUE_FILE.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _save_deep_apply_queue(queue: List[Dict]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DEEP_APPLY_QUEUE_FILE.write_text(json.dumps(queue, indent=2))
+
+
+def _deep_apply_eligible(entry: Dict, already_queued_ids: set) -> bool:
+    """Check if a failed application is eligible for deep-apply retry."""
+    if not entry.get("status", "").startswith("failed"):
+        return False
+    if (entry.get("match_score") or 0) < 0.9:
+        return False
+    if entry.get("failure_category") not in _DEEP_APPLY_ELIGIBLE_CATEGORIES:
+        return False
+    if entry.get("job_id") in already_queued_ids:
+        return False
+    return True
+
+
+def _queue_for_deep_apply(app_entry: Dict) -> None:
+    """Queue a failed application for deep-apply retry."""
+    queue = _load_deep_apply_queue()
+    queue.append(
+        {
+            "job_id": app_entry["job_id"],
+            "title": app_entry.get("title", ""),
+            "company": app_entry.get("company", ""),
+            "url": app_entry.get("url", ""),
+            "match_score": app_entry.get("match_score", 0),
+            "failure_reason": app_entry.get("failure_category", ""),
+            "original_status": app_entry.get("status", ""),
+            "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "pre_computed": {
+                "cover_letter_path": app_entry.get("cover_letter_path", ""),
+                "field_answers": list(_field_fills),
+                "scoring_reasoning": app_entry.get("reasoning", ""),
+            },
+            "status": "pending",
+            "deep_apply_status": None,
+            "deep_apply_timestamp": None,
+            "deep_apply_cost": None,
+        }
+    )
+    _save_deep_apply_queue(queue)
+    log.info(
+        "   \U0001f4cb Queued for deep-apply: %s - %s (score: %.2f)",
+        app_entry.get("company", "?"),
+        app_entry.get("title", "?"),
+        app_entry.get("match_score", 0),
+    )
+
+
+# ---------------------------------------------------------------------------
 # ATS account management — create/store/reuse accounts on external job sites
 # ---------------------------------------------------------------------------
 
@@ -5476,6 +5560,12 @@ def auto_apply_workflow(  # noqa: C901
                 else None,
             }
         )
+        # Deep-apply queue: check if failed high-match app should be re-queued
+        if status.startswith("failed"):
+            _queued_ids = {q["job_id"] for q in _load_deep_apply_queue()}
+            app_record = applications[-1]
+            if _deep_apply_eligible(app_record, _queued_ids):
+                _queue_for_deep_apply(app_record)
         applied += 1
         # Human-like delay between applications (longer for Easy Apply to avoid spam flags)
         if job.get("easy_apply"):
