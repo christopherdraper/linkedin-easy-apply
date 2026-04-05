@@ -5480,11 +5480,15 @@ def save_search_log(entry: Dict):
 
 
 def already_applied(log_entries: List[Dict]) -> set:
-    return {
-        e["url"]
-        for e in log_entries
-        if e.get("status", "").startswith("submitted") and e.get("url")
-    }
+    """Return a set of URLs and job IDs for previously submitted applications."""
+    result = set()
+    for e in log_entries:
+        if e.get("status", "").startswith("submitted"):
+            if e.get("url"):
+                result.add(e["url"])
+            if e.get("job_id"):
+                result.add(e["job_id"])
+    return result
 
 
 def auto_apply_workflow(  # noqa: C901
@@ -5539,7 +5543,7 @@ def auto_apply_workflow(  # noqa: C901
             log.info(f"✋ Reached limit ({max_applications})")
             break
 
-        if job["url"] in applied_urls:
+        if job["url"] in applied_urls or job.get("id") in applied_urls:
             log.info(f"⏭  Already applied: {job['title']} at {job['company']}")
             continue
 
