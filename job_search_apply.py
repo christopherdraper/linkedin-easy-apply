@@ -55,6 +55,7 @@ _apply_start_time: float = 0.0
 # Per-application AI token usage — cleared at start of each submit
 _ai_tokens_in: int = 0
 _ai_tokens_out: int = 0
+_final_ats_url: str = ""
 COVER_LETTER_DIR = DATA_DIR / "cover-letters"
 SESSION_FILE = DATA_DIR / "sessions" / "linkedin.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
@@ -590,15 +591,25 @@ def _playwright_context(p, proxy: Optional[str] = None):
     return browser, context, page, True
 
 
-def _fetch_description(context, url: str) -> str:
+def _fetch_description(context, url: str) -> tuple:
     """
-    Fetch the full job description from a LinkedIn job page.
-    LinkedIn obfuscates class names, so we extract by text landmark ("About the job").
+    Fetch the full job description and posting age from a LinkedIn job page.
+    Returns (description, posted_ago) where posted_ago is e.g. "2 days ago".
     """
     desc_page = context.new_page()
     try:
         desc_page.goto(url, wait_until="domcontentloaded", timeout=20000)
         desc_page.wait_for_timeout(2000)
+
+        # Extract posting age (e.g. "2 days ago", "1 week ago", "Reposted 3 days ago")
+        posted_ago = (
+            desc_page.evaluate("""() => {
+            const text = document.body.innerText;
+            const m = text.match(/(?:Reposted\\s+)?(\\d+\\s+(?:hour|day|week|month)s?\\s+ago)/i);
+            return m ? m[1] : '';
+        }""")
+            or ""
+        )
 
         text = desc_page.evaluate("""() => {
             // Find the 'About the job' heading and collect all text after it
@@ -631,12 +642,12 @@ def _fetch_description(context, url: str) -> str:
         }""")
 
         if text:
-            return re.sub(r"\s+", " ", text).strip()
+            return re.sub(r"\s+", " ", text).strip(), posted_ago
     except Exception as exc:
         log.debug("Description fetch failed for %s: %s", url, exc)
     finally:
         desc_page.close()
-    return ""
+    return "", ""
 
 
 def _parse_job_cards(page) -> List[Dict]:
@@ -1168,7 +1179,9 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
                 log.info(f"   Fetching descriptions for {len(jobs)} jobs...")
                 for job in jobs:
                     if job["url"]:
-                        job["description"] = _fetch_description(context, job["url"])
+                        job["description"], job["posted_ago"] = _fetch_description(
+                            context, job["url"]
+                        )
 
             if owns_browser:
                 _save_session(context)
@@ -2121,12 +2134,13 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
     Submit a LinkedIn Easy Apply application.
     Returns 'submitted' on success, 'failed: <reason>' on failure.
     """
-    global _apply_start_time, _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
+    global _apply_start_time, _ai_tokens_in, _ai_tokens_out, _final_ats_url  # noqa: PLW0603
     _apply_start_time = time.time()
     _field_fills.clear()
     _ai_answer_failures.clear()
     _ai_tokens_in = 0
     _ai_tokens_out = 0
+    _final_ats_url = ""
     try:
         import playwright  # noqa: F401
     except ImportError:
@@ -5371,12 +5385,13 @@ def submit_external_apply(  # noqa: C901
     Works on any ATS (Workday, Greenhouse, Lever, iCIMS, etc.).
     Returns status string.
     """
-    global _apply_start_time, _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
+    global _apply_start_time, _ai_tokens_in, _ai_tokens_out, _final_ats_url  # noqa: PLW0603
     _apply_start_time = time.time()
     _field_fills.clear()
     _ai_answer_failures.clear()
     _ai_tokens_in = 0
     _ai_tokens_out = 0
+    _final_ats_url = ""
     try:
         import playwright  # noqa: F401
     except ImportError:
@@ -5438,6 +5453,9 @@ def submit_external_apply(  # noqa: C901
 
             # Wait for JS rendering and dismiss cookie banners
             _wait_and_dismiss_cookies(page)
+
+            # Capture the final ATS URL for platform detection
+            _final_ats_url = page.url
 
             # Immediate login wall check
             if _is_login_wall(page, profile):
@@ -5678,6 +5696,7 @@ def auto_apply_workflow(  # noqa: C901
                 "location": job.get("location", ""),
                 "status": status,
                 "apply_type": job.get("apply_type", "easy_apply"),
+                "posted_ago": job.get("posted_ago", ""),
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "match_score": compat["match_score"],
                 "reasoning": compat.get("reasoning", ""),
@@ -5694,7 +5713,7 @@ def auto_apply_workflow(  # noqa: C901
                 "duration_seconds": round(time.time() - _apply_start_time, 1)
                 if _apply_start_time
                 else None,
-                "ats_platform": _detect_ats_platform(job.get("url", "")),
+                "ats_platform": _detect_ats_platform(_final_ats_url or job.get("url", "")),
                 "failure_category": _categorize_failure(status)
                 if status.startswith("failed")
                 else None,
