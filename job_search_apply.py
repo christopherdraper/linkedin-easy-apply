@@ -3396,12 +3396,24 @@ def _generate_deep_apply_prompt(queue_entry: Dict, profile: ApplicantProfile) ->
         screening_lines.append(f"- {k}: {v}")
     screening_section = "\n".join(screening_lines) if screening_lines else "(none)"
 
-    # Cover letter instruction
+    # Cover letter: inline the content so it can be pasted into Claude Desktop
     cl_path = pre.get("cover_letter_path", "")
+    cover_text = ""
     if cl_path:
-        cover_section = f"If a cover letter field appears, paste the contents of:\n{cl_path}"
+        try:
+            cover_text = Path(cl_path).read_text().strip()
+        except Exception:
+            pass
+    if cover_text:
+        cover_section = (
+            "If a cover letter field appears, paste the following cover letter:\n\n"
+            f"---\n{cover_text}\n---"
+        )
     else:
         cover_section = "No cover letter was generated for this application."
+
+    # Resume filename only (user has it in ~/Downloads on their workstation)
+    resume_name = Path(profile.resume_path).name if profile.resume_path else "resume.pdf"
 
     return f"""I need you to complete a job application. Follow these steps:
 
@@ -3428,7 +3440,7 @@ Additional screening answers (from profile):
 {screening_section}
 
 ## Step 4: Resume
-Upload my resume from: {profile.resume_path}
+Upload my resume from: ~/Downloads/{resume_name}
 
 ## Step 5: Cover Letter
 {cover_section}
