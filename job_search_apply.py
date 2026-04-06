@@ -3397,13 +3397,14 @@ def _generate_deep_apply_prompt(queue_entry: Dict, profile: ApplicantProfile) ->
     screening_section = "\n".join(screening_lines) if screening_lines else "(none)"
 
     # Cover letter: inline the content so it can be pasted into Claude Desktop
-    cl_path = pre.get("cover_letter_path", "")
-    cover_text = ""
-    if cl_path:
-        try:
-            cover_text = Path(cl_path).read_text().strip()
-        except Exception:
-            pass
+    cover_text = pre.get("cover_letter_text", "")
+    if not cover_text:
+        cl_path = pre.get("cover_letter_path", "")
+        if cl_path:
+            try:
+                cover_text = Path(cl_path).read_text().strip()
+            except Exception:
+                pass
     if cover_text:
         cover_section = (
             "If a cover letter field appears, paste the following cover letter:\n\n"
