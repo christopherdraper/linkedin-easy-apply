@@ -177,7 +177,7 @@ class TestAlreadyApplied:
         result = already_applied(log)
         assert "https://a.com" in result
         assert "https://b.com" in result
-        assert "https://c.com" not in result
+        assert "https://c.com" in result  # failed entries are deduplicated too
 
     def test_missing_url(self):
         log = [{"status": "submitted"}]
@@ -192,4 +192,23 @@ class TestAlreadyApplied:
             {"url": "https://d.com", "status": "failed: no button"},
         ]
         result = already_applied(log)
-        assert result == {"https://a.com"}
+        # submitted + failed + skipped are deduped; aborted and dry_run are not
+        assert "https://a.com" in result
+        assert "https://b.com" not in result
+        assert "https://c.com" not in result
+        assert "https://d.com" in result
+
+    def test_canonical_url_dedup(self):
+        """Same LinkedIn job with different tracking params should be deduplicated."""
+        log = [
+            {
+                "url": "https://www.linkedin.com/jobs/view/123/?eBP=abc123",
+                "status": "failed: no Apply button found",
+            },
+        ]
+        result = already_applied(log)
+        # Both the full URL and the canonical (no query params) should be in the set
+        assert "https://www.linkedin.com/jobs/view/123/?eBP=abc123" in result
+        assert "https://www.linkedin.com/jobs/view/123/" in result
+        # A different tracking param URL for the same job should match
+        assert "https://www.linkedin.com/jobs/view/123/" in result

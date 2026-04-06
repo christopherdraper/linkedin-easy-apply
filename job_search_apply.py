@@ -191,7 +191,7 @@ class JobSearchParams:
     title: str
     location: Optional[str] = None
     remote: bool = True
-    max_age_days: Optional[int] = 14  # Only show jobs posted within this many days
+    max_age_days: Optional[int] = 3  # Only show jobs posted within this many days
     keywords_excluded: List[str] = field(default_factory=list)
     company_blacklist: List[str] = field(default_factory=list)
 
@@ -661,10 +661,12 @@ def _parse_job_cards(page) -> List[Dict]:
                 # Ensure absolute URL
                 if href and href.startswith("/"):
                     href = "https://www.linkedin.com" + href
+                # Strip tracking params for stable job IDs
+                canonical_href = re.sub(r"\?.*$", "", href) if href else ""
                 apply_type = "easy_apply" if has_easy_apply else "external"
                 jobs.append(
                     {
-                        "id": f"li_{hashlib.sha256((href or title_el.inner_text()).encode()).hexdigest()[:12]}",
+                        "id": f"li_{hashlib.sha256((canonical_href or title_el.inner_text()).encode()).hexdigest()[:12]}",
                         "title": title_el.inner_text().strip(),
                         "company": company_el.inner_text().strip(),
                         "location": location_el.inner_text().strip() if location_el else "",
@@ -2136,9 +2138,13 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
             page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(2000)
 
-            easy_apply_btn = page.query_selector(
-                "[aria-label*='Easy Apply'], button:has-text('Easy Apply'), a:has-text('Easy Apply')"
-            )
+            easy_apply_sel = "[aria-label*='Easy Apply'], button:has-text('Easy Apply'), a:has-text('Easy Apply')"
+            easy_apply_btn = None
+            for _wait in range(4):
+                easy_apply_btn = page.query_selector(easy_apply_sel)
+                if easy_apply_btn:
+                    break
+                page.wait_for_timeout(2000)
             if not easy_apply_btn:
                 return "failed: Easy Apply button not found — job may no longer be active"
             _safe_click(easy_apply_btn, page)
@@ -2540,7 +2546,8 @@ def _get_field_label(page, element) -> str:
         const container = el.closest('.artdeco-text-input, .fb-dash-form-element, '
                                      + '[data-test-form-element], fieldset, '
                                      + '.form-group, [class*="form-field"], '
-                                     + '[class*="FormField"], [data-automation-id]');
+                                     + '[class*="FormField"], [data-automation-id], '
+                                     + '.select, .select__container');
         if (container) {
             const lbl = container.querySelector('label, legend');
             if (lbl) return lbl.innerText;
@@ -5352,7 +5359,7 @@ def _navigate_external_form(  # noqa: C901
     return f"failed: exceeded max form steps ({_MAX_EXTERNAL_STEPS})"
 
 
-def submit_external_apply(
+def submit_external_apply(  # noqa: C901
     job: Dict,
     profile: ApplicantProfile,
     cover_letter_path: str = "",
@@ -5386,14 +5393,29 @@ def submit_external_apply(
                 _ensure_logged_in(page, job["url"])
                 page.wait_for_timeout(2000)
 
-                apply_btn = page.query_selector(
+                apply_sel = (
                     "a[aria-label*='Apply on company'], "
                     "a[aria-label*='Apply on external'], "
                     "button.jobs-apply-button:not(:has-text('Easy Apply')), "
                     "a.jobs-apply-button, "
                     "button:has-text('Apply'):not(:has-text('Easy'))"
                 )
+                # LinkedIn SPA may take several seconds to render the apply section
+                apply_btn = None
+                for _wait in range(4):
+                    apply_btn = page.query_selector(apply_sel)
+                    if apply_btn:
+                        break
+                    page.wait_for_timeout(2000)
                 if not apply_btn:
+                    # Check for LinkedIn promoted ads ("I'm interested" only, no apply)
+                    interested_btn = page.query_selector(
+                        'button:has-text("I\u2019m interested"), button:has-text("I\'m interested")'
+                    )
+                    if interested_btn:
+                        return (
+                            "skipped: LinkedIn promoted ad (no apply button, only 'I'm interested')"
+                        )
                     # Vision-based fallback: use AI to find the Apply button
                     vision_result = _ai_find_navigation_button(page)
                     if vision_result:
@@ -5479,11 +5501,23 @@ def save_search_log(entry: Dict):
 
 
 def already_applied(log_entries: List[Dict]) -> set:
-    """Return a set of URLs and job IDs for previously submitted applications."""
+    """Return a set of canonical URLs and job IDs for previously attempted applications.
+
+    Includes both submitted and failed entries so we don't re-attempt the same
+    job with a different tracking-parameter URL.
+    """
     result = set()
     for e in log_entries:
-        if e.get("status", "").startswith("submitted"):
+        status = e.get("status", "")
+        if (
+            status.startswith("submitted")
+            or status.startswith("failed")
+            or status.startswith("skipped")
+        ):
             if e.get("url"):
+                # Strip tracking params for canonical matching
+                canonical = re.sub(r"\?.*$", "", e["url"])
+                result.add(canonical)
                 result.add(e["url"])
             if e.get("job_id"):
                 result.add(e["job_id"])
@@ -5542,7 +5576,12 @@ def auto_apply_workflow(  # noqa: C901
             log.info(f"✋ Reached limit ({max_applications})")
             break
 
-        if job["url"] in applied_urls or job.get("id") in applied_urls:
+        canonical_url = re.sub(r"\?.*$", "", job["url"]) if job.get("url") else ""
+        if (
+            job["url"] in applied_urls
+            or canonical_url in applied_urls
+            or job.get("id") in applied_urls
+        ):
             log.info(f"⏭  Already applied: {job['title']} at {job['company']}")
             continue
 
