@@ -3384,15 +3384,25 @@ def _generate_deep_apply_prompt(queue_entry: Dict, profile: ApplicantProfile) ->
     pre = queue_entry.get("pre_computed", {})
     pct = int(queue_entry.get("match_score", 0) * 100)
 
-    # Build field answers section
+    # Build field answers section (deduplicated)
     field_lines = []
+    seen_fields: set = set()
     for fa in pre.get("field_answers", []):
+        key = f"{fa['field'].lower().strip()}: {fa['value'].strip()}"
+        if key in seen_fields:
+            continue
+        seen_fields.add(key)
         field_lines.append(f"- {fa['field']}: {fa['value']}")
     field_section = "\n".join(field_lines) if field_lines else "(no pre-filled answers available)"
 
-    # Build screening answers section
+    # Build screening answers section -- skip keys already covered in
+    # field_answers above, and deduplicate exact key:value pairs
     screening_lines = []
     for k, v in profile.screening_answers.items():
+        norm = f"{k.lower().strip()}: {v.strip().lower()}"
+        if norm in seen_fields:
+            continue
+        seen_fields.add(norm)
         screening_lines.append(f"- {k}: {v}")
     screening_section = "\n".join(screening_lines) if screening_lines else "(none)"
 
