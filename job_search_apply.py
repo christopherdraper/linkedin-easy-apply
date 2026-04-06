@@ -4849,100 +4849,180 @@ def _answer_external_screening_questions(  # noqa: C901
     except Exception as exc:
         log.debug("Div-based custom selects failed: %s", exc)
 
-    # Catch-all: styled dropdowns showing placeholder text like "--Select--" or "-Select-"
-    # (BambooHR, custom ATS frameworks). These are often divs/spans styled as dropdowns
-    # that don't use standard ARIA roles.
+    # BambooHR Fabric UI dropdowns — fab-SelectToggle buttons with aria-haspopup
+    # These use a custom component: button.fab-SelectToggle opens a fab-MenuVessel
+    # with fab-MenuOption[role="menuitem"] children.  Label is in aria-label attr
+    # (format: "State –Select–").
     try:
-        placeholder_dropdowns = page.evaluate("""() => {
+        bamboo_toggles = page.query_selector_all("button.fab-SelectToggle[aria-haspopup='true']")
+        for toggle in bamboo_toggles:
+            try:
+                if not toggle.is_visible():
+                    continue
+                aria_label = toggle.get_attribute("aria-label") or ""
+                # Only handle unfilled ones (placeholder contains Select)
+                if "select" not in aria_label.lower():
+                    continue
+                # Extract field label: strip trailing placeholder like "–Select–"
+                label = re.sub(
+                    r"\s*[-–—]+\s*Select\s*[-–—]+\s*$", "", aria_label, flags=re.IGNORECASE
+                ).strip()
+                if not label:
+                    continue
+                _check_field_label(label)
+                # Click toggle to open the menu
+                _safe_click(toggle, page)
+                page.wait_for_timeout(500)
+                # Collect options from the fab-MenuVessel
+                menu_opts = page.query_selector_all(".fab-MenuOption[role='menuitem']")
+                opt_texts = []
+                opt_elements = []
+                for mo in menu_opts:
+                    try:
+                        t = mo.inner_text().strip()
+                        if t and len(t) < 80:
+                            opt_texts.append(t)
+                            opt_elements.append(mo)
+                    except Exception:
+                        continue
+                if not opt_texts:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(200)
+                    continue
+                # If there's a search input, use it for faster selection
+                search_input = page.query_selector(".fab-MenuSearch__input")
+                answer = _ai_answer_question(
+                    f"{label} (choose one: {', '.join(opt_texts[:25])})",
+                    profile,
+                )
+                if not answer:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(200)
+                    continue
+                # Try typing into search to narrow options
+                if search_input and search_input.is_visible():
+                    search_input.fill(answer[:20])
+                    page.wait_for_timeout(400)
+                    # Re-collect filtered options
+                    menu_opts = page.query_selector_all(".fab-MenuOption[role='menuitem']")
+                    opt_texts = []
+                    opt_elements = []
+                    for mo in menu_opts:
+                        try:
+                            if not mo.is_visible():
+                                continue
+                            t = mo.inner_text().strip()
+                            if t and len(t) < 80:
+                                opt_texts.append(t)
+                                opt_elements.append(mo)
+                        except Exception:
+                            continue
+                # Click best match
+                clicked = False
+                answer_lower = answer.lower()
+                for opt_el, opt_text in zip(opt_elements, opt_texts):
+                    if (
+                        answer_lower in opt_text.lower()
+                        or opt_text.lower() in answer_lower
+                        or opt_text.lower().startswith(answer_lower[:3])
+                    ):
+                        _safe_click(opt_el, page)
+                        log.info(
+                            "   🤖 BambooHR dropdown '%s' → '%s'",
+                            label[:40],
+                            opt_text,
+                        )
+                        filled += 1
+                        clicked = True
+                        break
+                if not clicked:
+                    # Fall back: click first option if exact match failed
+                    if opt_elements:
+                        _safe_click(opt_elements[0], page)
+                        log.info(
+                            "   🤖 BambooHR dropdown '%s' → '%s' (fallback)",
+                            label[:40],
+                            opt_texts[0],
+                        )
+                        filled += 1
+                    else:
+                        page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+            except ApplicationAbortError:
+                raise
+            except Exception as exc:
+                log.debug("BambooHR toggle '%s' failed: %s", aria_label[:30], exc)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+    except ApplicationAbortError:
+        raise
+    except Exception as exc:
+        log.debug("BambooHR fab-SelectToggle handler failed: %s", exc)
+
+    # Catch-all: generic aria-haspopup dropdowns still showing placeholder text
+    try:
+        generic_popups = page.evaluate("""() => {
             const results = [];
-            // Find elements that look like unfilled dropdowns by their text content
-            const candidates = document.querySelectorAll(
-                '[class*="select"], [class*="Select"], [class*="dropdown"], [class*="Dropdown"]'
+            const btns = document.querySelectorAll(
+                'button[aria-haspopup="true"], button[aria-haspopup="listbox"]'
             );
-            for (const el of candidates) {
-                if (!el.offsetParent) continue;  // not visible
-                const text = el.textContent.trim();
-                // Match common placeholder patterns
-                if (/^[-–—]*Select[-–—]*$/.test(text) || text === 'Select' || text === 'Choose') {
-                    // Find the label for this dropdown
+            for (const b of btns) {
+                if (!b.offsetParent) continue;
+                const text = b.textContent.trim();
+                const aria = b.getAttribute('aria-label') || '';
+                const combined = text + ' ' + aria;
+                if (/select|choose|pick/i.test(combined) && combined.length < 120) {
                     let label = '';
-                    // Check for associated label element
-                    const id = el.id || el.getAttribute('for') || '';
+                    const id = b.getAttribute('aria-labelledby') || '';
                     if (id) {
-                        const labelEl = document.querySelector(`label[for="${id}"]`);
-                        if (labelEl) label = labelEl.textContent.trim();
+                        const lbl = document.getElementById(id);
+                        if (lbl) label = lbl.textContent.trim();
                     }
-                    // Walk up to find a parent with label text
+                    if (!label && aria) {
+                        label = aria.replace(/[-–—]+\\s*Select\\s*[-–—]+/gi, '').trim();
+                    }
                     if (!label) {
-                        let parent = el.parentElement;
-                        for (let i = 0; i < 4 && parent; i++) {
-                            const lbl = parent.querySelector('label');
+                        let p = b.parentElement;
+                        for (let i = 0; i < 4 && p; i++) {
+                            const lbl = p.querySelector('label');
                             if (lbl) { label = lbl.textContent.trim(); break; }
-                            parent = parent.parentElement;
+                            p = p.parentElement;
                         }
                     }
                     if (label) {
-                        results.push({
-                            selector: el.tagName.toLowerCase()
-                                + (el.id ? '#' + el.id : '')
-                                + (el.className ? '.' + el.className.split(' ')[0] : ''),
-                            label: label
-                        });
+                        results.push({ idx: results.length, label: label });
                     }
                 }
             }
             return results.slice(0, 5);
         }""")
-        for dd_info in placeholder_dropdowns:
+        for dd_info in generic_popups:
             label = dd_info.get("label", "")
             if not label:
                 continue
             _check_field_label(label)
-            # Find the clickable element again by label proximity
-            label_el = page.query_selector(f"label:has-text('{label.split('*')[0].strip()}')")
-            if not label_el:
-                continue
-            # Find the dropdown near this label (sibling or child of parent)
-            dropdown_el = label_el.evaluate_handle("""el => {
-                const parent = el.closest('.field, .form-group, .fab-FormColumn, [class*="field"]')
-                    || el.parentElement;
-                if (!parent) return null;
-                // Look for clickable dropdown trigger
-                const dd = parent.querySelector(
-                    '[class*="select"], [class*="Select"], [class*="dropdown"]'
-                );
-                return dd;
-            }""").as_element()
-            if not dropdown_el or not dropdown_el.is_visible():
-                continue
-            # Click to open
-            _safe_click(dropdown_el, page)
-            page.wait_for_timeout(500)
-            # Collect visible options
-            opts = page.query_selector_all(
-                "[role='option']:visible, [role='listbox'] li:visible, "
-                "[class*='option']:visible, [class*='menu'] li:visible, "
-                "[class*='list'] li:visible"
+            # Re-find the button by index
+            btns = page.query_selector_all(
+                "button[aria-haspopup='true'], button[aria-haspopup='listbox']"
             )
-            if not opts:
-                # Try broader: any newly visible list items
-                opts = page.evaluate_handle("""() => {
-                    const items = document.querySelectorAll('li, [role="option"]');
-                    return Array.from(items).filter(
-                        i => i.offsetParent && i.textContent.trim()
-                            && i.getBoundingClientRect().height > 0
-                    );
-                }""")
-                try:
-                    opts = list(opts.as_element().query_selector_all("*")) if opts else []
-                except Exception:
-                    opts = []
+            visible_btns = [b for b in btns if b.is_visible()]
+            idx = dd_info.get("idx", 0)
+            if idx >= len(visible_btns):
+                continue
+            btn = visible_btns[idx]
+            _safe_click(btn, page)
+            page.wait_for_timeout(500)
+            opts = page.query_selector_all(
+                "[role='menuitem']:visible, [role='option']:visible, [role='listbox'] li:visible"
+            )
             opt_texts = []
             opt_elements = []
-            for o in opts if isinstance(opts, list) else []:
+            for o in opts:
                 try:
                     t = o.inner_text().strip()
-                    if t and len(t) < 60:
+                    if t and len(t) < 80:
                         opt_texts.append(t)
                         opt_elements.append(o)
                 except Exception:
@@ -4955,7 +5035,11 @@ def _answer_external_screening_questions(  # noqa: C901
                     for opt_el, opt_text in zip(opt_elements, opt_texts):
                         if answer.lower() in opt_text.lower() or opt_text.lower() in answer.lower():
                             _safe_click(opt_el, page)
-                            log.info(f"   🤖 Styled dropdown '{label[:40]}' → '{opt_text}'")
+                            log.info(
+                                "   🤖 Popup dropdown '%s' → '%s'",
+                                label[:40],
+                                opt_text,
+                            )
                             filled += 1
                             break
                     else:
@@ -4970,7 +5054,7 @@ def _answer_external_screening_questions(  # noqa: C901
     except ApplicationAbortError:
         raise
     except Exception as exc:
-        log.debug("Styled placeholder dropdowns failed: %s", exc)
+        log.debug("Generic popup dropdowns failed: %s", exc)
 
     # Text/number/email/tel/url inputs
     for inp in page.query_selector_all(
