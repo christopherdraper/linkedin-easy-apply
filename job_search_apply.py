@@ -4806,6 +4806,43 @@ def _answer_external_screening_questions(  # noqa: C901
         ):
             continue
 
+        # Location fields need type-and-select for autocomplete dropdowns
+        lt_lower = label_text.lower()
+        if (
+            any(kw in lt_lower for kw in ("location", "city", "candidate-location"))
+            and profile.city
+        ):
+            try:
+                inp.click()
+                inp.fill("")
+                inp.type(profile.city, delay=50)
+                page.wait_for_timeout(1500)
+                suggestion = page.query_selector(
+                    "[role='option'], [class*='suggestion'], "
+                    "[class*='autocomplete'] li, [class*='listbox'] li, "
+                    "[class*='pac-item'], [class*='dropdown-item'], "
+                    "[class*='results'] li, [class*='menu'] [role='option']"
+                )
+                if suggestion and suggestion.is_visible():
+                    _safe_click(suggestion, page)
+                    log.info(f"   📍 Location autocomplete '{label_text[:40]}' → '{profile.city}'")
+                    filled += 1
+                    _field_fills.append(
+                        {
+                            "field": label_text,
+                            "value": profile.city,
+                            "source": "location_autocomplete",
+                        }
+                    )
+                    continue
+                # No suggestion appeared — fall through to regular fill
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(200)
+            except ApplicationAbortError:
+                raise
+            except Exception as exc:
+                log.debug("Location autocomplete failed for '%s': %s", label_text[:40], exc)
+
         try:
             _fill_input_field(inp, label_text, page, profile)
             filled += 1
@@ -5106,13 +5143,23 @@ def _navigate_external_form(  # noqa: C901
             log.info(f"   🔒 Requires account: {page.url[:60]}")
             return "skipped: requires account"
 
-        # CAPTCHA detection — only attempt solve once per page URL
+        # CAPTCHA detection — attempt solve up to 2 times per page URL
         captcha_info = _detect_captcha(page)
         if captcha_info and page.url not in captcha_solved_urls:
             if profile.captcha_api_key:
-                solved = _solve_captcha(
-                    page, captcha_info, profile.captcha_api_key, profile.captcha_service
-                )
+                solved = False
+                for captcha_attempt in range(2):
+                    solved = _solve_captcha(
+                        page, captcha_info, profile.captcha_api_key, profile.captcha_service
+                    )
+                    if solved:
+                        break
+                    if captcha_attempt == 0:
+                        log.info("   🧩 Retrying CAPTCHA solve (attempt 2)...")
+                        page.wait_for_timeout(2000)
+                        captcha_info = _detect_captcha(page)
+                        if not captcha_info:
+                            break
                 if solved:
                     captcha_solved_urls.add(page.url)
                     _btn_role, _btn_el = _find_navigation_button(page)
@@ -5182,6 +5229,28 @@ def _navigate_external_form(  # noqa: C901
         ):
             log.info("   ⏭  URL looks like a job search page, skipping")
             return "failed: landed on job search page instead of application form"
+
+        # Job listing page with Apply button (Workday, company career pages)
+        # If no form fields and page has an Apply button, click through to the form
+        if not classification.get("has_form_fields") and not classification.get("has_file_upload"):
+            apply_btn = page.query_selector(
+                "a[data-automation-id='jobPostingApplyButton'], "
+                "button[data-automation-id='jobPostingApplyButton'], "
+                "a:has-text('Apply'), button:has-text('Apply'), "
+                "a[href*='/apply'], "
+                "a.css-1ixbfil, "  # Workday apply button class
+                "a[data-uxi-element-id='Apply']"
+            )
+            if apply_btn:
+                log.info("   🔗 Job listing page detected, clicking Apply button...")
+                _safe_click(apply_btn, page)
+                page.wait_for_timeout(3000)
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:  # noqa: S110
+                    pass
+                _final_ats_url = page.url
+                continue  # re-enter loop on the new page
 
         # Detect email verification code prompt and handle it before filling fields
         if profile.gmail_app_password:
