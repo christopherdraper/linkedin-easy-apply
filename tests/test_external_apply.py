@@ -11,6 +11,7 @@ from job_search_apply import (  # noqa: E402
     _2captcha_solve,
     _attempt_ats_login,
     _classify_page,
+    _detect_ats_platform,
     _detect_captcha,
     _detect_success_or_confirmation,
     _extract_page_snapshot,
@@ -18,6 +19,7 @@ from job_search_apply import (  # noqa: E402
     _find_navigation_button,
     _generate_ats_password,
     _get_domain,
+    _handle_file_uploads,
     _inject_captcha_token,
     _is_login_wall,
     _load_ats_accounts,
@@ -645,3 +647,118 @@ class Test2CaptchaSolve:
         mock_urlopen.side_effect = [submit_resp, poll_resp]
         result = _2captcha_solve("key", "https://2captcha.com", "recaptchav2", "sk", "url")
         assert result == "solved-token"
+
+
+# ---------------------------------------------------------------------------
+# _detect_ats_platform tests
+# ---------------------------------------------------------------------------
+
+
+class TestDetectAtsPlatform:
+    def test_major_ats_platforms(self):
+        cases = [
+            ("https://company.wd5.myworkdayjobs.com/en-US/External/job/Sr-Engineer", "Workday"),
+            ("https://boards.greenhouse.io/company/jobs/123", "Greenhouse"),
+            ("https://job-boards.greenhouse.io/company/jobs/123", "Greenhouse"),
+            ("https://jobs.lever.co/company/abc-123", "Lever"),
+            ("https://careers-company.icims.com/jobs/12345", "iCIMS"),
+            ("https://jobs.ashbyhq.com/company/abc-123", "Ashby"),
+            ("https://jobs.smartrecruiters.com/Company/12345", "SmartRecruiters"),
+            ("https://apply.workable.com/company/j/ABC123/apply/", "Workable"),
+            ("https://ats.rippling.com/company/jobs/123", "Rippling"),
+            ("https://app.jazz.co/apply/abc123", "JazzHR"),
+        ]
+        for url, expected in cases:
+            assert _detect_ats_platform(url) == expected, f"Failed for {url}"
+
+    def test_mid_tier_platforms(self):
+        cases = [
+            ("https://careers.kula.ai/company/12345/apply/", "Kula"),
+            ("https://work.mercor.com/apply/12345", "Mercor"),
+            ("https://jobs.micro1.ai/role/12345", "Micro1"),
+            ("https://underdog.io/candidates/apply", "Underdog"),
+            ("https://jobs.bmc.com/apply/12345", "BMC Helix"),
+            ("https://recruiting.paylocity.com/company/12345", "Paylocity"),
+            ("https://company.personio.de/job/12345", "Personio"),
+            ("https://company.teamtailor.com/jobs/12345", "Teamtailor"),
+        ]
+        for url, expected in cases:
+            assert _detect_ats_platform(url) == expected, f"Failed for {url}"
+
+    def test_unknown_url(self):
+        assert _detect_ats_platform("https://company.com/careers/apply") == "unknown"
+        assert _detect_ats_platform("https://www.linkedin.com/jobs/view/123") == "unknown"
+
+    def test_case_insensitive(self):
+        assert _detect_ats_platform("https://JOBS.LEVER.CO/company") == "Lever"
+        assert _detect_ats_platform("https://Jobs.AshbyHQ.com/company") == "Ashby"
+
+    def test_empty_url(self):
+        assert _detect_ats_platform("") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# _handle_file_uploads tests — upload tracking across steps
+# ---------------------------------------------------------------------------
+
+
+class TestHandleFileUploads:
+    def _make_profile(self, tmp_path):
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.4 fake resume content")
+        return ApplicantProfile.from_dict(
+            {
+                "personal": {
+                    "full_name": "Test User",
+                    "email": "test@example.com",
+                    "phone": "555-0100",
+                    "location": {"city": "NYC", "state": "NY"},
+                },
+                "documents": {"resume_path": str(resume)},
+            }
+        )
+
+    def test_skips_reupload_on_second_call(self, tmp_path):
+        """Calling _handle_file_uploads twice should not re-upload the same file."""
+        profile = self._make_profile(tmp_path)
+        uploaded_files = set()
+
+        # First call — mock a page with one file input
+        file_input = MagicMock()
+        file_input.get_attribute.return_value = ""
+        page = MagicMock()
+        page.query_selector_all.return_value = [file_input]
+
+        with patch("job_search_apply._get_field_label", return_value="resume"):
+            n1 = _handle_file_uploads(page, profile, "", uploaded_files)
+
+        assert n1 == 1
+        assert "resume" in uploaded_files
+        file_input.set_input_files.assert_called_once()
+
+        # Second call — same file input still on page
+        file_input2 = MagicMock()
+        file_input2.get_attribute.return_value = ""
+        page2 = MagicMock()
+        page2.query_selector_all.return_value = [file_input2]
+
+        with patch("job_search_apply._get_field_label", return_value="resume"):
+            n2 = _handle_file_uploads(page2, profile, "", uploaded_files)
+
+        assert n2 == 0  # should skip
+        file_input2.set_input_files.assert_not_called()
+
+    def test_no_tracking_set_still_works(self, tmp_path):
+        """Without tracking set, uploads work normally (backwards compatible)."""
+        profile = self._make_profile(tmp_path)
+
+        file_input = MagicMock()
+        file_input.get_attribute.return_value = ""
+        page = MagicMock()
+        page.query_selector_all.return_value = [file_input]
+
+        with patch("job_search_apply._get_field_label", return_value="resume"):
+            n = _handle_file_uploads(page, profile)
+
+        assert n == 1
+        file_input.set_input_files.assert_called_once()

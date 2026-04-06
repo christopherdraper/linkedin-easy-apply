@@ -3186,10 +3186,15 @@ def _inject_captcha_token(page, ctype: str, token: str) -> bool:
 _MAX_EXTERNAL_STEPS = 20
 
 _ATS_PATTERNS = [
+    # Major ATS platforms
     ("Workday", "myworkdayjobs.com"),
     ("Workday", "myworkday.com"),
+    ("Workday", "wd1.myworkdaysite.com"),
+    ("Workday", "wd3.myworkdaysite.com"),
+    ("Workday", "wd5.myworkdaysite.com"),
     ("Greenhouse", "greenhouse.io"),
     ("Greenhouse", "boards.greenhouse.io"),
+    ("Greenhouse", "job-boards.greenhouse.io"),
     ("Lever", "jobs.lever.co"),
     ("iCIMS", "icims.com"),
     ("Ashby", "ashbyhq.com"),
@@ -3197,7 +3202,50 @@ _ATS_PATTERNS = [
     ("Jobvite", "jobvite.com"),
     ("BambooHR", "bamboohr.com"),
     ("JazzHR", "applytojob.com"),
+    ("JazzHR", "app.jazz.co"),
     ("Rippling", "ats.rippling.com"),
+    ("Rippling", "rippling.com/company/"),
+    # Mid-tier / emerging ATS
+    ("Workable", "apply.workable.com"),
+    ("Workable", "jobs.workable.com"),
+    ("Taleo", "taleo.net"),
+    ("SuccessFactors", "successfactors.com"),
+    ("UltiPro", "ultipro.com"),
+    ("UltiPro", "recruiting.ultipro.com"),
+    ("Paylocity", "paylocity.com"),
+    ("Breezy", "breezy.hr"),
+    ("Recruitee", "recruitee.com"),
+    ("Pinpoint", "pinpointhq.com"),
+    ("Teamtailor", "teamtailor.com"),
+    ("Personio", "personio.de"),
+    ("Personio", "jobs.personio.com"),
+    ("Comeet", "comeet.co"),
+    ("Dover", "dover.com"),
+    ("Kula", "kula.ai"),
+    ("Kula", "careers.kula.ai"),
+    ("Avature", "avature.net"),
+    ("Phenom", "phenom.com"),
+    ("Eightfold", "eightfold.ai"),
+    ("Deel", "jobs.deel.com"),
+    # Marketplace / aggregator platforms
+    ("Wellfound", "wellfound.com"),
+    ("Wellfound", "angel.co"),
+    ("Mercor", "mercor.com"),
+    ("Mercor", "work.mercor.com"),
+    ("Micro1", "micro1.ai"),
+    ("Micro1", "jobs.micro1.ai"),
+    ("Underdog", "underdog.io"),
+    ("YC Work at a Startup", "workatastartup.com"),
+    ("CareerPuck", "careerpuck.com"),
+    ("Click2Apply", "click2apply.net"),
+    # Company-specific career portals (custom ATS)
+    ("BMC Helix", "jobs.bmc.com"),
+    ("Randstad", "randstaddigital.com"),
+    ("Randstad", "randstad.com"),
+    ("Cardinal Health", "jobs.cardinalhealth.com"),
+    ("ActBlue", "actblue.com"),
+    ("Oracle Recruiting", "oracle.com/careers"),
+    ("Oracle Recruiting", "eeho.fa.us2.oraclecloud.com"),
 ]
 
 
@@ -4154,17 +4202,29 @@ def _find_file_upload_inputs(page) -> list:
     return uploads
 
 
-def _handle_file_uploads(page, profile: ApplicantProfile, cover_letter_path: str = "") -> int:
-    """Upload resume and cover letter to file inputs on the page. Returns count uploaded."""
+def _handle_file_uploads(
+    page,
+    profile: ApplicantProfile,
+    cover_letter_path: str = "",
+    uploaded_files: Optional[set] = None,
+) -> int:
+    """Upload resume and cover letter to file inputs on the page. Returns count uploaded.
+
+    ``uploaded_files`` tracks element ids/names that have already been uploaded
+    across form steps so we don't re-upload and corrupt the ATS upload state.
+    """
     uploads = _find_file_upload_inputs(page)
     if not uploads:
         return 0
 
+    if uploaded_files is None:
+        uploaded_files = set()
+
     filled = 0
     resume_path = str(Path(profile.resume_path).expanduser()) if profile.resume_path else ""
 
-    resume_uploaded = False
-    cover_uploaded = False
+    resume_uploaded = "resume" in uploaded_files
+    cover_uploaded = "cover" in uploaded_files
 
     for upload in uploads:
         label = upload["label"]
@@ -4173,18 +4233,28 @@ def _handle_file_uploads(page, profile: ApplicantProfile, cover_letter_path: str
         element = upload["element"]
         # Combine label, id, and name for matching
         hints = f"{label} {el_id} {el_name}".lower()
+
+        # Skip if this element was already uploaded in a previous step
+        element_key = el_id or el_name or "file_input"
+        if element_key in uploaded_files:
+            continue
+
         try:
             if any(kw in hints for kw in ("resume", "cv", "curriculum")):
                 if not resume_uploaded and resume_path and Path(resume_path).exists():
                     element.set_input_files(resume_path)
                     log.info(f"   📄 Uploaded resume: {Path(resume_path).name}")
                     resume_uploaded = True
+                    uploaded_files.add("resume")
+                    uploaded_files.add(element_key)
                     filled += 1
             elif any(kw in hints for kw in ("cover_letter", "cover letter", "coverletter")):
                 if not cover_uploaded and cover_letter_path and Path(cover_letter_path).exists():
                     element.set_input_files(cover_letter_path)
                     log.info(f"   📄 Uploaded cover letter: {Path(cover_letter_path).name}")
                     cover_uploaded = True
+                    uploaded_files.add("cover")
+                    uploaded_files.add(element_key)
                     filled += 1
             else:
                 # Unknown file field — upload resume if not yet uploaded, else cover letter
@@ -4192,11 +4262,15 @@ def _handle_file_uploads(page, profile: ApplicantProfile, cover_letter_path: str
                     element.set_input_files(resume_path)
                     log.info(f"   📄 Uploaded resume (inferred) for '{label[:40]}'")
                     resume_uploaded = True
+                    uploaded_files.add("resume")
+                    uploaded_files.add(element_key)
                     filled += 1
                 elif not cover_uploaded and cover_letter_path and Path(cover_letter_path).exists():
                     element.set_input_files(cover_letter_path)
                     log.info(f"   📄 Uploaded cover letter (inferred) for '{label[:40]}'")
                     cover_uploaded = True
+                    uploaded_files.add("cover")
+                    uploaded_files.add(element_key)
                     filled += 1
         except Exception as exc:
             log.debug("File upload failed for '%s': %s", label, exc)
@@ -5013,14 +5087,19 @@ def _navigate_external_form(  # noqa: C901
     dry_run: bool = False,
 ) -> str:
     """Navigate a multi-step external application form. Returns status string."""
+    global _final_ats_url  # noqa: PLW0603
     stalled = 0
     no_button_stalled = 0
     prev_snapshot = ""
     fields_filled_total = 0
     captcha_solved_urls: set = set()  # track URLs where we already solved a CAPTCHA
+    uploaded_files: set = set()  # track file uploads across steps to prevent re-uploads
 
     for step in range(_MAX_EXTERNAL_STEPS):
         page.wait_for_timeout(1500)
+
+        # Keep ATS URL updated as page may redirect during form flow
+        _final_ats_url = page.url
 
         # Login wall check on every step (some sites redirect mid-form)
         if _is_login_wall(page, profile):
@@ -5181,7 +5260,7 @@ def _navigate_external_form(  # noqa: C901
 
         # Handle file uploads
         if classification.get("has_file_upload"):
-            n = _handle_file_uploads(page, profile, cover_letter_path)
+            n = _handle_file_uploads(page, profile, cover_letter_path, uploaded_files)
             fields_filled_total += n
 
         # Fill form fields
