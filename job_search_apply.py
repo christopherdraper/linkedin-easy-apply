@@ -1433,7 +1433,9 @@ Here is the cover letter template to fill in:
 Instructions for filling in the template:
 {instructions}
 
-Fill in every {{PLACEHOLDER}} in the template using the job description and candidate profile above. Return ONLY the completed cover letter — no preamble, no explanation, no markdown formatting."""
+Fill in every {{PLACEHOLDER}} in the template using the job description and candidate profile above. Return ONLY the completed cover letter — no preamble, no explanation, no markdown formatting.
+
+IMPORTANT: Never use em dashes (—) or double dashes (--). Use commas, periods, or rewrite the sentence instead."""
 
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -1442,7 +1444,12 @@ Fill in every {{PLACEHOLDER}} in the template using the job description and cand
         )
         _ai_tokens_in += response.usage.input_tokens
         _ai_tokens_out += response.usage.output_tokens
-        return response.content[0].text.strip()
+        text = response.content[0].text.strip()
+        # Strip em dashes — they scream "AI-written"
+        text = (
+            text.replace(" — ", ", ").replace(" -- ", ", ").replace("—", ", ").replace("--", ", ")
+        )
+        return text
     except Exception as e:
         log.warning(f"   AI cover letter failed, using basic template: {e}")
         return _basic_cover_letter(job, profile)
@@ -1617,6 +1624,7 @@ Guidelines:
 - 3 sentences. Under 250 characters after the greeting.
 - Sound like a person dashing off a quick note, not crafting a pitch.
 - NEVER use: "excited", "passionate", "eager", "thrilled", "aligns", "resonates", "looking forward", "opportunity", "I believe", "sounds like", "exactly what", "wheelhouse", "culture", "I'd love to bring"
+- NEVER use em dashes (—) or double dashes (--). Use commas, periods, or rewrite the sentence instead.
 - NO subject line, NO sign-off"""
 
         response = client.messages.create(
@@ -1627,6 +1635,8 @@ Guidelines:
         _ai_tokens_in += response.usage.input_tokens
         _ai_tokens_out += response.usage.output_tokens
         msg = response.content[0].text.strip()
+        # Strip em dashes — they scream "AI-written"
+        msg = msg.replace(" — ", ", ").replace(" -- ", ", ").replace("—", ", ").replace("--", ", ")
         # Strip any AI preamble, self-corrections, or extra lines
         lines = msg.split("\n")
         clean = []
