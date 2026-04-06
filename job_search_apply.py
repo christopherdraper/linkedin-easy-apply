@@ -4439,6 +4439,112 @@ def _answer_external_screening_questions(  # noqa: C901
     except Exception as exc:
         log.debug("External radio buttons failed: %s", exc)
 
+    # Ashby-style Yes/No button groups — these use <button> elements inside a
+    # container with class containing "yesno", paired with a label via hidden checkbox
+    try:
+        yesno_containers = page.query_selector_all(
+            "[class*='yesno'], [class*='yes-no'], [class*='YesNo']"
+        )
+        for container in yesno_containers:
+            try:
+                buttons = container.query_selector_all("button")
+                if len(buttons) < 2:
+                    continue
+                btn_texts = [b.inner_text().strip() for b in buttons]
+                # Check if already selected (one button will have an "active"/"selected" state)
+                already_selected = container.evaluate("""el => {
+                    const btns = el.querySelectorAll('button');
+                    for (const b of btns) {
+                        if (b.classList.toString().includes('selected')
+                            || b.classList.toString().includes('active')
+                            || b.getAttribute('aria-pressed') === 'true'
+                            || b.getAttribute('data-selected') === 'true') return true;
+                    }
+                    return false;
+                }""")
+                if already_selected:
+                    continue
+                # Find the label (walk up to find the field entry container)
+                label = container.evaluate("""el => {
+                    let parent = el.parentElement;
+                    for (let i = 0; i < 5 && parent; i++) {
+                        const lbl = parent.querySelector('label');
+                        if (lbl) return lbl.textContent.trim();
+                        parent = parent.parentElement;
+                    }
+                    return '';
+                }""")
+                if not label:
+                    continue
+                _check_field_label(label)
+                answer = _ai_answer_question(
+                    f"{label} (choose one: {', '.join(btn_texts)})", profile
+                )
+                if answer:
+                    for btn, btn_text in zip(buttons, btn_texts):
+                        if answer.lower() in btn_text.lower() or btn_text.lower() in answer.lower():
+                            _safe_click(btn, page)
+                            log.info(f"   🤖 Yes/No '{label[:40]}' → '{btn_text}'")
+                            filled += 1
+                            _field_fills.append(
+                                {"field": label, "value": btn_text, "source": "ai_yesno"}
+                            )
+                            break
+            except ApplicationAbortError:
+                raise
+            except Exception as exc:
+                log.debug("Ashby Yes/No button failed: %s", exc)
+    except Exception as exc:
+        log.debug("Ashby Yes/No scan failed: %s", exc)
+
+    # Generic button-group radio alternatives (Yes/No, True/False)
+    # Catches ATS systems that use button elements instead of radio inputs
+    try:
+        for fieldset in page.query_selector_all(
+            "[role='radiogroup'], [class*='radio-group'], [class*='option-group']"
+        ):
+            try:
+                buttons = fieldset.query_selector_all("button, [role='radio']")
+                if len(buttons) < 2:
+                    continue
+                # Check if already selected
+                has_selection = any(
+                    b.get_attribute("aria-checked") == "true"
+                    or b.get_attribute("aria-pressed") == "true"
+                    or "selected" in (b.get_attribute("class") or "")
+                    or "active" in (b.get_attribute("class") or "")
+                    for b in buttons
+                )
+                if has_selection:
+                    continue
+                btn_texts = [b.inner_text().strip() for b in buttons if b.inner_text().strip()]
+                if not btn_texts:
+                    continue
+                label = _get_field_label(page, fieldset)
+                if not label:
+                    continue
+                _check_field_label(label)
+                answer = _ai_answer_question(
+                    f"{label} (choose one: {', '.join(btn_texts)})", profile
+                )
+                if answer:
+                    for btn in buttons:
+                        bt = btn.inner_text().strip()
+                        if answer.lower() in bt.lower() or bt.lower() in answer.lower():
+                            _safe_click(btn, page)
+                            log.info(f"   🤖 Button radio '{label[:40]}' → '{bt}'")
+                            filled += 1
+                            _field_fills.append(
+                                {"field": label, "value": bt, "source": "ai_button_radio"}
+                            )
+                            break
+            except ApplicationAbortError:
+                raise
+            except Exception as exc:
+                log.debug("Button-group radio failed: %s", exc)
+    except Exception as exc:
+        log.debug("Button-group radio scan failed: %s", exc)
+
     # Native select dropdowns — reuse existing handler
     try:
         _answer_select_dropdowns(page, profile)
@@ -4743,6 +4849,129 @@ def _answer_external_screening_questions(  # noqa: C901
     except Exception as exc:
         log.debug("Div-based custom selects failed: %s", exc)
 
+    # Catch-all: styled dropdowns showing placeholder text like "--Select--" or "-Select-"
+    # (BambooHR, custom ATS frameworks). These are often divs/spans styled as dropdowns
+    # that don't use standard ARIA roles.
+    try:
+        placeholder_dropdowns = page.evaluate("""() => {
+            const results = [];
+            // Find elements that look like unfilled dropdowns by their text content
+            const candidates = document.querySelectorAll(
+                '[class*="select"], [class*="Select"], [class*="dropdown"], [class*="Dropdown"]'
+            );
+            for (const el of candidates) {
+                if (!el.offsetParent) continue;  // not visible
+                const text = el.textContent.trim();
+                // Match common placeholder patterns
+                if (/^[-–—]*Select[-–—]*$/.test(text) || text === 'Select' || text === 'Choose') {
+                    // Find the label for this dropdown
+                    let label = '';
+                    // Check for associated label element
+                    const id = el.id || el.getAttribute('for') || '';
+                    if (id) {
+                        const labelEl = document.querySelector(`label[for="${id}"]`);
+                        if (labelEl) label = labelEl.textContent.trim();
+                    }
+                    // Walk up to find a parent with label text
+                    if (!label) {
+                        let parent = el.parentElement;
+                        for (let i = 0; i < 4 && parent; i++) {
+                            const lbl = parent.querySelector('label');
+                            if (lbl) { label = lbl.textContent.trim(); break; }
+                            parent = parent.parentElement;
+                        }
+                    }
+                    if (label) {
+                        results.push({
+                            selector: el.tagName.toLowerCase()
+                                + (el.id ? '#' + el.id : '')
+                                + (el.className ? '.' + el.className.split(' ')[0] : ''),
+                            label: label
+                        });
+                    }
+                }
+            }
+            return results.slice(0, 5);
+        }""")
+        for dd_info in placeholder_dropdowns:
+            label = dd_info.get("label", "")
+            if not label:
+                continue
+            _check_field_label(label)
+            # Find the clickable element again by label proximity
+            label_el = page.query_selector(f"label:has-text('{label.split('*')[0].strip()}')")
+            if not label_el:
+                continue
+            # Find the dropdown near this label (sibling or child of parent)
+            dropdown_el = label_el.evaluate_handle("""el => {
+                const parent = el.closest('.field, .form-group, .fab-FormColumn, [class*="field"]')
+                    || el.parentElement;
+                if (!parent) return null;
+                // Look for clickable dropdown trigger
+                const dd = parent.querySelector(
+                    '[class*="select"], [class*="Select"], [class*="dropdown"]'
+                );
+                return dd;
+            }""").as_element()
+            if not dropdown_el or not dropdown_el.is_visible():
+                continue
+            # Click to open
+            _safe_click(dropdown_el, page)
+            page.wait_for_timeout(500)
+            # Collect visible options
+            opts = page.query_selector_all(
+                "[role='option']:visible, [role='listbox'] li:visible, "
+                "[class*='option']:visible, [class*='menu'] li:visible, "
+                "[class*='list'] li:visible"
+            )
+            if not opts:
+                # Try broader: any newly visible list items
+                opts = page.evaluate_handle("""() => {
+                    const items = document.querySelectorAll('li, [role="option"]');
+                    return Array.from(items).filter(
+                        i => i.offsetParent && i.textContent.trim()
+                            && i.getBoundingClientRect().height > 0
+                    );
+                }""")
+                try:
+                    opts = list(opts.as_element().query_selector_all("*")) if opts else []
+                except Exception:
+                    opts = []
+            opt_texts = []
+            opt_elements = []
+            for o in opts if isinstance(opts, list) else []:
+                try:
+                    t = o.inner_text().strip()
+                    if t and len(t) < 60:
+                        opt_texts.append(t)
+                        opt_elements.append(o)
+                except Exception:
+                    continue
+            if opt_texts:
+                answer = _ai_answer_question(
+                    f"{label} (choose one: {', '.join(opt_texts[:20])})", profile
+                )
+                if answer:
+                    for opt_el, opt_text in zip(opt_elements, opt_texts):
+                        if answer.lower() in opt_text.lower() or opt_text.lower() in answer.lower():
+                            _safe_click(opt_el, page)
+                            log.info(f"   🤖 Styled dropdown '{label[:40]}' → '{opt_text}'")
+                            filled += 1
+                            break
+                    else:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(200)
+                else:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(200)
+            else:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(200)
+    except ApplicationAbortError:
+        raise
+    except Exception as exc:
+        log.debug("Styled placeholder dropdowns failed: %s", exc)
+
     # Text/number/email/tel/url inputs
     for inp in page.query_selector_all(
         "input[type='text'], input[type='number'], input[type='email'], "
@@ -4902,6 +5131,13 @@ def _answer_external_screening_questions(  # noqa: C901
 def _find_navigation_button(page):  # noqa: C901
     """Find the Next/Continue/Submit button on an external form page.
     Returns (role, element) where role is 'submit', 'next', or 'none'."""
+    # Scroll to bottom to ensure below-fold buttons are rendered/visible
+    try:
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(300)
+    except Exception:  # noqa: S110
+        pass
+
     # Priority: submit > next/continue
     submit_texts = [
         "Submit Application",
@@ -4914,6 +5150,7 @@ def _find_navigation_button(page):  # noqa: C901
         "Apply Now",
         "Submit & Continue",
         "Apply for this job",
+        "Apply for this position",
         "Confirm",
         "Submit my application",
         "Save",
@@ -5230,6 +5467,32 @@ def _navigate_external_form(  # noqa: C901
             log.info("   ⏭  URL looks like a job search page, skipping")
             return "failed: landed on job search page instead of application form"
 
+        # Workday "Start Your Application" popup — click "Autofill with Resume"
+        # This popup appears after clicking Apply on a Workday job listing page.
+        wd_autofill = page.query_selector("a[data-automation-id='autofillWithResume']")
+        if wd_autofill and wd_autofill.is_visible():
+            log.info("   🔗 Workday popup detected, clicking 'Autofill with Resume'...")
+            _safe_click(wd_autofill, page)
+            page.wait_for_timeout(3000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:  # noqa: S110
+                pass
+            _final_ats_url = page.url
+            continue
+        # Fallback: Workday "Apply Manually" if autofill not available
+        wd_manual = page.query_selector("a[data-automation-id='applyManually']")
+        if wd_manual and wd_manual.is_visible():
+            log.info("   🔗 Workday popup detected, clicking 'Apply Manually'...")
+            _safe_click(wd_manual, page)
+            page.wait_for_timeout(3000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:  # noqa: S110
+                pass
+            _final_ats_url = page.url
+            continue
+
         # Job listing page with Apply button (Workday, company career pages)
         # If no form fields and page has an Apply button, click through to the form
         if not classification.get("has_form_fields") and not classification.get("has_file_upload"):
@@ -5506,6 +5769,21 @@ def _navigate_external_form(  # noqa: C901
                             f"CAPTCHA required: {error_summary[:200]}",
                         )
                         return f"failed: captcha required: {error_summary[:200]}"
+                    # Jobvite "View Full Application Form" — expand to full form
+                    if "view full application" in es_lower or "minimum required" in es_lower:
+                        try:
+                            expand_link = page.query_selector(
+                                "a:has-text('View Full Application'), "
+                                "a:has-text('Full Application Form'), "
+                                "button:has-text('View Full Application')"
+                            )
+                            if expand_link and expand_link.is_visible():
+                                _safe_click(expand_link, page)
+                                page.wait_for_timeout(2000)
+                                log.info("   🔗 Expanded to full application form")
+                                continue  # re-enter loop with full form
+                        except Exception:  # noqa: S110
+                            pass
                     # If we can't fill any more fields, bail out
                     if fields_filled_total == 0 or stalled >= 2:
                         # Recheck — page may have navigated to login wall
