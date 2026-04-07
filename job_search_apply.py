@@ -2456,6 +2456,37 @@ def _safe_click(element, page) -> None:
             element.click(force=True, timeout=5000)
 
 
+def _best_option_match(answer: str, opt_texts: list[str]) -> int:
+    """Return the index of the best-matching option for *answer*, or -1 if none match.
+
+    Scoring: exact match (100), answer is substring of option (80), option is
+    substring of answer (70), 6-char prefix (40).  Picks the highest-scoring
+    option; ties broken by shorter option text (closer to answer length).
+
+    This avoids bugs where "United States" matched "United States Minor
+    Outlying Islands" instead of "United States of America".
+    """
+    answer_lower = answer.lower().strip()
+    best_score = 0
+    best_len_diff = float("inf")
+    best_idx = -1
+    for idx, opt_text in enumerate(opt_texts):
+        ol = opt_text.lower().strip()
+        if ol == answer_lower:
+            return idx  # exact match — return immediately
+        score = 0
+        if answer_lower in ol:
+            score = max(score, 80)
+        if ol in answer_lower:
+            score = max(score, 70)
+        if len(answer_lower) >= 6 and ol.startswith(answer_lower[:6]):
+            score = max(score, 40)
+        len_diff = abs(len(ol) - len(answer_lower))
+        if score > best_score or (score == best_score and len_diff < best_len_diff):
+            best_score, best_idx, best_len_diff = score, idx, len_diff
+    return best_idx
+
+
 def _match_screening_answer(label_text: str, screening_answers: Dict[str, str]) -> Optional[str]:
     """Find the best matching screening answer for a form field label."""
     if not label_text:
@@ -4424,12 +4455,12 @@ def _fill_custom_dropdown(
                 "[role='listbox']:not(.iti__country-list) [role='option']"
             )
 
-        for opt_el in opt_elements:
-            opt_text = opt_el.inner_text().strip()
-            if answer.lower() in opt_text.lower() or opt_text.lower() in answer.lower():
-                _safe_click(opt_el, page)
-                log.info(f"   🤖 Custom dropdown '{label_text[:40]}' → '{opt_text}'")
-                return True
+        opt_texts_list = [el.inner_text().strip() for el in opt_elements]
+        best_idx = _best_option_match(answer, opt_texts_list)
+        if best_idx >= 0:
+            _safe_click(opt_elements[best_idx], page)
+            log.info(f"   🤖 Custom dropdown '{label_text[:40]}' → '{opt_texts_list[best_idx]}'")
+            return True
 
         # No match found — close dropdown
         page.keyboard.press("Escape")
@@ -4842,16 +4873,13 @@ def _answer_external_screening_questions(  # noqa: C901
                         f"{label} (choose one: {', '.join(opt_texts[:20])})", profile
                     )
                     if answer:
-                        for opt_el in opts:
-                            opt_text = opt_el.inner_text().strip()
-                            if (
-                                answer.lower() in opt_text.lower()
-                                or opt_text.lower() in answer.lower()
-                            ):
-                                _safe_click(opt_el, page)
-                                log.info(f"   🤖 Custom select '{label[:40]}' → '{opt_text}'")
-                                filled += 1
-                                break
+                        best_idx = _best_option_match(answer, opt_texts)
+                        if best_idx >= 0:
+                            _safe_click(opts[best_idx], page)
+                            log.info(
+                                f"   🤖 Custom select '{label[:40]}' → '{opt_texts[best_idx]}'"
+                            )
+                            filled += 1
                         else:
                             page.keyboard.press("Escape")
                             page.wait_for_timeout(200)
@@ -4962,26 +4990,9 @@ def _answer_external_screening_questions(  # noqa: C901
                                 opt_elements.append(mo)
                         except Exception:
                             continue
-                # Click best match — score each option and pick the best
+                # Click best match
                 clicked = False
-                answer_lower = answer.lower().strip()
-                best_score = 0
-                best_idx = -1
-                for idx, opt_text in enumerate(opt_texts):
-                    ol = opt_text.lower().strip()
-                    if ol == answer_lower:
-                        best_score, best_idx = 100, idx
-                        break
-                    score = 0
-                    if answer_lower in ol:
-                        score = max(score, 80)
-                    if ol in answer_lower:
-                        score = max(score, 70)
-                    # Partial word match (at least 6 chars to avoid false positives)
-                    if len(answer_lower) >= 6 and ol.startswith(answer_lower[:6]):
-                        score = max(score, 40)
-                    if score > best_score:
-                        best_score, best_idx = score, idx
+                best_idx = _best_option_match(answer, opt_texts)
                 if best_idx >= 0:
                     _safe_click(opt_elements[best_idx], page)
                     log.info(
@@ -5088,16 +5099,15 @@ def _answer_external_screening_questions(  # noqa: C901
                     f"{label} (choose one: {', '.join(opt_texts[:20])})", profile
                 )
                 if answer:
-                    for opt_el, opt_text in zip(opt_elements, opt_texts):
-                        if answer.lower() in opt_text.lower() or opt_text.lower() in answer.lower():
-                            _safe_click(opt_el, page)
-                            log.info(
-                                "   🤖 Popup dropdown '%s' → '%s'",
-                                label[:40],
-                                opt_text,
-                            )
-                            filled += 1
-                            break
+                    best_idx = _best_option_match(answer, opt_texts)
+                    if best_idx >= 0:
+                        _safe_click(opt_elements[best_idx], page)
+                        log.info(
+                            "   🤖 Popup dropdown '%s' → '%s'",
+                            label[:40],
+                            opt_texts[best_idx],
+                        )
+                        filled += 1
                     else:
                         page.keyboard.press("Escape")
                         page.wait_for_timeout(200)
