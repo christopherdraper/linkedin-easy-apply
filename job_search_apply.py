@@ -2915,27 +2915,60 @@ def _detect_captcha(page) -> Optional[Dict[str, str]]:
     """Detect CAPTCHA on page. Returns dict with type/sitekey/url, or None."""
     try:
         info = page.evaluate("""() => {
-            // reCAPTCHA v2/v3
+            // reCAPTCHA v2/v3/Enterprise
             const recapFrame = document.querySelector('iframe[src*="recaptcha"]');
             const recapDiv = document.querySelector('.g-recaptcha, [data-sitekey]');
             const recapBadge = document.querySelector('.grecaptcha-badge');
+            const isEnterprise = !!document.querySelector(
+                'script[src*="recaptcha/enterprise"], iframe[src*="recaptcha/enterprise"]'
+            );
             if (recapFrame || recapDiv || recapBadge) {
                 let sitekey = '';
+                // 1. data-sitekey attribute
                 if (recapDiv) sitekey = recapDiv.getAttribute('data-sitekey') || '';
+                // 2. k= param in iframe src
                 if (!sitekey && recapFrame) {
                     const m = recapFrame.src.match(/[?&]k=([^&]+)/);
                     if (m) sitekey = m[1];
                 }
+                // 3. render= param in script src
                 if (!sitekey) {
-                    // Check grecaptcha.enterprise or grecaptcha render params
                     const scripts = document.querySelectorAll('script[src*="recaptcha"]');
                     for (const s of scripts) {
                         const m = s.src.match(/render=([^&]+)/);
                         if (m && m[1] !== 'explicit') { sitekey = m[1]; break; }
                     }
                 }
+                // 4. Extract from ___grecaptcha_cfg (runtime config object)
+                if (!sitekey && window.___grecaptcha_cfg) {
+                    try {
+                        const clients = window.___grecaptcha_cfg.clients;
+                        if (clients) {
+                            for (const cid of Object.keys(clients)) {
+                                const c = clients[cid];
+                                // Walk nested objects looking for sitekey
+                                const walk = (obj, depth) => {
+                                    if (!obj || depth > 5) return '';
+                                    for (const k of Object.keys(obj)) {
+                                        if (k === 'sitekey' && typeof obj[k] === 'string')
+                                            return obj[k];
+                                        if (typeof obj[k] === 'object') {
+                                            const r = walk(obj[k], depth + 1);
+                                            if (r) return r;
+                                        }
+                                    }
+                                    return '';
+                                };
+                                const found = walk(c, 0);
+                                if (found) { sitekey = found; break; }
+                            }
+                        }
+                    } catch(e) {}
+                }
                 const isV3 = !!recapBadge && !recapFrame;
-                return {type: isV3 ? 'recaptchav3' : 'recaptchav2', sitekey};
+                let type = isV3 ? 'recaptchav3' : 'recaptchav2';
+                if (isEnterprise) type += '_enterprise';
+                return {type, sitekey};
             }
             // hCaptcha
             const hcapFrame = document.querySelector('iframe[src*="hcaptcha"]');
@@ -3025,7 +3058,9 @@ def _2captcha_solve(
         "pageurl": page_url,
         "json": "1",
     }
-    if ctype == "recaptchav3":
+    if "enterprise" in ctype:
+        params["enterprise"] = "1"
+    if ctype.startswith("recaptchav3"):
         params["version"] = "v3"
         params["action"] = "verify"
         params["min_score"] = "0.3"
@@ -3078,7 +3113,9 @@ def _capsolver_solve(api_key: str, ctype: str, sitekey: str, page_url: str) -> O
 
     task_type_map = {
         "recaptchav2": "ReCaptchaV2TaskProxyLess",
+        "recaptchav2_enterprise": "ReCaptchaV2EnterpriseTaskProxyLess",
         "recaptchav3": "ReCaptchaV3TaskProxyLess",
+        "recaptchav3_enterprise": "ReCaptchaV3EnterpriseTaskProxyLess",
         "hcaptcha": "HCaptchaTaskProxyLess",
         "turnstile": "AntiTurnstileTaskProxyLess",
     }
@@ -3145,7 +3182,7 @@ def _capsolver_solve(api_key: str, ctype: str, sitekey: str, page_url: str) -> O
 def _inject_captcha_token(page, ctype: str, token: str) -> bool:
     """Inject a solved CAPTCHA token into the page and trigger callbacks."""
     try:
-        if ctype in ("recaptchav2", "recaptchav3"):
+        if ctype.startswith("recaptchav2") or ctype.startswith("recaptchav3"):
             page.evaluate(
                 """(token) => {
                 const ta = document.querySelector('#g-recaptcha-response, '
