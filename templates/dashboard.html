@@ -445,8 +445,9 @@
                                onchange="this.form.submit()">
                     </form>
                 </td>
-                <td>
-                    <form method="POST" action="/interview/remove/{{ iv.job_id }}" style="display:inline">
+                <td style="white-space:nowrap">
+                    <a href="/report/{{ iv.job_id }}" target="_blank">Report</a>
+                    <form method="POST" action="/interview/remove/{{ iv.job_id }}" style="display:inline;margin-left:8px">
                         <button type="submit" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:0.85rem" title="Remove from interviews">Remove</button>
                     </form>
                 </td>
