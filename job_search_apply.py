@@ -4962,24 +4962,35 @@ def _answer_external_screening_questions(  # noqa: C901
                                 opt_elements.append(mo)
                         except Exception:
                             continue
-                # Click best match
+                # Click best match — score each option and pick the best
                 clicked = False
-                answer_lower = answer.lower()
-                for opt_el, opt_text in zip(opt_elements, opt_texts):
-                    if (
-                        answer_lower in opt_text.lower()
-                        or opt_text.lower() in answer_lower
-                        or opt_text.lower().startswith(answer_lower[:3])
-                    ):
-                        _safe_click(opt_el, page)
-                        log.info(
-                            "   🤖 BambooHR dropdown '%s' → '%s'",
-                            label[:40],
-                            opt_text,
-                        )
-                        filled += 1
-                        clicked = True
+                answer_lower = answer.lower().strip()
+                best_score = 0
+                best_idx = -1
+                for idx, opt_text in enumerate(opt_texts):
+                    ol = opt_text.lower().strip()
+                    if ol == answer_lower:
+                        best_score, best_idx = 100, idx
                         break
+                    score = 0
+                    if answer_lower in ol:
+                        score = max(score, 80)
+                    if ol in answer_lower:
+                        score = max(score, 70)
+                    # Partial word match (at least 6 chars to avoid false positives)
+                    if len(answer_lower) >= 6 and ol.startswith(answer_lower[:6]):
+                        score = max(score, 40)
+                    if score > best_score:
+                        best_score, best_idx = score, idx
+                if best_idx >= 0:
+                    _safe_click(opt_elements[best_idx], page)
+                    log.info(
+                        "   🤖 BambooHR dropdown '%s' → '%s'",
+                        label[:40],
+                        opt_texts[best_idx],
+                    )
+                    filled += 1
+                    clicked = True
                 if not clicked:
                     # Fall back: click first option if exact match failed
                     if opt_elements:
