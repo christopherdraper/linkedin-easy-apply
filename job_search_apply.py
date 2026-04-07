@@ -4896,8 +4896,22 @@ def _answer_external_screening_questions(  # noqa: C901
                 # Click toggle to open the menu
                 _safe_click(toggle, page)
                 page.wait_for_timeout(500)
-                # Collect options from the fab-MenuVessel
-                menu_opts = page.query_selector_all(".fab-MenuOption[role='menuitem']")
+                # Scope option collection to the specific menu vessel for this toggle
+                menu_id = toggle.get_attribute("data-menu-id") or ""
+                vessel = None
+                if menu_id:
+                    vessel = page.query_selector(f"#{menu_id}")
+                if not vessel:
+                    # Fallback: find the visible fab-MenuVessel
+                    for v in page.query_selector_all(".fab-MenuVessel"):
+                        if v.is_visible():
+                            vessel = v
+                            break
+                menu_opts = (
+                    vessel.query_selector_all(".fab-MenuOption[role='menuitem']")
+                    if vessel
+                    else page.query_selector_all(".fab-MenuOption[role='menuitem']")
+                )
                 opt_texts = []
                 opt_elements = []
                 for mo in menu_opts:
@@ -4913,7 +4927,11 @@ def _answer_external_screening_questions(  # noqa: C901
                     page.wait_for_timeout(200)
                     continue
                 # If there's a search input, use it for faster selection
-                search_input = page.query_selector(".fab-MenuSearch__input")
+                search_input = (
+                    vessel.query_selector(".fab-MenuSearch__input")
+                    if vessel
+                    else page.query_selector(".fab-MenuSearch__input")
+                )
                 answer = _ai_answer_question(
                     f"{label} (choose one: {', '.join(opt_texts[:25])})",
                     profile,
@@ -4926,8 +4944,12 @@ def _answer_external_screening_questions(  # noqa: C901
                 if search_input and search_input.is_visible():
                     search_input.fill(answer[:20])
                     page.wait_for_timeout(400)
-                    # Re-collect filtered options
-                    menu_opts = page.query_selector_all(".fab-MenuOption[role='menuitem']")
+                    # Re-collect filtered options within same vessel
+                    menu_opts = (
+                        vessel.query_selector_all(".fab-MenuOption[role='menuitem']")
+                        if vessel
+                        else page.query_selector_all(".fab-MenuOption[role='menuitem']")
+                    )
                     opt_texts = []
                     opt_elements = []
                     for mo in menu_opts:
