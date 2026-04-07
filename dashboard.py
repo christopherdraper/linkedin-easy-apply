@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Timer
 
-from flask import Flask, abort, render_template
+from flask import Flask, abort, redirect, render_template, request, url_for
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from job_search_apply import ApplicantProfile, _generate_deep_apply_prompt  # noqa: E402
@@ -31,6 +31,7 @@ DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
 SEARCH_LOG_FILE = DATA_DIR / "search_log.json"
 DEEP_APPLY_QUEUE_FILE = DATA_DIR / "deep_apply_queue.json"
+INTERVIEWS_FILE = DATA_DIR / "interviews.json"
 
 app = Flask(__name__)
 
@@ -185,6 +186,16 @@ def index():
     deep_done = [q for q in deep_queue if q.get("status") == "done"]
     deep_success = sum(1 for q in deep_done if q.get("deep_apply_status") == "submitted")
 
+    # Interview tracking
+    interviews = _load_json(INTERVIEWS_FILE)
+    interview_ids = {i["job_id"] for i in interviews}
+    interview_entries = []
+    for iv in interviews:
+        app_entry = next((e for e in entries if e.get("job_id") == iv["job_id"]), None)
+        if app_entry:
+            merged = {**app_entry, **iv}
+            interview_entries.append(merged)
+
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
 
     return render_template(
@@ -207,6 +218,8 @@ def index():
         deep_pending_count=len(deep_pending),
         deep_success_count=deep_success,
         deep_done_count=len(deep_done),
+        interview_entries=interview_entries,
+        interview_ids=interview_ids,
     )
 
 
@@ -242,6 +255,48 @@ def deep_apply_prompt(job_id):
     prompt = _generate_deep_apply_prompt(entry, profile)
 
     return render_template("deep_apply_prompt.html", entry=entry, prompt=prompt)
+
+
+@app.route("/interview/add/<job_id>", methods=["POST"])
+def interview_add(job_id):
+    """Mark an application as interview pending."""
+    entries = _load_applications()
+    app_entry = next((e for e in entries if e.get("job_id") == job_id), None)
+    if not app_entry:
+        abort(404)
+    interviews = _load_json(INTERVIEWS_FILE)
+    if any(i["job_id"] == job_id for i in interviews):
+        return redirect(url_for("index"))
+    interviews.append(
+        {
+            "job_id": job_id,
+            "added": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "notes": request.form.get("notes", ""),
+        }
+    )
+    INTERVIEWS_FILE.write_text(json.dumps(interviews, indent=2))
+    return redirect(url_for("index"))
+
+
+@app.route("/interview/remove/<job_id>", methods=["POST"])
+def interview_remove(job_id):
+    """Remove an application from interview pending."""
+    interviews = _load_json(INTERVIEWS_FILE)
+    interviews = [i for i in interviews if i["job_id"] != job_id]
+    INTERVIEWS_FILE.write_text(json.dumps(interviews, indent=2))
+    return redirect(url_for("index"))
+
+
+@app.route("/interview/update/<job_id>", methods=["POST"])
+def interview_update(job_id):
+    """Update notes on an interview entry."""
+    interviews = _load_json(INTERVIEWS_FILE)
+    for i in interviews:
+        if i["job_id"] == job_id:
+            i["notes"] = request.form.get("notes", "")
+            break
+    INTERVIEWS_FILE.write_text(json.dumps(interviews, indent=2))
+    return redirect(url_for("index"))
 
 
 @app.route("/api/data")

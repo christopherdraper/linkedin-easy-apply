@@ -18,6 +18,7 @@
             --red: #f87171;
             --amber: #fbbf24;
             --purple: #a78bfa;
+            --blue: #60a5fa;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -413,6 +414,49 @@
     </div>
 </div>
 
+<!-- Interview Pending -->
+{% if interview_entries %}
+<div class="table-card" style="margin-bottom: 2rem; border-left: 3px solid var(--blue, #60a5fa);">
+    <div class="table-header">
+        <h2>Interview Pending ({{ interview_entries|length }})</h2>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Company</th>
+                <th>Score</th>
+                <th>Applied</th>
+                <th>Notes</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for iv in interview_entries %}
+            <tr>
+                <td class="truncate"><a href="/report/{{ iv.job_id }}" target="_blank">{{ iv.title }}</a></td>
+                <td>{{ iv.company }}</td>
+                <td>{{ '%.0f'|format((iv.match_score or 0) * 100) }}%</td>
+                <td style="white-space:nowrap">{{ iv.timestamp[:10] if iv.timestamp else '' }}</td>
+                <td>
+                    <form method="POST" action="/interview/update/{{ iv.job_id }}" style="display:inline">
+                        <input type="text" name="notes" value="{{ iv.notes or '' }}" placeholder="Add notes..."
+                               style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;width:250px;font-size:0.85rem"
+                               onchange="this.form.submit()">
+                    </form>
+                </td>
+                <td>
+                    <form method="POST" action="/interview/remove/{{ iv.job_id }}" style="display:inline">
+                        <button type="submit" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:0.85rem" title="Remove from interviews">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
 <!-- Deep-Apply Queue -->
 {% if deep_queue %}
 <div class="table-card" style="margin-bottom: 2rem;">
@@ -531,7 +575,16 @@
                     {% endif %}
                 </td>
                 <td class="truncate" title="{{ e.reasoning or '' }}">{{ e.reasoning or '—' }}</td>
-                <td><a href="/report/{{ e.job_id }}" target="_blank">Report</a></td>
+                <td>
+                    <a href="/report/{{ e.job_id }}" target="_blank">Report</a>
+                    {% if e.status is defined and e.status.startswith('submitted') and e.job_id not in interview_ids %}
+                    <form method="POST" action="/interview/add/{{ e.job_id }}" style="display:inline;margin-left:6px">
+                        <button type="submit" style="background:none;border:1px solid var(--blue, #60a5fa);color:var(--blue, #60a5fa);cursor:pointer;font-size:0.7rem;padding:2px 6px;border-radius:3px" title="Mark as interview pending">+Interview</button>
+                    </form>
+                    {% elif e.job_id in interview_ids %}
+                    <span style="font-size:0.7rem;color:var(--blue, #60a5fa);margin-left:6px">Interviewing</span>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
