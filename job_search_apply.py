@@ -3265,7 +3265,7 @@ def _categorize_failure(status: str) -> str:
     # wrapped in a validation error message
     if "spam" in s or "captcha" in s or "security check" in s or "recaptcha" in s:
         return "captcha"
-    if "form stuck" in s or "form steps" in s or "lost track" in s:
+    if "form stuck" in s or "form steps" in s or "lost track" in s or "not progressing" in s:
         return "form_stuck"
     if "validation error" in s:
         return "validation_error"
@@ -5504,6 +5504,7 @@ def _navigate_external_form(  # noqa: C901
     global _final_ats_url  # noqa: PLW0603
     stalled = 0
     no_button_stalled = 0
+    zero_fill_steps = 0
     prev_snapshot = ""
     fields_filled_total = 0
     captcha_solved_urls: set = set()  # track URLs where we already solved a CAPTCHA
@@ -5734,6 +5735,8 @@ def _navigate_external_form(  # noqa: C901
         if classification.get("has_file_upload"):
             n = _handle_file_uploads(page, profile, cover_letter_path, uploaded_files)
             fields_filled_total += n
+            if n > 0:
+                zero_fill_steps = 0
 
         # Fill form fields
         if classification.get("has_form_fields") or classification["page_type"] == "form":
@@ -5743,6 +5746,12 @@ def _navigate_external_form(  # noqa: C901
             fields_filled_total += n
             if n > 0:
                 stalled = 0  # filling fields counts as progress
+                zero_fill_steps = 0
+            else:
+                zero_fill_steps += 1
+                if zero_fill_steps >= 4:
+                    _dump_form_debug(page, job.get("id", ""), "No progress (zero fields filled)")
+                    return "failed: form not progressing (no new fields filled)"
             log.info(f"   Step {step + 1}: filled {n} fields on {page.url[:60]}")
 
         if dry_run:
