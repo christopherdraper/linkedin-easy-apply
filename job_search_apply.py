@@ -2915,9 +2915,22 @@ def _detect_captcha(page) -> Optional[Dict[str, str]]:
     """Detect CAPTCHA on page. Returns dict with type/sitekey/url, or None."""
     try:
         info = page.evaluate("""() => {
+            // hCaptcha — check BEFORE reCAPTCHA since both use [data-sitekey]
+            const hcapFrame = document.querySelector('iframe[src*="hcaptcha"]');
+            const hcapDiv = document.querySelector('.h-captcha, [data-hcaptcha-sitekey]');
+            if (hcapFrame || hcapDiv) {
+                let sitekey = '';
+                if (hcapDiv) sitekey = hcapDiv.getAttribute('data-sitekey')
+                    || hcapDiv.getAttribute('data-hcaptcha-sitekey') || '';
+                if (!sitekey && hcapFrame) {
+                    const m = hcapFrame.src.match(/sitekey=([^&]+)/);
+                    if (m) sitekey = m[1];
+                }
+                return {type: 'hcaptcha', sitekey};
+            }
             // reCAPTCHA v2/v3/Enterprise
             const recapFrame = document.querySelector('iframe[src*="recaptcha"]');
-            const recapDiv = document.querySelector('.g-recaptcha, [data-sitekey]');
+            const recapDiv = document.querySelector('.g-recaptcha, [data-sitekey]:not(.h-captcha)');
             const recapBadge = document.querySelector('.grecaptcha-badge');
             const isEnterprise = !!document.querySelector(
                 'script[src*="recaptcha/enterprise"], iframe[src*="recaptcha/enterprise"]'
@@ -2969,19 +2982,6 @@ def _detect_captcha(page) -> Optional[Dict[str, str]]:
                 let type = isV3 ? 'recaptchav3' : 'recaptchav2';
                 if (isEnterprise) type += '_enterprise';
                 return {type, sitekey};
-            }
-            // hCaptcha
-            const hcapFrame = document.querySelector('iframe[src*="hcaptcha"]');
-            const hcapDiv = document.querySelector('.h-captcha, [data-hcaptcha-sitekey]');
-            if (hcapFrame || hcapDiv) {
-                let sitekey = '';
-                if (hcapDiv) sitekey = hcapDiv.getAttribute('data-sitekey')
-                    || hcapDiv.getAttribute('data-hcaptcha-sitekey') || '';
-                if (!sitekey && hcapFrame) {
-                    const m = hcapFrame.src.match(/sitekey=([^&]+)/);
-                    if (m) sitekey = m[1];
-                }
-                return {type: 'hcaptcha', sitekey};
             }
             // Cloudflare Turnstile
             const cfFrame = document.querySelector('iframe[src*="challenges.cloudflare"]');
@@ -3919,10 +3919,16 @@ def _wait_and_dismiss_cookies(page) -> None:
         pass
     try:
         cookie_btn = page.query_selector(
-            "button:has-text('Accept'), button:has-text('Accept All'), "
-            "button:has-text('Accept all'), button:has-text('I agree'), "
-            "button:has-text('Got it'), button:has-text('OK'), "
-            "button:has-text('Agree'), a:has-text('Accept All')"
+            "#onetrust-accept-btn-handler, "
+            "#CybsideCookieBannerAcceptButton, "
+            "[data-testid='cookie-accept'], "
+            "button:has-text('Accept All'), "
+            "button:has-text('Accept all'), "
+            "button:has-text('Accept'), "
+            "button:has-text('I agree'), "
+            "button:has-text('Got it'), "
+            "button:has-text('Agree'), "
+            "a:has-text('Accept All')"
         )
         if cookie_btn and cookie_btn.is_visible():
             _safe_click(cookie_btn, page)
@@ -5680,6 +5686,21 @@ def _navigate_external_form(  # noqa: C901
                 pass
             _final_ats_url = page.url
             continue
+
+        # Dismiss cookie banners that may block Apply buttons
+        try:
+            cookie_btn = page.query_selector(
+                "#onetrust-accept-btn-handler, "
+                "[data-testid='cookie-accept'], "
+                "button:has-text('Accept All'):visible, "
+                "button:has-text('Accept all'):visible"
+            )
+            if cookie_btn and cookie_btn.is_visible():
+                _safe_click(cookie_btn, page)
+                page.wait_for_timeout(1000)
+                log.info("   🍪 Dismissed cookie consent banner")
+        except Exception:  # noqa: S110
+            pass
 
         # Job listing page with Apply button (Workday, company career pages)
         # If no form fields and page has an Apply button, click through to the form
