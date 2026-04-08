@@ -29,14 +29,19 @@ import anthropic
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from job_search_apply import (  # noqa: E402
     ApplicantProfile,
+    _attempt_account_creation,
+    _attempt_ats_login,
+    _detect_captcha,
     _ensure_logged_in,
     _escalate_to_q3,
     _fetch_verification_code_from_gmail,
+    _get_domain,
     _load_deep_apply_queue,
     _mark_deep_apply_done,
     _playwright_context,
     _safe_click,
     _save_deep_apply_queue,
+    _solve_captcha,
     _stealth_playwright,
 )
 
@@ -957,6 +962,101 @@ def _try_start_application_button(page, logger: DecisionLogger) -> bool:
     return False
 
 
+def _handle_captcha(page, profile: ApplicantProfile, logger: DecisionLogger) -> bool:
+    """Detect and solve CAPTCHA if present. Returns True if solved (caller should continue)."""
+    captcha_info = _detect_captcha(page)
+    if not captcha_info:
+        return False
+
+    api_key = getattr(profile, "captcha_api_key", None)
+    if not api_key:
+        logger.log(
+            "abort",
+            "CAPTCHA",
+            reasoning="CAPTCHA detected but no captcha_api_key",
+            confidence="high",
+        )
+        return False
+
+    service = getattr(profile, "captcha_service", "2captcha")
+    logger.log(
+        "navigate",
+        "CAPTCHA",
+        reasoning=f"Solving {captcha_info.get('type', '?')} via {service}",
+        confidence="medium",
+    )
+    solved = _solve_captcha(page, captcha_info, api_key, service)
+    if solved:
+        logger.log(
+            "fill_field",
+            "CAPTCHA token",
+            reasoning="CAPTCHA solved, injected token",
+            confidence="high",
+        )
+        page.wait_for_timeout(2000)
+        return True
+    logger.log("abort", "CAPTCHA", reasoning="CAPTCHA solve failed", confidence="high")
+    return False
+
+
+def _handle_login_wall(page, profile: ApplicantProfile, logger: DecisionLogger) -> bool:
+    """Detect login/registration walls and handle via stored accounts or account creation.
+
+    Returns True if login succeeded (caller should continue loop).
+    """
+    try:
+        body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
+    except Exception:
+        return False
+
+    is_login_wall = any(
+        phrase in body
+        for phrase in (
+            "create account",
+            "sign in to apply",
+            "log in to apply",
+            "create an account",
+            "sign up to apply",
+            "register to apply",
+        )
+    ) and bool(page.query_selector("input[type='password'], input[type='email']"))
+
+    if not is_login_wall:
+        return False
+
+    domain = _get_domain(page.url)
+    logger.log(
+        "navigate", "login wall", reasoning=f"Login wall detected on {domain}", confidence="high"
+    )
+
+    # Try existing account first
+    if _attempt_ats_login(page, domain):
+        logger.log(
+            "click",
+            "login",
+            reasoning=f"Logged in with stored account on {domain}",
+            confidence="high",
+        )
+        page.wait_for_timeout(3000)
+        return True
+
+    # Try creating a new account
+    if _attempt_account_creation(page, profile):
+        logger.log(
+            "click", "account creation", reasoning=f"Created account on {domain}", confidence="high"
+        )
+        page.wait_for_timeout(3000)
+        return True
+
+    logger.log(
+        "abort",
+        "login wall",
+        reasoning=f"Could not log in or create account on {domain}",
+        confidence="high",
+    )
+    return False
+
+
 def _handle_no_actions(page, logger: DecisionLogger) -> None:
     """When AI returns no form actions, try Submit/Next, then start/tab buttons."""
     submit_btn = _find_submit_button(page)
@@ -1007,6 +1107,14 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
                 confidence="high",
             )
             return f"failed: {rejection}"
+
+        # CAPTCHA detection + solving via 2captcha/capsolver
+        if _handle_captcha(page, profile, logger):
+            continue
+
+        # Login wall detection + account creation/login
+        if _handle_login_wall(page, profile, logger):
+            continue
 
         snapshot = _get_page_text_snapshot(page)
         if not snapshot or snapshot == "[]":
