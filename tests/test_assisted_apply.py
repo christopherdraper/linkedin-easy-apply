@@ -177,7 +177,9 @@ class TestExecuteActionPlan:
         profile = _make_profile()
         logger = DecisionLogger()
 
-        result = _execute_action_plan(self._make_action(), page, profile, "/tmp/resume.pdf", logger)
+        result = _execute_action_plan(
+            self._make_action(), page, profile, "/tmp/resume.pdf", "SRE", "Co", logger
+        )
         assert result is True
         assert logger.entries()[0]["action"] == "fill_field"
 
@@ -189,18 +191,32 @@ class TestExecuteActionPlan:
         logger = DecisionLogger()
 
         result = _execute_action_plan(
-            self._make_action(action="click", target="Next button"), page, profile, "", logger
+            self._make_action(action="click", target="Next button"),
+            page,
+            profile,
+            "",
+            "SRE",
+            "Co",
+            logger,
         )
         assert result is True
         assert logger.entries()[0]["action"] == "click"
 
     def test_skip_action(self):
         page = MagicMock()
+        # _retry_skipped_with_ai queries the element; return None so it skips
+        page.query_selector.return_value = None
         profile = _make_profile()
         logger = DecisionLogger()
 
         result = _execute_action_plan(
-            self._make_action(action="skip", target="Unknown field"), page, profile, "", logger
+            self._make_action(action="skip", target="Unknown field"),
+            page,
+            profile,
+            "",
+            "SRE",
+            "Co",
+            logger,
         )
         assert result is False
         assert logger.entries()[0]["action"] == "skip"
@@ -219,6 +235,8 @@ class TestExecuteActionPlan:
                 page,
                 profile,
                 "/tmp/resume.pdf",
+                "SRE",
+                "Co",
                 logger,
             )
 
@@ -239,7 +257,7 @@ class TestExecuteActionPlan:
             value="wrong@email.com",
             confidence="medium",
         )
-        _execute_action_plan(action, page, profile, "/tmp/resume.pdf", logger)
+        _execute_action_plan(action, page, profile, "/tmp/resume.pdf", "SRE", "Co", logger)
 
         entry = logger.entries()[0]
         assert entry["value"] == "matt@example.com"

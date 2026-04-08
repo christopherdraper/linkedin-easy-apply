@@ -495,9 +495,19 @@ def _fill_field(page, ref: str, value: str, field_type: str = "text") -> bool:
             el_label = el.evaluate(
                 "e => ((e.getAttribute('aria-label') || '') + ' ' + "
                 "(e.getAttribute('name') || '') + ' ' + "
-                "(e.getAttribute('placeholder') || '')).toLowerCase()"
+                "(e.getAttribute('placeholder') || '') + ' ' + "
+                "(e.getAttribute('autocomplete') || '') + ' ' + "
+                "(e.getAttribute('id') || '')).toLowerCase()"
             )
-            if any(kw in el_label for kw in ("location", "city", "candidate-location")):
+            is_autocomplete_field = any(
+                kw in el_label
+                for kw in ("location", "candidate-location", "address-input", "pac-input")
+            ) or el.evaluate(
+                "e => e.closest('[data-ui=\"address\"]') !== null || "
+                "e.closest('[class*=\"address-autocomplete\"]') !== null || "
+                "e.getAttribute('autocomplete') === 'address-line1'"
+            )
+            if is_autocomplete_field:
                 _robust_click(el, page)
                 el.fill("")
                 page.keyboard.type(value, delay=50)
@@ -746,11 +756,63 @@ def _save_debug_snapshot(page, job_id: str, label: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _retry_skipped_with_ai(
+    action_plan: Dict,
+    page,
+    profile: ApplicantProfile,
+    job_title: str,
+    company: str,
+    logger: DecisionLogger,
+) -> None:
+    """For skipped fields, check if the field is required or a textarea and try AI answer."""
+    ref = action_plan.get("ref", "")
+    target = action_plan.get("target", "")
+
+    try:
+        el = page.query_selector(f'[data-qa-ref="{ref}"]')
+        if not el:
+            logger.log("skip", target, "", action_plan.get("reasoning", ""), "medium")
+            return
+
+        # Check if field is required or is a textarea (likely essay question)
+        field_info = el.evaluate("""e => ({
+            tag: e.tagName.toLowerCase(),
+            type: e.getAttribute('type') || '',
+            required: e.hasAttribute('required') || e.getAttribute('aria-required') === 'true',
+            value: e.value || '',
+            options: e.tagName === 'SELECT' ? Array.from(e.options).map(o => o.text) : [],
+        })""")
+
+        is_textarea = field_info["tag"] == "textarea"
+        is_required = field_info["required"]
+        already_filled = bool(field_info["value"].strip())
+
+        if already_filled or (not is_required and not is_textarea):
+            logger.log("skip", target, "", action_plan.get("reasoning", ""), "high")
+            return
+
+        # Ask AI for an answer
+        answer = _ai_answer_field(
+            target, field_info["tag"], field_info["options"], profile, job_title, company
+        )
+        if answer:
+            _fill_field(page, ref, answer)
+            logger.log(
+                "fill_field", target, answer[:80], "AI-generated answer for skipped field", "medium"
+            )
+        else:
+            logger.log("skip", target, "", "AI could not generate answer", "uncertain")
+    except Exception:
+        logger.log("skip", target, "", action_plan.get("reasoning", ""), "medium")
+
+
 def _execute_action_plan(
     action_plan: Dict,
     page,
     profile: ApplicantProfile,
     resume_path: str,
+    job_title: str,
+    company: str,
     logger: DecisionLogger,
 ) -> bool:
     """Execute a single AI-planned action. Returns True if a field was filled."""
@@ -792,7 +854,11 @@ def _execute_action_plan(
             logger.log("skip", target, "", "No resume file available", "uncertain")
         return False
 
-    # skip or unknown
+    # skip -- try AI answer for required/textarea fields before giving up
+    if act == "skip":
+        _retry_skipped_with_ai(action_plan, page, profile, job_title, company, logger)
+        return False
+
     logger.log("skip", target, "", reasoning, confidence)
     return False
 
@@ -1145,7 +1211,7 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
 
         # Execute fill/click actions (AI no longer returns submit clicks)
         for action_plan in actions:
-            _execute_action_plan(action_plan, page, profile, resume_path, logger)
+            _execute_action_plan(action_plan, page, profile, resume_path, title, company, logger)
 
         _auto_upload_files(page, resume_path, cover_letter_path, logger)
 
