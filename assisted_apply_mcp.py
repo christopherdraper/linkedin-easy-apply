@@ -109,6 +109,7 @@ class DecisionLogger:
 _FIELD_MAP = {
     r"full.?name": "full_name",
     r"e.?mail": "email",
+    r"phone.?country.?code|country.?code.*phone|dialing.?code": "_phone_country_code",
     r"phone|mobile|telephone": "phone",
     r"city": "city",
     r"\bstate\b|\bprovince\b": "state",
@@ -144,6 +145,8 @@ def _match_field_to_profile(label: str, profile: ApplicantProfile) -> Optional[s
 
         for pattern, attr in _FIELD_MAP.items():
             if re.search(pattern, label_lower):
+                if attr == "_phone_country_code":
+                    return "+1"
                 val = getattr(profile, attr, None)
                 if val:
                     return str(val)
@@ -459,6 +462,103 @@ def _robust_click(el, page, timeout: int = 5000) -> None:
         el.evaluate("e => e.click()")
 
 
+_US_STATES = {
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
+    "DC": "District of Columbia",
+}
+
+
+def _fill_pageup_combobox(page, el, value: str) -> bool:
+    """Fill a PageUp-style combobox (text input with -edit/-postback pattern).
+
+    Types into the edit field, waits for the dropdown, and clicks the matching option.
+    """
+    # Expand 2-letter state codes to full names for dropdown matching
+    search_value = _US_STATES.get(value.upper(), value) if len(value) == 2 else value
+
+    _robust_click(el, page)
+    el.evaluate("e => { e.value = ''; }")
+    page.keyboard.type(search_value, delay=50)
+    page.wait_for_timeout(1500)
+
+    # PageUp renders dropdown options as <div> or <li> items
+    for sel in (
+        "[class*='dropdown'] [class*='item']",
+        "[class*='list'] [class*='item']",
+        "[class*='autocomplete'] li",
+        "[role='option']",
+        "[role='listbox'] [role='option']",
+    ):
+        options = page.query_selector_all(sel)
+        for opt in options:
+            try:
+                txt = (opt.text_content() or "").strip()
+                if search_value.lower() in txt.lower() or txt.lower().startswith(
+                    search_value.lower()
+                ):
+                    opt.click()
+                    page.wait_for_timeout(500)
+                    return True
+            except Exception:
+                continue
+
+    # Fallback: arrow down + enter
+    page.keyboard.press("ArrowDown")
+    page.wait_for_timeout(300)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(500)
+    return True
+
+
 def _fill_field(page, ref: str, value: str, field_type: str = "text") -> bool:
     """Fill a form field by its data-qa-ref attribute."""
     try:
@@ -488,6 +588,14 @@ def _fill_field(page, ref: str, value: str, field_type: str = "text") -> bool:
             "e.closest('[class*=\"select__\"]') !== null"
         ):
             return _fill_react_select(page, el, ref, value)
+
+        # PageUp combobox (id ending in -edit with -postback sibling)
+        is_pageup_combo = el.evaluate(
+            "e => e.id && e.id.endsWith('-edit') && "
+            "document.getElementById(e.id.replace('-edit', '-postback')) !== null"
+        )
+        if is_pageup_combo:
+            return _fill_pageup_combobox(page, el, value)
 
         if tag in ("input", "textarea"):
             # Location autocomplete fields need keystroke typing to trigger
@@ -931,25 +1039,33 @@ def _navigate_linkedin_to_ats(page, context, url, logger):
 def _find_submit_button(page) -> Optional[object]:
     """Find a Submit, Next, or Continue button on the page.
 
+    Prefers specific advance buttons (Submit/Next/Continue) over generic
+    type=submit to avoid hitting "Save and exit" or "Save draft" buttons.
     Scrolls to the button if found off-screen.
     """
+    # Text-specific selectors first (avoids "Save and exit" type=submit)
     selectors = [
-        'button[type="submit"]',
-        'input[type="submit"]',
         'button:has-text("Submit Application")',
+        'button:has-text("Save and continue")',
         'button:has-text("Submit")',
         'button:has-text("Apply")',
         'button:has-text("Next")',
         'button:has-text("Continue")',
         '[role="button"]:has-text("Submit")',
         '[role="button"]:has-text("Next")',
+        'input[type="submit"]',
+        'button[type="submit"]',
     ]
+    # Skip buttons that would save/exit/discard instead of advancing
+    skip_texts = ("save and exit", "save draft", "discard", "cancel")
     for sel in selectors:
         try:
             btn = page.query_selector(sel)
             if not btn:
                 continue
-            # Scroll into view first -- button may be below the fold
+            btn_text = (btn.text_content() or "").strip().lower()
+            if btn_text in skip_texts:
+                continue
             try:
                 btn.scroll_into_view_if_needed(timeout=2000)
                 page.wait_for_timeout(300)
@@ -1093,6 +1209,147 @@ def _handle_captcha(page, profile: ApplicantProfile, logger: DecisionLogger) -> 
     return False
 
 
+def _find_otp_button(page) -> Optional[object]:
+    """Find the 'Login with emailed one-time code' button on identity verification pages."""
+    btn = page.query_selector(
+        'button:has-text("emailed one-time code"), '
+        'a:has-text("emailed one-time code"), '
+        '[role="button"]:has-text("emailed one-time code")'
+    )
+    if btn:
+        return btn
+    for el in page.query_selector_all("button, a, [role='button']"):
+        try:
+            txt = el.text_content() or ""
+            if "one-time code" in txt.lower():
+                return el
+        except Exception:
+            continue
+    return None
+
+
+def _find_code_input(page) -> Optional[object]:
+    """Find an OTP/verification code input field on the page."""
+    code_input = page.query_selector(
+        "input[name*='code' i], input[name*='otp' i], input[name*='token' i], "
+        "input[placeholder*='code' i], input[aria-label*='code' i]"
+    )
+    if code_input:
+        return code_input
+    for inp in page.query_selector_all(
+        "input[type='text'], input:not([type]), input[type='number']"
+    ):
+        try:
+            if inp.is_visible() and not inp.input_value():
+                return inp
+        except Exception:
+            continue
+    return None
+
+
+def _handle_identity_verification(page, profile: ApplicantProfile, logger: DecisionLogger) -> bool:
+    """Detect PageUp-style identity verification pages and handle via emailed OTP.
+
+    These pages show "Verify your identity through:" with options including
+    "Login with emailed one-time code". Returns True if verification succeeded.
+    """
+    try:
+        body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
+    except Exception:
+        return False
+
+    if "verify your identity" not in body or "emailed one-time code" not in body:
+        return False
+
+    logger.log(
+        "navigate",
+        "identity verification page",
+        reasoning="PageUp identity verification detected, using email OTP",
+        confidence="high",
+    )
+
+    if not getattr(profile, "gmail_app_password", None):
+        logger.log(
+            "abort",
+            "identity verification",
+            reasoning="No gmail_app_password in profile",
+            confidence="high",
+        )
+        return False
+
+    otp_btn = _find_otp_button(page)
+    if not otp_btn:
+        logger.log(
+            "abort",
+            "identity verification",
+            reasoning="Could not find 'emailed one-time code' button",
+            confidence="high",
+        )
+        return False
+
+    otp_btn.click()
+    logger.log(
+        "click",
+        "Login with emailed one-time code",
+        reasoning="Requesting OTP email from PageUp",
+        confidence="high",
+    )
+    page.wait_for_timeout(5000)
+
+    # PageUp can take 2-7 min to deliver OTP emails; use longer timeout
+    code = _fetch_verification_code_from_gmail(
+        profile.email, profile.gmail_app_password, max_wait=480
+    )
+    if not code:
+        logger.log(
+            "abort",
+            "identity verification",
+            reasoning="OTP code not received from email after 8 min",
+            confidence="high",
+        )
+        return False
+
+    logger.log("fill_field", "OTP code", code, "Code retrieved from email", "high")
+
+    code_input = _find_code_input(page)
+    if not code_input:
+        logger.log(
+            "abort",
+            "identity verification",
+            reasoning="Could not find OTP input field",
+            confidence="high",
+        )
+        return False
+
+    code_input.click()
+    code_input.evaluate("el => el.value = ''")
+    code_input.type(code, delay=50)
+    page.wait_for_timeout(500)
+
+    submit_btn = page.query_selector(
+        "button[type='submit'], input[type='submit'], "
+        "button:has-text('Verify'), button:has-text('Continue'), "
+        "button:has-text('Submit'), button:has-text('Log in')"
+    )
+    if submit_btn:
+        try:
+            submit_btn.click(timeout=5000)
+        except Exception:
+            submit_btn.evaluate("e => e.click()")
+    else:
+        page.keyboard.press("Enter")
+
+    page.wait_for_timeout(8000)
+
+    logger.log(
+        "navigate",
+        "post-verification",
+        reasoning="OTP submitted, proceeding to application form",
+        confidence="high",
+    )
+    return True
+
+
 def _handle_login_wall(page, profile: ApplicantProfile, logger: DecisionLogger) -> bool:
     """Detect login/registration walls and handle via stored accounts or account creation.
 
@@ -1102,6 +1359,10 @@ def _handle_login_wall(page, profile: ApplicantProfile, logger: DecisionLogger) 
         body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
     except Exception:
         return False
+
+    # Check for PageUp-style identity verification first
+    if "verify your identity" in body and "emailed one-time code" in body:
+        return _handle_identity_verification(page, profile, logger)
 
     is_login_wall = any(
         phrase in body
@@ -1262,6 +1523,28 @@ def _fix_corrupted_fields(page, profile: ApplicantProfile, logger: DecisionLogge
     return fixed
 
 
+def _handle_empty_page(page, job_id: str, logger: DecisionLogger) -> Optional[str]:
+    """Handle pages with no form fields. Returns failure string or None (continue)."""
+    try:
+        body_text = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 500) || ''")
+    except Exception:
+        body_text = ""
+    if "saved a draft" in body_text or "saved draft" in body_text:
+        logger.log(
+            "abort",
+            "draft saved",
+            reasoning="Form auto-saved as draft (session timeout or validation error)",
+            confidence="high",
+        )
+        _save_debug_snapshot(page, job_id, "draft_saved")
+        return "failed: form saved as draft, needs manual resume"
+    if _try_start_application_button(page, logger):
+        return None  # continue loop
+    logger.log("abort", "page", reasoning="Empty page snapshot", confidence="high")
+    _save_debug_snapshot(page, job_id, "empty_snapshot")
+    return "failed: empty page snapshot"
+
+
 def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path, job_id, logger):
     """Core form-filling loop. Returns a status string."""
     same_page_count = 0
@@ -1307,12 +1590,10 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
 
         snapshot = _get_page_text_snapshot(page)
         if not snapshot or snapshot == "[]":
-            # No form fields -- try clicking a "Start Application" button first
-            if _try_start_application_button(page, logger):
-                continue
-            logger.log("abort", "page", reasoning="Empty page snapshot", confidence="high")
-            _save_debug_snapshot(page, job_id, "empty_snapshot")
-            return "failed: empty page snapshot"
+            empty_result = _handle_empty_page(page, job_id, logger)
+            if empty_result:
+                return empty_result
+            continue
 
         # Fix corrupted values from prior attempts (no-op after first fix)
         _fix_corrupted_fields(page, profile, logger)

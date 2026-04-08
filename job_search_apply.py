@@ -1913,17 +1913,23 @@ def _fill_empty_required_fields(page, profile) -> int:
 def _extract_code_from_email_body(body: str) -> Optional[str]:
     """Extract a verification code from an email body string."""
     body_clean = re.sub(r"\s+", " ", body)
-    # Primary: "code <optional words> : CODE" — matches Greenhouse format
+    # Primary: "code <optional words> : CODE" -- matches Greenhouse format
     m = re.search(r"code[^:]{0,40}:\s*([A-Za-z0-9]{6,10})\b", body_clean)
     if m:
         return m.group(1)
-    # Fallback: isolated 8-char alphanumeric token near keywords
-    for m in re.finditer(r"\b([A-Za-z0-9]{8})\b", body_clean):
-        # Check the surrounding context (30 chars each side)
+    # 6-10 char alphanumeric token near code/verify keywords (PageUp, generic OTP)
+    for m in re.finditer(r"\b([A-Za-z0-9]{6,10})\b", body_clean):
         start = max(0, m.start() - 60)
         context = body_clean[start : m.end() + 60].lower()
-        if any(kw in context for kw in ("code", "verify", "enter", "paste", "security")):
-            return m.group(1)
+        if any(kw in context for kw in ("code", "verify", "enter", "paste", "security", "login")):
+            # Skip common false positives (names, words, domains)
+            token = m.group(1)
+            if token.isalpha() and token.lower() in body_clean.lower():
+                # Pure-alpha tokens that appear as regular words are likely false positives
+                # unless they look like codes (mixed case like aB3x)
+                if token == token.lower() or token == token.capitalize():
+                    continue
+            return token
     return None
 
 
@@ -1946,6 +1952,9 @@ def _fetch_verification_code_from_gmail(  # noqa: C901
         '(FROM "greenhouse" SUBJECT "security code" UNSEEN)',
         '(FROM "no-reply" SUBJECT "verification code" UNSEEN)',
         '(FROM "noreply" SUBJECT "security code" UNSEEN)',
+        '(FROM "pageup" UNSEEN)',
+        '(SUBJECT "one-time code" UNSEEN)',
+        '(SUBJECT "verification" UNSEEN)',
     ]
     request_time = time.time()
 
