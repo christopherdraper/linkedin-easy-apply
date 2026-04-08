@@ -180,8 +180,15 @@ def index():
 
     total_cost, avg_cost_submitted, avg_cost_failed = _compute_cost_stats(entries)
 
-    # Deep-apply queue
+    # Retry queue — split into Q2 (assisted) and Q3 (dashboard/human)
     deep_queue = _load_json(DEEP_APPLY_QUEUE_FILE)
+    q2_queue = [q for q in deep_queue if q.get("queue", "q2") == "q2"]
+    q3_queue = [q for q in deep_queue if q.get("queue") == "q3"]
+    q2_pending = [q for q in q2_queue if q.get("status") == "pending"]
+    q2_in_progress = [q for q in q2_queue if q.get("status") == "in_progress"]
+    q2_done = [q for q in q2_queue if q.get("status") == "done"]
+    q2_success = sum(1 for q in q2_done if q.get("deep_apply_status") == "submitted")
+    q3_pending = [q for q in q3_queue if q.get("status") == "pending"]
     deep_pending = [q for q in deep_queue if q.get("status") == "pending"]
     deep_done = [q for q in deep_queue if q.get("status") == "done"]
     deep_success = sum(1 for q in deep_done if q.get("deep_apply_status") == "submitted")
@@ -218,6 +225,13 @@ def index():
         deep_pending_count=len(deep_pending),
         deep_success_count=deep_success,
         deep_done_count=len(deep_done),
+        q2_queue=q2_queue,
+        q2_pending_count=len(q2_pending),
+        q2_in_progress_count=len(q2_in_progress),
+        q2_done_count=len(q2_done),
+        q2_success_count=q2_success,
+        q3_queue=q3_queue,
+        q3_pending_count=len(q3_pending),
         interview_entries=interview_entries,
         interview_ids=interview_ids,
     )
@@ -255,6 +269,19 @@ def deep_apply_prompt(job_id):
     prompt = _generate_deep_apply_prompt(entry, profile)
 
     return render_template("deep_apply_prompt.html", entry=entry, prompt=prompt)
+
+
+@app.route("/decision-log/<job_id>")
+def decision_log(job_id):
+    queue = _load_json(DEEP_APPLY_QUEUE_FILE)
+    entry = next((q for q in queue if q.get("job_id") == job_id), None)
+    if not entry:
+        abort(404)
+    return render_template(
+        "decision_log.html",
+        entry=entry,
+        decisions=entry.get("decision_log", []),
+    )
 
 
 @app.route("/interview/add/<job_id>", methods=["POST"])
@@ -335,7 +362,7 @@ def api_data():
 
     total_cost, avg_cost_submitted, avg_cost_failed = _compute_cost_stats(entries)
 
-    # Deep-apply queue
+    # Retry queue
     deep_queue = _load_json(DEEP_APPLY_QUEUE_FILE)
     deep_pending = [q for q in deep_queue if q.get("status") == "pending"]
     deep_done = [q for q in deep_queue if q.get("status") == "done"]

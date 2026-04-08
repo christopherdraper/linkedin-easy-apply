@@ -458,11 +458,15 @@
 </div>
 {% endif %}
 
-<!-- Deep-Apply Queue -->
-{% if deep_queue %}
+<!-- Q2: Assisted Apply Queue -->
+{% if q2_queue %}
 <div class="table-card" style="margin-bottom: 2rem;">
     <div class="table-header">
-        <h2>Deep-Apply Queue</h2>
+        <h2>Assisted Apply Queue (Q2)</h2>
+        <span style="color:var(--text-muted);font-size:0.85rem">
+            {{ q2_pending_count }} pending &middot; {{ q2_in_progress_count }} in progress &middot;
+            {{ q2_success_count }}/{{ q2_done_count }} succeeded
+        </span>
     </div>
     <table>
         <thead>
@@ -471,20 +475,75 @@
                 <th>Company</th>
                 <th>Score</th>
                 <th>Failure</th>
+                <th>Attempts</th>
                 <th>Queued</th>
                 <th>Status</th>
-                <th>ID</th>
                 <th></th>
             </tr>
         </thead>
         <tbody>
-            {% for q in deep_queue %}
+            {% for q in q2_queue %}
             <tr>
                 <td class="truncate"><a href="{{ q.url }}" target="_blank">{{ q.title }}</a></td>
                 <td>{{ q.company }}</td>
                 <td>{{ '%.0f'|format((q.match_score or 0) * 100) }}%</td>
                 <td>{{ q.failure_reason }}</td>
-                <td style="white-space:nowrap">{{ q.queued_at[:10] if q.queued_at else '—' }}</td>
+                <td>{{ q.q2_attempts|default(0) }}</td>
+                <td style="white-space:nowrap">{{ q.queued_at[:10] if q.queued_at else '&#8212;' }}</td>
+                <td>
+                    {% if q.status == 'pending' %}
+                        <span class="badge badge-dryrun">Pending</span>
+                    {% elif q.status == 'in_progress' %}
+                        <span class="badge badge-other">In Progress</span>
+                    {% elif q.deep_apply_status == 'submitted' %}
+                        <span class="badge badge-submitted">Submitted</span>
+                    {% elif q.deep_apply_status == 'failed' %}
+                        <span class="badge badge-failed">Failed</span>
+                    {% else %}
+                        <span class="badge badge-other">{{ q.status }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if q.decision_log %}
+                        <a href="/decision-log/{{ q.job_id }}" target="_blank">Decision Log</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- Q3: Needs Human Review -->
+{% if q3_queue %}
+<div class="table-card" style="margin-bottom: 2rem;">
+    <div class="table-header">
+        <h2>Needs Human Review (Q3)</h2>
+        <span style="color:var(--text-muted);font-size:0.85rem">{{ q3_pending_count }} pending</span>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Company</th>
+                <th>Score</th>
+                <th>Failure</th>
+                <th>Escalation Reason</th>
+                <th>Queued</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for q in q3_queue %}
+            <tr>
+                <td class="truncate"><a href="{{ q.url }}" target="_blank">{{ q.title }}</a></td>
+                <td>{{ q.company }}</td>
+                <td>{{ '%.0f'|format((q.match_score or 0) * 100) }}%</td>
+                <td>{{ q.failure_reason }}</td>
+                <td class="truncate">{{ q.escalation_reason|default('&#8212;') }}</td>
+                <td style="white-space:nowrap">{{ q.queued_at[:10] if q.queued_at else '&#8212;' }}</td>
                 <td>
                     {% if q.status == 'pending' %}
                         <span class="badge badge-dryrun">Pending</span>
@@ -496,8 +555,14 @@
                         <span class="badge badge-other">{{ q.status }}</span>
                     {% endif %}
                 </td>
-                <td style="font-size:0.75rem;color:var(--text-muted)">{{ q.job_id }}</td>
-                <td>{% if q.status == 'pending' %}<a href="/deep-apply/{{ q.job_id }}" target="_blank">Prompt</a>{% endif %}</td>
+                <td>
+                    {% if q.status == 'pending' %}
+                        <a href="/deep-apply/{{ q.job_id }}" target="_blank">Prompt</a>
+                    {% endif %}
+                    {% if q.decision_log %}
+                        <a href="/decision-log/{{ q.job_id }}" target="_blank" style="margin-left:6px">Log</a>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

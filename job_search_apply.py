@@ -3397,12 +3397,13 @@ def _compute_cost_usd(tokens_in: int, tokens_out: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Deep-apply queue — re-queue high-match failures for manual/vision retry
+# ---------------------------------------------------------------------------
+# Retry queue — re-queue failures for Q2 (MCP Playwright) or Q3 (dashboard)
 # ---------------------------------------------------------------------------
 
 DEEP_APPLY_QUEUE_FILE = DATA_DIR / "deep_apply_queue.json"
 
-# Failure categories eligible for deep-apply retry
+# Failure categories eligible for retry via Q2/Q3
 _DEEP_APPLY_ELIGIBLE_CATEGORIES = frozenset(
     {
         "form_stuck",
@@ -3412,6 +3413,8 @@ _DEEP_APPLY_ELIGIBLE_CATEGORIES = frozenset(
         "login_wall",
         "modal_lost",
         "max_steps",
+        "timeout",
+        "unknown_error",
     }
 )
 
@@ -3435,10 +3438,10 @@ def _save_deep_apply_queue(queue: List[Dict]) -> None:
 
 
 def _deep_apply_eligible(entry: Dict, already_queued_ids: set) -> bool:
-    """Check if a failed application is eligible for deep-apply retry."""
+    """Check if a failed application is eligible for Q2 retry."""
     if not entry.get("status", "").startswith("failed"):
         return False
-    if (entry.get("match_score") or 0) < 0.9:
+    if (entry.get("match_score") or 0) < 0.7:
         return False
     if entry.get("failure_category") not in _DEEP_APPLY_ELIGIBLE_CATEGORIES:
         return False
@@ -3447,8 +3450,8 @@ def _deep_apply_eligible(entry: Dict, already_queued_ids: set) -> bool:
     return True
 
 
-def _queue_for_deep_apply(app_entry: Dict) -> None:
-    """Queue a failed application for deep-apply retry."""
+def _queue_for_deep_apply(app_entry: Dict, queue_tier: str = "q2") -> None:
+    """Queue a failed application for Q2 (assisted) or Q3 (dashboard) retry."""
     queue = _load_deep_apply_queue()
     queue.append(
         {
@@ -3466,14 +3469,19 @@ def _queue_for_deep_apply(app_entry: Dict) -> None:
                 "scoring_reasoning": app_entry.get("reasoning", ""),
             },
             "status": "pending",
+            "queue": queue_tier,
+            "q2_attempts": 0,
+            "decision_log": [],
             "deep_apply_status": None,
             "deep_apply_timestamp": None,
             "deep_apply_cost": None,
         }
     )
     _save_deep_apply_queue(queue)
+    tier_label = "Q2 assisted" if queue_tier == "q2" else "Q3 dashboard"
     log.info(
-        "   \U0001f4cb Queued for deep-apply: %s - %s (score: %.2f)",
+        "   \U0001f4cb Queued for %s: %s - %s (score: %.2f)",
+        tier_label,
         app_entry.get("company", "?"),
         app_entry.get("title", "?"),
         app_entry.get("match_score", 0),
@@ -3571,8 +3579,13 @@ Use your judgment to complete the application. Key facts:
 - Current title: {profile.current_title or "N/A"}"""
 
 
-def _mark_deep_apply_done(job_id: str, status: str, reason: Optional[str]) -> bool:
-    """Mark a deep-apply queue entry as done and update the application log."""
+def _mark_deep_apply_done(
+    job_id: str,
+    status: str,
+    reason: Optional[str],
+    decision_log: Optional[List[Dict]] = None,
+) -> bool:
+    """Mark a queue entry as done and update the application log."""
     queue = _load_deep_apply_queue()
     found = False
     for entry in queue:
@@ -3580,6 +3593,8 @@ def _mark_deep_apply_done(job_id: str, status: str, reason: Optional[str]) -> bo
             entry["status"] = "done"
             entry["deep_apply_status"] = status
             entry["deep_apply_timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            if decision_log:
+                entry["decision_log"] = decision_log
             found = True
             break
     if not found:
@@ -3599,6 +3614,26 @@ def _mark_deep_apply_done(job_id: str, status: str, reason: Optional[str]) -> bo
         LOG_FILE.write_text(json.dumps(all_apps, indent=2))
 
     return True
+
+
+def _escalate_to_q3(job_id: str, reason: str) -> bool:
+    """Escalate a Q2 entry to Q3 (dashboard) after assisted apply failure."""
+    queue = _load_deep_apply_queue()
+    for entry in queue:
+        if entry["job_id"] == job_id:
+            entry["queue"] = "q3"
+            entry["status"] = "pending"
+            entry["q2_attempts"] = entry.get("q2_attempts", 0)
+            entry["escalation_reason"] = reason
+            _save_deep_apply_queue(queue)
+            log.info(
+                "   Escalated to Q3 (dashboard): %s - %s (%s)",
+                entry.get("company", "?"),
+                entry.get("title", "?"),
+                reason,
+            )
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

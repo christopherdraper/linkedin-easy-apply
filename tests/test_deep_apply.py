@@ -11,6 +11,7 @@ from job_search_apply import (  # noqa: E402
     ApplicantProfile,
     _deep_apply_eligible,
     _deep_apply_queue_path,
+    _escalate_to_q3,
     _generate_deep_apply_prompt,
     _load_deep_apply_queue,
     _mark_deep_apply_done,
@@ -28,9 +29,9 @@ class TestDeepApplyEligible:
         }
         assert _deep_apply_eligible(entry, set()) is True
 
-    def test_eligible_score_exactly_0_9(self):
+    def test_eligible_score_exactly_0_7(self):
         entry = {
-            "match_score": 0.90,
+            "match_score": 0.70,
             "status": "failed: validation",
             "failure_category": "validation_error",
         }
@@ -38,15 +39,33 @@ class TestDeepApplyEligible:
 
     def test_ineligible_low_score(self):
         entry = {
-            "match_score": 0.85,
+            "match_score": 0.65,
             "status": "failed: form stuck",
             "failure_category": "form_stuck",
         }
         assert _deep_apply_eligible(entry, set()) is False
 
-    def test_ineligible_timeout(self):
+    def test_eligible_medium_score(self):
+        """Score >= 0.7 is now eligible for Q2 retry."""
+        entry = {
+            "match_score": 0.75,
+            "status": "failed: form stuck",
+            "failure_category": "form_stuck",
+        }
+        assert _deep_apply_eligible(entry, set()) is True
+
+    def test_eligible_timeout(self):
+        """Timeout is now an eligible category."""
         entry = {"match_score": 0.95, "status": "failed: timeout", "failure_category": "timeout"}
-        assert _deep_apply_eligible(entry, set()) is False
+        assert _deep_apply_eligible(entry, set()) is True
+
+    def test_eligible_unknown_error(self):
+        entry = {
+            "match_score": 0.80,
+            "status": "failed: unknown",
+            "failure_category": "unknown_error",
+        }
+        assert _deep_apply_eligible(entry, set()) is True
 
     def test_ineligible_aborted(self):
         entry = {"match_score": 0.95, "status": "aborted: injection", "failure_category": None}
@@ -416,3 +435,150 @@ class TestDeepApplyIntegration:
                     # Verify app log updated
                     updated_log = json.loads(log_file.read_text())
                     assert updated_log[0]["deep_apply_status"] == "submitted"
+
+
+class TestQueueSchemaExtensions:
+    """Tests for new Q2/Q3 queue fields."""
+
+    def test_queue_entry_has_q2_fields(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        app_entry = {
+            "job_id": "li_schema",
+            "title": "SRE",
+            "company": "Co",
+            "url": "https://example.com",
+            "match_score": 0.80,
+            "status": "failed: form stuck",
+            "failure_category": "form_stuck",
+            "cover_letter_path": "",
+            "reasoning": "",
+        }
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                with patch("job_search_apply._field_fills", []):
+                    _queue_for_deep_apply(app_entry)
+
+        queue = json.loads(queue_file.read_text())
+        q = queue[0]
+        assert q["queue"] == "q2"
+        assert q["q2_attempts"] == 0
+        assert q["decision_log"] == []
+
+    def test_queue_entry_with_q3_tier(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        app_entry = {
+            "job_id": "li_q3",
+            "title": "SRE",
+            "company": "Co",
+            "url": "https://example.com",
+            "match_score": 0.90,
+            "status": "failed: captcha",
+            "failure_category": "captcha",
+            "cover_letter_path": "",
+            "reasoning": "",
+        }
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                with patch("job_search_apply._field_fills", []):
+                    _queue_for_deep_apply(app_entry, queue_tier="q3")
+
+        queue = json.loads(queue_file.read_text())
+        assert queue[0]["queue"] == "q3"
+
+    def test_backward_compat_missing_queue_field(self):
+        """Entries without 'queue' field should be treated as q2."""
+        old_entry = {"job_id": "old", "status": "pending"}
+        assert old_entry.get("queue", "q2") == "q2"
+
+
+class TestEscalateToQ3:
+    def test_escalates_q2_to_q3(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        queue = [
+            {
+                "job_id": "li_esc",
+                "queue": "q2",
+                "status": "in_progress",
+                "q2_attempts": 2,
+                "title": "SRE",
+                "company": "Co",
+            }
+        ]
+        queue_file.write_text(json.dumps(queue))
+
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                result = _escalate_to_q3("li_esc", "stuck on captcha page")
+
+        assert result is True
+        updated = json.loads(queue_file.read_text())
+        assert updated[0]["queue"] == "q3"
+        assert updated[0]["status"] == "pending"
+        assert updated[0]["escalation_reason"] == "stuck on captcha page"
+
+    def test_escalate_not_found(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        queue_file.write_text("[]")
+
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                result = _escalate_to_q3("li_nonexist", "reason")
+
+        assert result is False
+
+
+class TestMarkDoneWithDecisionLog:
+    def test_persists_decision_log(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        queue = [
+            {
+                "job_id": "li_log",
+                "status": "pending",
+                "deep_apply_status": None,
+                "deep_apply_timestamp": None,
+                "deep_apply_cost": None,
+            }
+        ]
+        queue_file.write_text(json.dumps(queue))
+
+        decision_log = [
+            {
+                "step": 1,
+                "action": "fill_field",
+                "target": "First Name",
+                "value": "Matt",
+                "reasoning": "Profile match",
+                "confidence": "high",
+            }
+        ]
+
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                result = _mark_deep_apply_done(
+                    "li_log", "submitted", None, decision_log=decision_log
+                )
+
+        assert result is True
+        updated = json.loads(queue_file.read_text())
+        assert updated[0]["decision_log"] == decision_log
+        assert len(updated[0]["decision_log"]) == 1
+
+    def test_no_decision_log_leaves_field_unchanged(self, tmp_path):
+        queue_file = tmp_path / "queue.json"
+        queue = [
+            {
+                "job_id": "li_nolog",
+                "status": "pending",
+                "deep_apply_status": None,
+                "deep_apply_timestamp": None,
+                "deep_apply_cost": None,
+            }
+        ]
+        queue_file.write_text(json.dumps(queue))
+
+        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("job_search_apply.DATA_DIR", tmp_path):
+                _mark_deep_apply_done("li_nolog", "submitted", None)
+
+        updated = json.loads(queue_file.read_text())
+        assert "decision_log" not in updated[0]

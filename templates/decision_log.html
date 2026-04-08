@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Decision Log — {{ entry.title }} at {{ entry.company }}</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --border: #2a2d3a;
+            --text: #e4e6eb;
+            --text-muted: #8b8fa3;
+            --accent: #4f8ff7;
+            --green: #34d399;
+            --red: #f87171;
+            --amber: #fbbf24;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .back-link {
+            display: inline-block;
+            margin-bottom: 1.5rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.25rem; }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .meta-row {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+
+        .meta-item {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+        }
+
+        .meta-item .label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .meta-item .value { font-size: 0.95rem; font-weight: 500; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        th {
+            text-align: left;
+            padding: 0.6rem 0.75rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg);
+        }
+
+        td {
+            padding: 0.5rem 0.75rem;
+            font-size: 0.85rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        tr:last-child td { border-bottom: none; }
+
+        .confidence-high { color: var(--green); }
+        .confidence-medium { color: var(--amber); }
+        .confidence-uncertain { color: var(--red); }
+
+        .action-badge {
+            display: inline-block;
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .action-fill { background: rgba(79, 143, 247, 0.15); color: var(--accent); }
+        .action-click { background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
+        .action-select { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .action-submit { background: rgba(52, 211, 153, 0.25); color: var(--green); font-weight: 700; }
+        .action-skip { background: rgba(139, 143, 163, 0.15); color: var(--text-muted); }
+        .action-abort { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+        .action-upload { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+        .action-navigate { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
+
+        .badge-pending  { background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
+        .badge-submitted { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .badge-failed   { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+
+<a href="/" class="back-link">&larr; Back to Dashboard</a>
+
+<h1>{{ entry.title }}</h1>
+<p class="subtitle">{{ entry.company }} &middot; Q2 Decision Log</p>
+
+<div class="meta-row">
+    <div class="meta-item">
+        <div class="label">Score</div>
+        <div class="value" style="color: var(--green)">{{ '%.0f'|format((entry.match_score or 0) * 100) }}%</div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Original Failure</div>
+        <div class="value" style="color: var(--red)">{{ entry.failure_reason }}</div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Q2 Attempts</div>
+        <div class="value">{{ entry.q2_attempts|default(0) }}</div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Status</div>
+        <div class="value">
+            {% if entry.deep_apply_status == 'submitted' %}
+                <span class="badge badge-submitted">Submitted</span>
+            {% elif entry.deep_apply_status == 'failed' %}
+                <span class="badge badge-failed">Failed</span>
+            {% elif entry.status == 'pending' %}
+                <span class="badge badge-pending">Pending</span>
+            {% else %}
+                {{ entry.status }}
+            {% endif %}
+        </div>
+    </div>
+    <div class="meta-item">
+        <div class="label">Steps</div>
+        <div class="value">{{ decisions|length }}</div>
+    </div>
+</div>
+
+{% if decisions %}
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Time</th>
+            <th>Action</th>
+            <th>Target</th>
+            <th>Value</th>
+            <th>Reasoning</th>
+            <th>Confidence</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for d in decisions %}
+        <tr>
+            <td>{{ d.step }}</td>
+            <td style="white-space:nowrap;font-size:0.75rem;color:var(--text-muted)">{{ d.timestamp[11:] if d.timestamp else '' }}</td>
+            <td>
+                {% set act = d.action|default('') %}
+                {% if 'fill' in act %}
+                    <span class="action-badge action-fill">{{ act }}</span>
+                {% elif act == 'click' %}
+                    <span class="action-badge action-click">click</span>
+                {% elif act == 'select' %}
+                    <span class="action-badge action-select">select</span>
+                {% elif act == 'submit' %}
+                    <span class="action-badge action-submit">submit</span>
+                {% elif act == 'skip' %}
+                    <span class="action-badge action-skip">skip</span>
+                {% elif act == 'abort' %}
+                    <span class="action-badge action-abort">abort</span>
+                {% elif act == 'upload' %}
+                    <span class="action-badge action-upload">upload</span>
+                {% elif act == 'navigate' %}
+                    <span class="action-badge action-navigate">navigate</span>
+                {% else %}
+                    <span class="action-badge">{{ act }}</span>
+                {% endif %}
+            </td>
+            <td>{{ d.target }}</td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ d.value }}">{{ d.value or '&#8212;' }}</td>
+            <td style="max-width:300px;font-size:0.8rem;color:var(--text-muted)">{{ d.reasoning }}</td>
+            <td>
+                {% set conf = d.confidence|default('medium') %}
+                <span class="confidence-{{ conf }}">{{ conf }}</span>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+    <p>No decision log entries yet. This application hasn't been processed by Q2.</p>
+</div>
+{% endif %}
+
+</body>
+</html>

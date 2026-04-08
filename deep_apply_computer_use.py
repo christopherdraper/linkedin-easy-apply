@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Deep-apply computer use agent.
+Deep-apply computer use agent (DEPRECATED).
+
+Superseded by assisted_apply_mcp.py which uses Playwright's structured DOM
+interaction instead of screenshot+xdotool. This module is kept for fallback
+use but new development should target assisted_apply_mcp.py.
 
 Uses Claude's computer use API to control a browser on an Xvfb display
 and complete job applications that failed during automated batch runs.
