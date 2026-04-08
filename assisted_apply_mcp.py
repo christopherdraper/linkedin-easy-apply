@@ -126,6 +126,8 @@ def _match_field_to_profile(label: str, profile: ApplicantProfile) -> Optional[s
     # "What state will you work remotely from?" should NOT return the state abbrev.
     is_question = "?" in label_lower or len(label_lower) > 40
 
+    field_map_matched = False
+
     if not is_question:
         # Profile fields first (name, email, phone, etc.)
         if profile.full_name:
@@ -140,11 +142,18 @@ def _match_field_to_profile(label: str, profile: ApplicantProfile) -> Optional[s
                 val = getattr(profile, attr, None)
                 if val:
                     return str(val)
+                # Pattern matched but value is empty (e.g. github_url=None).
+                # Don't fall through to screening answers which may return a
+                # wrong-type value (e.g. "12" years for a URL field).
+                field_map_matched = True
+                break
 
     # Screening answers match (years of X, salary, etc.)
-    for key, val in profile.screening_answers.items():
-        if key.lower() in label_lower or label_lower in key.lower():
-            return str(val)
+    # Skip if the field map already claimed this label (even with empty value).
+    if not field_map_matched:
+        for key, val in profile.screening_answers.items():
+            if key.lower() in label_lower or label_lower in key.lower():
+                return str(val)
 
     return None
 
@@ -914,31 +923,60 @@ def _auto_upload_files(
 
 
 def _try_start_application_button(page, logger: DecisionLogger) -> bool:
-    """Look for and click a 'Start Application' / 'Apply' button on landing pages.
+    """Look for and click a 'Start Application' / 'Apply' / 'Application' tab on landing pages.
 
     Returns True if a button was found and clicked (caller should continue the loop).
     """
-    start_btn = page.query_selector(
-        'button:has-text("Start Application"), button:has-text("Apply Now"), '
-        'button:has-text("Apply for this"), a:has-text("Start Application"), '
-        'a:has-text("Apply Now"), button:has-text("Begin Application"), '
-        'a:has-text("Apply for this"), button:has-text("Apply"), '
-        '[role="button"]:has-text("Apply")'
-    )
-    if not start_btn:
-        return False
-    try:
-        _robust_click(start_btn, page)
-        logger.log(
-            "click",
-            "Start Application button",
-            reasoning="No form fields visible, clicking start/apply button",
-            confidence="medium",
-        )
-        page.wait_for_timeout(3000)
-        return True
-    except Exception:
-        return False
+    # Try buttons first, then Workable-style "APPLICATION" tabs
+    selectors = [
+        'button:has-text("Start Application"), button:has-text("Apply Now")',
+        'button:has-text("Apply for this"), a:has-text("Start Application")',
+        'a:has-text("Apply Now"), button:has-text("Begin Application")',
+        'a:has-text("Apply for this"), button:has-text("Apply")',
+        '[role="button"]:has-text("Apply")',
+        # Workable tab navigation
+        'a:has-text("APPLICATION"), [role="tab"]:has-text("Application")',
+        'button:has-text("APPLICATION")',
+    ]
+    for sel in selectors:
+        btn = page.query_selector(sel)
+        if btn:
+            try:
+                _robust_click(btn, page)
+                label = btn.evaluate("e => e.textContent.trim().substring(0, 50)")
+                logger.log(
+                    "click",
+                    label,
+                    reasoning="No form fields visible, clicking start/apply/tab button",
+                    confidence="medium",
+                )
+                page.wait_for_timeout(3000)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _handle_no_actions(page, logger: DecisionLogger) -> None:
+    """When AI returns no form actions, try Submit/Next, then start/tab buttons."""
+    submit_btn = _find_submit_button(page)
+    if submit_btn:
+        try:
+            submit_btn.click()
+            logger.log(
+                "click",
+                "Submit/Next button",
+                reasoning="No fields to fill, advancing",
+                confidence="high",
+            )
+            page.wait_for_timeout(3000)
+            return
+        except Exception:
+            pass
+    if _try_start_application_button(page, logger):
+        return
+    logger.log("skip", "page", reasoning="No actions and no submit button", confidence="uncertain")
+    page.wait_for_timeout(2000)
 
 
 def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path, job_id, logger):
@@ -994,28 +1032,7 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
         # AI analysis: what fields need filling?
         actions = _ai_analyze_page(snapshot, profile, title, company)
         if not actions:
-            # No fields to fill -- try clicking Submit/Next
-            submit_btn = _find_submit_button(page)
-            if submit_btn:
-                try:
-                    submit_btn.click()
-                    logger.log(
-                        "click",
-                        "Submit/Next button",
-                        reasoning="No fields to fill, advancing",
-                        confidence="high",
-                    )
-                    page.wait_for_timeout(3000)
-                    continue
-                except Exception:
-                    pass
-            logger.log(
-                "skip",
-                "page",
-                reasoning="No actions and no submit button",
-                confidence="uncertain",
-            )
-            page.wait_for_timeout(2000)
+            _handle_no_actions(page, logger)
             continue
 
         # Execute fill/click actions (AI no longer returns submit clicks)
