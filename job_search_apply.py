@@ -575,7 +575,8 @@ def _playwright_context(p, proxy: Optional[str] = None, headed: bool = False):
     advanced anti-bot fingerprinting (e.g. DataDome).
     """
     # Try connecting to an already-running Chromium (preserves live LinkedIn session)
-    if not headed:
+    # Skip CDP when a proxy is specified — CDP browser doesn't route through it.
+    if not headed and not proxy:
         try:
             browser = p.chromium.connect_over_cdp(CDP_URL)
             context = browser.contexts[0] if browser.contexts else browser.new_context()
