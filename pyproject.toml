@@ -29,5 +29,5 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 
 [tool.bandit]
-skips = ["B110", "B112", "B310", "B311"]  # B110/B112: try/except/pass intentional; B310: urlopen on hardcoded API URLs; B311: random for timing jitter, not crypto
+skips = ["B110", "B112", "B310", "B311", "B404", "B603", "B607"]  # B110/B112: try/except/pass intentional; B310: urlopen on hardcoded API URLs; B311: random for timing jitter, not crypto; B404/B603/B607: Xvfb subprocess launch with hardcoded args
 exclude_dirs = ["tests"]

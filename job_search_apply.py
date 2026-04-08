@@ -227,6 +227,7 @@ class ApplicantProfile:
     auto_create_accounts: bool = False
     captcha_api_key: Optional[str] = None
     captcha_service: str = "2captcha"
+    proxy_rules: Dict[str, str] = field(default_factory=dict)  # ATS domain → proxy URL
 
     @classmethod
     def from_dict(cls, data: dict) -> "ApplicantProfile":
@@ -294,6 +295,7 @@ class ApplicantProfile:
             ),
             captcha_api_key=p.get("application_settings", {}).get("captcha_api_key"),
             captcha_service=p.get("application_settings", {}).get("captcha_service", "2captcha"),
+            proxy_rules=p.get("application_settings", {}).get("proxy_rules", {}),
         )
 
     @classmethod
@@ -538,37 +540,65 @@ def _stealth_playwright():
     return sync_playwright()
 
 
-def _playwright_context(p, proxy: Optional[str] = None):
+def _resolve_proxy(
+    url: str,
+    proxy_rules: Dict[str, str],
+    cli_proxy: Optional[str] = None,
+    extra_urls: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Pick a proxy for *url* based on per-ATS rules, falling back to CLI proxy.
+
+    Also checks *extra_urls* (e.g. listing_url, description URLs) so that
+    LinkedIn->SmartRecruiters redirects get the right proxy upfront.
+    """
+    if proxy_rules:
+        from urllib.parse import urlparse
+
+        all_urls = [url] + (extra_urls or [])
+        for check_url in all_urls:
+            host = urlparse(check_url).hostname or ""
+            for pattern, proxy_url in proxy_rules.items():
+                if pattern in host:
+                    log.debug("Proxy rule matched: %s -> %s", pattern, proxy_url)
+                    return proxy_url
+    return cli_proxy
+
+
+def _playwright_context(p, proxy: Optional[str] = None, headed: bool = False):
     """
     Connect to an existing Chromium via CDP if available, otherwise launch a new one.
 
     Returns (browser, context, page, owns_browser) where owns_browser is False
     when connected via CDP (caller must NOT close the browser).
+
+    *headed* launches a visible browser (use with Xvfb on servers) which bypasses
+    advanced anti-bot fingerprinting (e.g. DataDome).
     """
     # Try connecting to an already-running Chromium (preserves live LinkedIn session)
-    try:
-        browser = p.chromium.connect_over_cdp(CDP_URL)
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
-        page = context.new_page()
-        log.debug("Connected to existing Chromium via CDP (%s)", CDP_URL)
-        return browser, context, page, False
-    except Exception:  # noqa: S110
-        log.debug("CDP connection unavailable, falling back to standalone browser")
+    if not headed:
+        try:
+            browser = p.chromium.connect_over_cdp(CDP_URL)
+            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = context.new_page()
+            log.debug("Connected to existing Chromium via CDP (%s)", CDP_URL)
+            return browser, context, page, False
+        except Exception:  # noqa: S110
+            log.debug("CDP connection unavailable, falling back to standalone browser")
 
-    # Fallback: launch a standalone headless browser with stored cookies
+    # Fallback: launch a standalone browser with stored cookies
     opts = {}
     if SESSION_FILE.exists():
         opts["storage_state"] = str(SESSION_FILE)
     if proxy:
         opts["proxy"] = {"server": proxy}
 
-    # Use new headless mode ("new" arg) — harder to fingerprint than old headless
+    launch_args = ["--disable-blink-features=AutomationControlled"]
+    if not headed:
+        launch_args.insert(0, "--headless=new")
+
     browser = p.chromium.launch(
-        headless=True,
-        args=[
-            "--headless=new",
-            "--disable-blink-features=AutomationControlled",
-        ],
+        headless=not headed,
+        args=launch_args,
     )
     # Randomize viewport slightly so sessions aren't identical
     vp_w = random.randint(1260, 1380)
@@ -587,7 +617,8 @@ def _playwright_context(p, proxy: Optional[str] = None):
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
         """)
     page = context.new_page()
-    log.debug("Launched standalone headless Chromium (cookie file)")
+    mode = "headed (Xvfb)" if headed else "headless"
+    log.debug("Launched standalone %s Chromium (cookie file)", mode)
     return browser, context, page, True
 
 
@@ -2442,12 +2473,12 @@ def _dismiss_all_typeaheads(page) -> None:
 
 def _safe_click(element, page) -> None:
     """Click an element, falling back to JS click if Playwright's actionability check fails."""
-    # Brief pre-click pause — humans don't click at machine speed
+    # Brief pre-click pause -- humans don't click at machine speed
     page.wait_for_timeout(random.randint(200, 800))
     try:
         element.click(timeout=5000)
     except Exception:
-        # Overlay still blocking — try JS click which bypasses interception checks
+        # Overlay still blocking -- try JS click which bypasses interception checks
         try:
             element.evaluate("el => el.click()")
         except Exception as exc:
@@ -2585,16 +2616,18 @@ def _get_field_label(page, element) -> str:
     """Get the label text for a form field element."""
     # Try multiple strategies to find the label text
     label_text = element.evaluate("""el => {
+        // Use getRootNode() to pierce Shadow DOM when looking up labels
+        const root = el.getRootNode() || document;
         // Strategy 1: label[for] via DOM query (handles special chars in ID)
         const id = el.id;
         if (id) {
-            const lbl = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+            const lbl = root.querySelector('label[for="' + CSS.escape(id) + '"]');
             if (lbl) return lbl.innerText;
         }
         // Strategy 2: aria-labelledby
         const lblBy = el.getAttribute('aria-labelledby');
         if (lblBy) {
-            const ref = document.getElementById(lblBy);
+            const ref = (root.getElementById ? root : document).getElementById(lblBy);
             if (ref) return ref.innerText;
         }
         // Strategy 3: walk up to find a sibling or parent label (LinkedIn + generic ATS)
@@ -3629,14 +3662,38 @@ def _attempt_ats_login(page, domain: str) -> bool:
     log.info(f"   🔑 Found stored account for {domain}, attempting login")
 
     try:
+        # If on a Create Account page, navigate to Sign In first
+        # (e.g. Workday shows "Already have an account? Sign In")
+        body_text = page.evaluate("document.body?.innerText?.slice(0, 3000) || ''").lower()
+        if "create account" in body_text and "already have an account" in body_text:
+            # Find the "Sign In" link adjacent to "Already have an account?" text.
+            # Must NOT match the header Sign In button (which opens a modal instead).
+            signin_link = page.evaluate_handle("""() => {
+                const texts = document.querySelectorAll('*');
+                for (const el of texts) {
+                    if (el.textContent?.includes('Already have an account')
+                        && el.children?.length <= 3) {
+                        const btn = el.querySelector('button, a');
+                        if (btn && /sign.in/i.test(btn.textContent)) return btn;
+                    }
+                }
+                // Fallback: Sign In button inside main content (not header/banner)
+                return document.querySelector('main button:has-text("Sign In")');
+            }""").as_element()
+            if signin_link and signin_link.is_visible():
+                log.info("   🔗 Clicking 'Sign In' to switch from Create Account")
+                _safe_click(signin_link, page)
+                page.wait_for_timeout(3000)
+
         # Find and fill email/username field
         email_field = page.query_selector(
             "input[type='email'], input[name*='email'], input[name*='user'], "
             "input[id*='email'], input[id*='user'], input[autocomplete='email'], "
-            "input[autocomplete='username']"
+            "input[autocomplete='username'], "
+            "input[data-automation-id='email']"  # Workday
         )
         if not email_field:
-            log.debug("No email/username field found for ATS login")
+            log.debug("No email/username field found for ATS login (title=%s)", page.title())
             return False
         email_field.fill(acct["email"])
 
@@ -3647,17 +3704,33 @@ def _attempt_ats_login(page, domain: str) -> bool:
             return False
         pass_field.fill(acct["password"])
 
-        # Find and click login/sign-in button
+        # Find and click login/sign-in button.
+        # Workday uses click_filter overlay divs that intercept pointer events;
+        # check for these FIRST (separate query) since query_selector returns
+        # by DOM order and the overlay sits after the button it covers.
         login_btn = page.query_selector(
-            "button[type='submit'], button:has-text('Log in'), button:has-text('Sign in'), "
-            "button:has-text('Login'), input[type='submit']"
+            "div[data-automation-id='click_filter'][aria-label='Sign In'], "
+            "div[data-automation-id='click_filter'][aria-label='Log In']"
         )
+        if not login_btn:
+            login_btn = page.query_selector(
+                "main button:has-text('Sign in'), form button:has-text('Sign in'), "
+                "main button:has-text('Log in'), form button:has-text('Log in'), "
+                "main button:has-text('Login'), form button:has-text('Login'), "
+                "button[data-automation-id='signInSubmitButton'], "
+                "button:has-text('Sign in'), button:has-text('Log in'), "
+                "button:has-text('Login'), "
+                "button[type='submit'], input[type='submit']"
+            )
         if login_btn:
             _safe_click(login_btn, page)
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(5000)
 
             # Check if login succeeded (no longer on login page)
-            if not any(p in page.url.lower() for p in ("login", "signin", "sign-in", "/auth")):
+            still_has_password = page.query_selector("input[type='password']:visible")
+            if not still_has_password and not any(
+                p in page.url.lower() for p in ("login", "signin", "sign-in", "/auth")
+            ):
                 log.info("   ✅ ATS login succeeded")
                 return True
 
@@ -3866,18 +3939,28 @@ def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
     if not _handle_registration_verification(page, profile):
         return False
 
-    # Step 4: Check outcome
+    # Step 4: Check outcome — use both URL and page content to detect failure
     page.wait_for_timeout(2000)
+    body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
     still_login = any(
         p in page.url.lower() for p in ("login", "signin", "sign-in", "register", "/auth")
     )
-    if still_login:
-        body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
-        if any(s in body for s in ("already exists", "already registered")):
+    # Also check page content for signs we're still on a login/registration page
+    has_password_field = bool(page.query_selector("input[type='password']:visible"))
+    if still_login or has_password_field:
+        if any(
+            s in body
+            for s in (
+                "already exists",
+                "already registered",
+                "account with that email",
+                "email is already",
+            )
+        ):
             log.info("   ℹ️ Account already exists for %s, trying login", domain)
             return _attempt_ats_login(page, domain)
         if not any(s in body for s in ("account created", "registration successful", "welcome")):
-            log.info("   ⚠️ Registration may not have succeeded")
+            log.info("   ⚠️ Registration may not have succeeded (password field still visible)")
             return False
         page.wait_for_timeout(3000)
 
@@ -4095,10 +4178,23 @@ def _extract_page_snapshot(page, max_chars: int = 8000) -> str:
             const lines = [];
             const seen = new Set();
 
+            // Pierce Shadow DOM: recursively collect elements matching selector
+            function deepQueryAll(selector, root) {
+                const results = [...root.querySelectorAll(selector)];
+                const allEls = root.querySelectorAll('*');
+                for (const el of allEls) {
+                    if (el.shadowRoot) {
+                        results.push(...deepQueryAll(selector, el.shadowRoot));
+                    }
+                }
+                return results;
+            }
+
             function getLabel(el) {
+                const root = el.getRootNode();
                 // label[for=id]
                 if (el.id) {
-                    const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                    const lbl = root.querySelector('label[for="' + CSS.escape(el.id) + '"]');
                     if (lbl) return lbl.innerText.trim();
                 }
                 // aria-label
@@ -4106,7 +4202,7 @@ def _extract_page_snapshot(page, max_chars: int = 8000) -> str:
                 // aria-labelledby
                 const lblBy = el.getAttribute('aria-labelledby');
                 if (lblBy) {
-                    const ref = document.getElementById(lblBy);
+                    const ref = (root.getElementById ? root : document).getElementById(lblBy);
                     if (ref) return ref.innerText.trim();
                 }
                 // walk up to find label in parent
@@ -4126,15 +4222,18 @@ def _extract_page_snapshot(page, max_chars: int = 8000) -> str:
             }
 
             function isVisible(el) {
-                const style = window.getComputedStyle(el);
-                return style.display !== 'none' && style.visibility !== 'hidden'
-                    && el.offsetWidth > 0;
+                try {
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden'
+                        && el.offsetWidth > 0;
+                } catch(e) { return false; }
             }
 
-            const els = document.querySelectorAll(
+            const els = deepQueryAll(
                 'input, select, textarea, [role="combobox"], [role="listbox"], '
                 + '[contenteditable="true"], button[type="submit"], '
-                + 'button:not([type="button"]):not([aria-hidden="true"])'
+                + 'button:not([type="button"]):not([aria-hidden="true"])',
+                document
             );
             for (const el of els) {
                 if (!isVisible(el)) continue;
@@ -5364,11 +5463,15 @@ def _find_navigation_button(page):  # noqa: C901
         "Next step",
     ]
 
+    # Skip third-party apply buttons (Indeed, LinkedIn Easy Apply, etc.)
+    _THIRD_PARTY_KEYWORDS = ("indeed", "linkedin", "glassdoor")
     for text in submit_texts:
         try:
             btn = page.query_selector(f"button:has-text('{text}')")
             if btn and btn.is_visible():
-                return ("submit", btn)
+                btn_text = (btn.inner_text() or "").strip().lower()
+                if not any(kw in btn_text for kw in _THIRD_PARTY_KEYWORDS):
+                    return ("submit", btn)
         except Exception:
             continue
 
@@ -5383,9 +5486,9 @@ def _find_navigation_button(page):  # noqa: C901
     try:
         btn = page.query_selector("button[type='submit']")
         if btn and btn.is_visible():
-            # Check it's not a login submit
             text = (btn.inner_text() or "").strip().lower()
-            if text not in ("sign in", "log in", "login"):
+            _skip_btn_texts = ("sign in", "log in", "login", "cookie", "cookies")
+            if not any(s in text for s in _skip_btn_texts):
                 return ("submit", btn)
     except Exception:
         pass
@@ -5442,6 +5545,18 @@ def _find_navigation_button(page):  # noqa: C901
             return ("submit", btn)
     except Exception:  # noqa: S110
         pass
+
+    # Web Components / Shadow DOM fallback using Playwright's role-based locator
+    # (pierces custom elements like SmartRecruiters' <spl-button>)
+    # Search next_texts first to avoid matching third-party apply buttons
+    for text in next_texts + submit_texts:
+        try:
+            loc = page.get_by_role("button", name=text, exact=True)
+            if loc.count() > 0 and loc.first.is_visible():
+                role = "next" if text in next_texts else "submit"
+                return (role, loc.first)
+        except Exception:  # noqa: S112
+            continue
 
     # AI vision fallback: screenshot the page and ask Claude to find the button
     if _AI_AVAILABLE:
@@ -5562,6 +5677,25 @@ def _navigate_external_form(  # noqa: C901
     fields_filled_total = 0
     captcha_solved_urls: set = set()  # track URLs where we already solved a CAPTCHA
     uploaded_files: set = set()  # track file uploads across steps to prevent re-uploads
+    login_resolved = False  # set True after login/account creation succeeds once
+
+    # Detect iframe-based forms (e.g. SmartRecruiters /oneclick-ui/)
+    # If main page has no visible inputs but an iframe does, switch to that frame.
+    main_inputs = page.query_selector_all("input:not([type=hidden]), textarea, select")
+    if not main_inputs:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                frame_inputs = frame.query_selector_all(
+                    "input:not([type=hidden]), textarea, select"
+                )
+                if len(frame_inputs) >= 2:
+                    log.debug("Form is inside iframe (%s), switching context", frame.url[:60])
+                    page = frame  # type: ignore[assignment]
+                    break
+            except Exception:  # noqa: S110
+                pass
 
     for step in range(_MAX_EXTERNAL_STEPS):
         page.wait_for_timeout(1500)
@@ -5570,9 +5704,15 @@ def _navigate_external_form(  # noqa: C901
         _final_ats_url = page.url
 
         # Login wall check on every step (some sites redirect mid-form)
-        if _is_login_wall(page, profile):
-            log.info(f"   🔒 Requires account: {page.url[:60]}")
-            return "skipped: requires account"
+        # Skip if we already resolved login/account for this session to prevent
+        # false re-detection (e.g. Workday keeps password fields in page HTML).
+        if not login_resolved:
+            if _is_login_wall(page, profile):
+                log.info(f"   🔒 Requires account: {page.url[:60]}")
+                return "skipped: requires account"
+            if _detect_login_page(page):
+                # _is_login_wall returned False = login was resolved
+                login_resolved = True
 
         # CAPTCHA detection — attempt solve up to 2 times per page URL
         captcha_info = _detect_captcha(page)
@@ -5639,7 +5779,9 @@ def _navigate_external_form(  # noqa: C901
         log.debug("   Page classification: %s", classification.get("notes", ""))
 
         if classification["page_type"] == "login" or classification.get("has_required_login"):
-            return "skipped: requires account"
+            # Workday shows "Sign In" but allows apply without account
+            if "myworkdayjobs.com" not in page.url:
+                return "skipped: requires account"
 
         if classification["page_type"] == "confirmation":
             return "submitted"
@@ -5649,8 +5791,18 @@ def _navigate_external_form(  # noqa: C901
             return "failed: ATS error page"
 
         if classification["page_type"] == "job_search":
-            log.info("   ⏭  Page is a job search/listing page, not an application form")
-            return "failed: landed on job search page instead of application form"
+            # Check for Apply button before bailing -- Workday job listing pages
+            # are often classified as "job_search" but have a clickable Apply button
+            _has_apply = page.query_selector(
+                "a[data-automation-id='jobPostingApplyButton'], "
+                "a[data-automation-id='adventureButton'], "
+                "button[data-automation-id='adventureButton'], "
+                "a:has-text('Apply'):not(:has-text('Indeed'))"
+            )
+            if not _has_apply:
+                log.info("   ⏭  Page is a job search/listing page, not an application form")
+                return "failed: landed on job search page instead of application form"
+            log.info("   🔗 Job listing page with Apply button detected, proceeding...")
 
         # Also catch job search pages by URL pattern (fast path, no AI needed)
         _url_lower = page.url.lower()
@@ -5708,7 +5860,10 @@ def _navigate_external_form(  # noqa: C901
             apply_btn = page.query_selector(
                 "a[data-automation-id='jobPostingApplyButton'], "
                 "button[data-automation-id='jobPostingApplyButton'], "
-                "a:has-text('Apply'), button:has-text('Apply'), "
+                "a[data-automation-id='adventureButton'], "
+                "button[data-automation-id='adventureButton'], "
+                "a:has-text('Apply'):not(:has-text('Indeed')), "
+                "button:has-text('Apply'):not(:has-text('Indeed')), "
                 "a[href*='/apply'], "
                 "a.css-1ixbfil, "  # Workday apply button class
                 "a[data-uxi-element-id='Apply']"
@@ -6006,9 +6161,10 @@ def _navigate_external_form(  # noqa: C901
                         # Recheck — page may have navigated to login wall
                         # _is_login_wall may resolve it (guest bypass, login,
                         # account creation) — if so, continue the form loop
-                        if _detect_login_page(page):
+                        if not login_resolved and _detect_login_page(page):
                             resolved = _resolve_login_wall(page, profile)
                             if resolved:
+                                login_resolved = True
                                 stalled = 0
                                 fields_filled_total = 0
                                 continue  # retry from the new page state
@@ -6050,8 +6206,32 @@ def submit_external_apply(  # noqa: C901
     except ImportError:
         raise RuntimeError("Playwright not installed") from None
 
+    # Resolve per-ATS proxy (e.g. SmartRecruiters through residential proxy)
+    extra_urls = [u for u in [job.get("listing_url"), job.get("apply_url")] if u]
+    effective_proxy = _resolve_proxy(job["url"], profile.proxy_rules, proxy, extra_urls)
+    use_headed = effective_proxy and effective_proxy != proxy
+    if use_headed:
+        log.info("   🔀 Using per-ATS proxy + headed mode for %s", job["url"][:60])
+
+    # Start virtual display for headed mode on headless servers
+    xvfb_proc = None
+    if use_headed and not os.environ.get("DISPLAY"):
+        import subprocess
+
+        xvfb_display = f":{random.randint(99, 199)}"
+        xvfb_proc = subprocess.Popen(  # noqa: S603
+            ["Xvfb", xvfb_display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.environ["DISPLAY"] = xvfb_display
+        time.sleep(0.5)
+        log.debug("Started Xvfb on %s", xvfb_display)
+
     with _stealth_playwright() as p:
-        browser, context, page, owns_browser = _playwright_context(p, proxy)
+        browser, context, page, owns_browser = _playwright_context(
+            p, effective_proxy, headed=use_headed
+        )
         try:
             page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(2000)
@@ -6104,6 +6284,31 @@ def submit_external_apply(  # noqa: C901
                     except Exception:  # noqa: S110
                         pass
 
+            # SmartRecruiters job listing: navigate to /oneclick-ui/ application form
+            if "smartrecruiters.com" in page.url and "/oneclick-ui/" not in page.url:
+                sr_link = page.query_selector(
+                    "a.js-o-ats-btn[href*='oneclick-ui'], a[href*='oneclick-ui']"
+                )
+                if sr_link:
+                    sr_href = sr_link.get_attribute("href")
+                    if sr_href:
+                        log.debug("SmartRecruiters: navigating to %s", sr_href[:80])
+                        page.goto(sr_href, wait_until="domcontentloaded", timeout=20000)
+                        page.wait_for_timeout(3000)
+
+            # DataDome anti-bot: retry if slider CAPTCHA appears (intermittent)
+            if "smartrecruiters.com" in page.url:
+                body_check = page.content()[:4000].lower()
+                if "captcha-delivery" in body_check or "verification required" in body_check:
+                    log.info("   🛡️  DataDome challenge detected, waiting and retrying...")
+                    page.wait_for_timeout(5000)
+                    page.reload(wait_until="domcontentloaded", timeout=20000)
+                    page.wait_for_timeout(3000)
+                    body_check = page.content()[:4000].lower()
+                    if "captcha-delivery" in body_check or "verification required" in body_check:
+                        _dump_form_debug(page, job.get("id", ""), "DataDome anti-bot")
+                        return "failed: anti-bot challenge (DataDome)"
+
             # Wait for JS rendering and dismiss cookie banners
             _wait_and_dismiss_cookies(page)
 
@@ -6132,6 +6337,11 @@ def submit_external_apply(  # noqa: C901
                     pass
             if owns_browser:
                 browser.close()
+            if xvfb_proc:
+                xvfb_proc.terminate()
+                xvfb_proc.wait()
+                os.environ.pop("DISPLAY", None)
+                log.debug("Stopped Xvfb")
 
 
 def load_log() -> List[Dict]:

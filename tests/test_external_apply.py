@@ -223,11 +223,18 @@ class TestAttemptAtsLogin:
         pass_f = MagicMock()
         login_btn = MagicMock()
 
+        # page.evaluate() is called to read body text for Create Account detection
+        page.evaluate.return_value = "Sign in to your account"
+
         def qs(selector):
             if "email" in selector.lower() or "user" in selector.lower():
                 return email_f
+            if "password" in selector and "visible" in selector:
+                return None  # no visible password field = login succeeded
             if "password" in selector:
                 return pass_f
+            if "click_filter" in selector:
+                return None  # no Workday overlay
             if "submit" in selector.lower() or "log in" in selector.lower():
                 return login_btn
             return None
