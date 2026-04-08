@@ -929,7 +929,10 @@ def _navigate_linkedin_to_ats(page, context, url, logger):
 
 
 def _find_submit_button(page) -> Optional[object]:
-    """Find a Submit, Next, or Continue button on the page."""
+    """Find a Submit, Next, or Continue button on the page.
+
+    Scrolls to the button if found off-screen.
+    """
     selectors = [
         'button[type="submit"]',
         'input[type="submit"]',
@@ -944,7 +947,15 @@ def _find_submit_button(page) -> Optional[object]:
     for sel in selectors:
         try:
             btn = page.query_selector(sel)
-            if btn and btn.is_visible():
+            if not btn:
+                continue
+            # Scroll into view first -- button may be below the fold
+            try:
+                btn.scroll_into_view_if_needed(timeout=2000)
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
+            if btn.is_visible():
                 return btn
         except Exception:
             continue
@@ -975,6 +986,15 @@ def _auto_upload_files(
                 if (parent) label += ' ' + (parent.textContent || '').substring(0, 200);
                 return label.toLowerCase();
             }""")
+            # Skip photo/image/avatar upload fields (they expect images, not PDFs)
+            is_photo = any(
+                kw in input_label
+                for kw in ("photo", "avatar", "headshot", "picture", "image upload")
+            )
+            accept_attr = file_input.evaluate("e => e.getAttribute('accept') || ''")
+            if is_photo or (accept_attr and "image" in accept_attr and "pdf" not in accept_attr):
+                continue
+
             is_cover_letter = any(
                 kw in input_label for kw in ("cover letter", "cover_letter", "coverletter")
             )
@@ -1145,10 +1165,103 @@ def _handle_no_actions(page, logger: DecisionLogger) -> None:
     page.wait_for_timeout(2000)
 
 
+def _clear_errored_uploads(page) -> None:
+    """Remove errored file uploads (e.g. PDF uploaded to photo field)."""
+    # Look for remove/X buttons near file upload error indicators
+    for btn in page.query_selector_all('[data-ui="avatar"] ~ button, [data-ui="avatar"] button'):
+        try:
+            text = btn.text_content() or ""
+            if "x" in text.lower() or "remove" in text.lower() or "clear" in text.lower():
+                btn.click()
+                page.wait_for_timeout(500)
+        except Exception:
+            continue
+    # Generic: click X buttons inside file upload wrappers that have error indicators
+    for wrapper in page.query_selector_all('[class*="error"], [class*="invalid"]'):
+        try:
+            close = wrapper.query_selector(
+                'button[aria-label="Remove"], button[aria-label="Close"]'
+            )
+            if close:
+                close.click()
+                page.wait_for_timeout(500)
+        except Exception:
+            continue
+
+
+def _dismiss_cookie_banner(page) -> bool:
+    """Dismiss cookie consent banners that block page interaction."""
+    selectors = [
+        'button:has-text("Accept all")',
+        'button:has-text("Accept All")',
+        'button:has-text("Accept Cookies")',
+        'button:has-text("I Accept")',
+        'button:has-text("Got it")',
+        'button:has-text("OK")',
+        '[id*="cookie"] button:has-text("Accept")',
+        '[class*="cookie"] button:has-text("Accept")',
+        '[id*="consent"] button:has-text("Accept")',
+    ]
+    for sel in selectors:
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(1000)
+                log.info("Dismissed cookie banner via: %s", sel)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _fix_corrupted_fields(page, profile: ApplicantProfile, logger: DecisionLogger) -> bool:
+    """Detect and fix form fields with corrupted values (e.g. autocomplete contamination).
+
+    Returns True if any field was fixed.
+    """
+    fixed = False
+    for el in page.query_selector_all("input:not([type=hidden]):not([type=file])"):
+        try:
+            info = el.evaluate("""e => ({
+                ref: e.getAttribute('data-qa-ref') || '',
+                value: e.value || '',
+                type: e.getAttribute('type') || 'text',
+                label: (e.getAttribute('aria-label') || e.getAttribute('name') ||
+                        e.getAttribute('placeholder') || '').toLowerCase(),
+            })""")
+            val = info["value"]
+            # Corrupted: non-textarea input with >120 chars, or contains incrementally
+            # repeated substrings (autocomplete contamination pattern)
+            if info["type"] not in ("email", "url") and len(val) > 120:
+                # Try to get the correct value from profile
+                label = info["label"]
+                correct = _match_field_to_profile(label, profile) if label else None
+                if correct:
+                    ref = info["ref"]
+                    if ref:
+                        _fill_field(page, ref, correct)
+                        logger.log(
+                            "fill_field",
+                            label,
+                            correct,
+                            f"Fixed corrupted value ({len(val)} chars)",
+                            "high",
+                        )
+                        fixed = True
+        except Exception:
+            continue
+    return fixed
+
+
 def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path, job_id, logger):
     """Core form-filling loop. Returns a status string."""
     same_page_count = 0
     last_page_snapshot = ""
+
+    # Dismiss any cookie/consent banners and clear errored uploads
+    _dismiss_cookie_banner(page)
+    _clear_errored_uploads(page)
 
     for _ in range(MAX_TOTAL_STEPS):
         if _detect_submission_success(page):
@@ -1190,6 +1303,9 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
             logger.log("abort", "page", reasoning="Empty page snapshot", confidence="high")
             _save_debug_snapshot(page, job_id, "empty_snapshot")
             return "failed: empty page snapshot"
+
+        # Fix corrupted values from prior attempts (no-op after first fix)
+        _fix_corrupted_fields(page, profile, logger)
 
         # Detect stall by comparing snapshot content (not URL, since SPA URLs don't change)
         if snapshot == last_page_snapshot:
@@ -1238,6 +1354,34 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
     return f"failed: {reason}"
 
 
+def _clear_domain_cookies(context, url: str) -> None:
+    """Clear cookies for the domain of the given URL to get a fresh form state.
+
+    Never clears LinkedIn cookies (needed for session auth).
+    """
+    try:
+        from urllib.parse import urlparse
+
+        domain = urlparse(url).hostname or ""
+        parts = domain.split(".")
+        parent = ".".join(parts[-2:]) if len(parts) > 2 else domain
+
+        # Safety: never clear LinkedIn session cookies
+        if "linkedin.com" in parent:
+            return
+
+        cookies = context.cookies()
+        to_clear = [c for c in cookies if parent in (c.get("domain", ""))]
+        if to_clear:
+            context.clear_cookies()
+            keep = [c for c in cookies if parent not in (c.get("domain", ""))]
+            if keep:
+                context.add_cookies(keep)
+            log.info("Cleared %d cookies for domain %s", len(to_clear), parent)
+    except Exception as e:
+        log.warning("Failed to clear domain cookies: %s", e)
+
+
 def process_application(
     queue_entry: Dict,
     profile: ApplicantProfile,
@@ -1254,6 +1398,7 @@ def process_application(
     resume_path = getattr(profile, "resume_path", "")
     cover_letter_path = (queue_entry.get("pre_computed") or {}).get("cover_letter_path", "")
     logger = DecisionLogger()
+    is_retry = queue_entry.get("q2_attempts", 0) > 0
 
     log.info("Processing: %s at %s (%s)", title, company, url)
     logger.log("navigate", url, reasoning="Starting application", confidence="high")
@@ -1268,6 +1413,14 @@ def process_application(
             page, nav_status = _navigate_linkedin_to_ats(page, context, url, logger)
             if nav_status:
                 return nav_status
+
+            # Clear ATS domain cookies on retries (after ATS navigation)
+            if is_retry:
+                ats_url = page.url
+                if ats_url != url:
+                    _clear_domain_cookies(context, ats_url)
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(3000)
 
             return _run_page_loop(
                 page, profile, title, company, resume_path, cover_letter_path, job_id, logger

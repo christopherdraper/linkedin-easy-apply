@@ -3019,10 +3019,39 @@ def _detect_captcha(page) -> Optional[Dict[str, str]]:
             // Cloudflare Turnstile
             const cfFrame = document.querySelector('iframe[src*="challenges.cloudflare"]');
             const cfDiv = document.querySelector('.cf-turnstile, [data-turnstile-sitekey]');
-            if (cfFrame || cfDiv) {
+            const cfScript = document.querySelector(
+                'script[src*="challenges.cloudflare.com/turnstile"]'
+            );
+            // Also detect rendered Turnstile widget (dynamically created, no static class)
+            const cfWidget = document.querySelector(
+                '[id*="turnstile"], [class*="turnstile"]'
+            );
+            if (cfFrame || cfDiv || cfScript || cfWidget) {
                 let sitekey = '';
                 if (cfDiv) sitekey = cfDiv.getAttribute('data-sitekey')
                     || cfDiv.getAttribute('data-turnstile-sitekey') || '';
+                // Try extracting sitekey from turnstile render calls
+                if (!sitekey && window.turnstile && window.turnstile._configs) {
+                    try {
+                        for (const [k, v] of Object.entries(window.turnstile._configs)) {
+                            if (v.sitekey) { sitekey = v.sitekey; break; }
+                        }
+                    } catch(e) {}
+                }
+                // Try extracting from script data attributes or nearby elements
+                if (!sitekey) {
+                    const allDivs = document.querySelectorAll('[data-sitekey]');
+                    for (const d of allDivs) {
+                        sitekey = d.getAttribute('data-sitekey') || '';
+                        if (sitekey) break;
+                    }
+                }
+                // Extract from inline config (e.g. Workable's turnstileWidgetSiteKey)
+                if (!sitekey) {
+                    const html = document.documentElement.innerHTML;
+                    const m = html.match(/turnstile[a-zA-Z]*(?:Site)?Key["\\s:]+["']?(0x[0-9a-fA-F]+)/i);
+                    if (m) sitekey = m[1];
+                }
                 return {type: 'turnstile', sitekey};
             }
             // Generic text-based detection (no sitekey available)
