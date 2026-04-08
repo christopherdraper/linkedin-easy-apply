@@ -3049,7 +3049,7 @@ def _detect_captcha(page) -> Optional[Dict[str, str]]:
                 // Extract from inline config (e.g. Workable's turnstileWidgetSiteKey)
                 if (!sitekey) {
                     const html = document.documentElement.innerHTML;
-                    const m = html.match(/turnstile[a-zA-Z]*(?:Site)?Key["\\s:]+["']?(0x[0-9a-fA-F]+)/i);
+                    const m = html.match(/turnstile[a-zA-Z]*(?:Site)?Key["\\s:]+["']?(0x[0-9a-zA-Z_-]+)/i);
                     if (m) sitekey = m[1];
                 }
                 return {type: 'turnstile', sitekey};

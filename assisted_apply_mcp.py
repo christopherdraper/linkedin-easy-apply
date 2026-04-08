@@ -1080,6 +1080,14 @@ def _handle_captcha(page, profile: ApplicantProfile, logger: DecisionLogger) -> 
             confidence="high",
         )
         page.wait_for_timeout(2000)
+        # Try clicking submit after CAPTCHA solve to advance past the challenge
+        submit_btn = _find_submit_button(page)
+        if submit_btn:
+            try:
+                _robust_click(submit_btn, page)
+                page.wait_for_timeout(3000)
+            except Exception:
+                pass
         return True
     logger.log("abort", "CAPTCHA", reasoning="CAPTCHA solve failed", confidence="high")
     return False
@@ -1258,6 +1266,7 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
     """Core form-filling loop. Returns a status string."""
     same_page_count = 0
     last_page_snapshot = ""
+    captcha_attempts = 0
 
     # Dismiss any cookie/consent banners and clear errored uploads
     _dismiss_cookie_banner(page)
@@ -1287,8 +1296,9 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
             )
             return f"failed: {rejection}"
 
-        # CAPTCHA detection + solving via 2captcha/capsolver
-        if _handle_captcha(page, profile, logger):
+        # CAPTCHA detection + solving (max 2 attempts to avoid burning credits)
+        if captcha_attempts < 2 and _handle_captcha(page, profile, logger):
+            captcha_attempts += 1
             continue
 
         # Login wall detection + account creation/login
