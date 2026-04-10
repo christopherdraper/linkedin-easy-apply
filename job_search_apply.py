@@ -564,6 +564,36 @@ def _resolve_proxy(
     return cli_proxy
 
 
+def _inject_session_cookies_if_needed(context) -> None:
+    """Inject stored LinkedIn session cookies into a CDP context if auth is missing.
+
+    When connecting to a shared Chromium via CDP, the context may lack the li_at
+    authentication cookie, causing pages to render in guest/public mode. This
+    loads cookies from the stored session file to restore authentication.
+    """
+    try:
+        existing = context.cookies("https://www.linkedin.com")
+        has_auth = any(c["name"] == "li_at" for c in existing)
+        if has_auth:
+            return
+        if not SESSION_FILE.exists():
+            log.debug("No session file to inject cookies from")
+            return
+        session_data = json.loads(SESSION_FILE.read_text())
+        cookies = session_data.get("cookies", [])
+        if not cookies:
+            return
+        # Filter to LinkedIn cookies only
+        li_cookies = [c for c in cookies if ".linkedin.com" in c.get("domain", "")]
+        if li_cookies:
+            context.add_cookies(li_cookies)
+            log.debug(
+                "Injected %d LinkedIn cookies from session file into CDP context", len(li_cookies)
+            )
+    except Exception as exc:
+        log.debug("Cookie injection failed (non-critical): %s", exc)
+
+
 def _playwright_context(p, proxy: Optional[str] = None, headed: bool = False):
     """
     Connect to an existing Chromium via CDP if available, otherwise launch a new one.
@@ -575,11 +605,13 @@ def _playwright_context(p, proxy: Optional[str] = None, headed: bool = False):
     advanced anti-bot fingerprinting (e.g. DataDome).
     """
     # Try connecting to an already-running Chromium (preserves live LinkedIn session)
-    # Skip CDP when a proxy is specified — CDP browser doesn't route through it.
+    # Skip CDP when a proxy is specified -- CDP browser doesn't route through it.
     if not headed and not proxy:
         try:
             browser = p.chromium.connect_over_cdp(CDP_URL)
             context = browser.contexts[0] if browser.contexts else browser.new_context()
+            # Inject stored session cookies if CDP context is missing LinkedIn auth
+            _inject_session_cookies_if_needed(context)
             page = context.new_page()
             log.debug("Connected to existing Chromium via CDP (%s)", CDP_URL)
             return browser, context, page, False
@@ -644,18 +676,16 @@ def _fetch_description(context, url: str) -> tuple:
         )
 
         text = desc_page.evaluate("""() => {
-            // Find the 'About the job' heading and collect all text after it
+            // Authenticated view: find the 'About the job' heading
             const all = [...document.querySelectorAll('*')];
             for (const el of all) {
                 if (el.children.length === 0 && el.innerText?.trim() === 'About the job') {
-                    // Walk up to find the section container, then grab following siblings
                     let container = el;
                     for (let i = 0; i < 5; i++) {
                         if (!container.parentElement) break;
                         if (container.nextElementSibling) break;
                         container = container.parentElement;
                     }
-                    // Collect text from this container and its following siblings
                     let parts = [];
                     let node = container.nextElementSibling || container.parentElement?.nextElementSibling;
                     while (node && parts.join(' ').length < 5000) {
@@ -666,7 +696,17 @@ def _fetch_description(context, url: str) -> tuple:
                     if (result.length > 100) return result;
                 }
             }
-            // Fallback: grab a large block of body text starting after the job header area
+            // Public/guest view: description in .description__text or .show-more-less-html
+            const pubDesc = document.querySelector(
+                '.description__text .show-more-less-html__markup, '
+                + '.show-more-less-html__markup, '
+                + '.description__text'
+            );
+            if (pubDesc) {
+                const t = pubDesc.innerText?.trim();
+                if (t && t.length > 50) return t.substring(0, 5000);
+            }
+            // Fallback: grab body text after 'About the job' marker
             const body = document.body.innerText;
             const idx = body.indexOf('About the job');
             if (idx > -1) return body.slice(idx + 14, idx + 5000).trim();
@@ -683,24 +723,54 @@ def _fetch_description(context, url: str) -> tuple:
 
 
 def _parse_job_cards(page) -> List[Dict]:
-    """Extract job data from visible job cards on the search results page."""
+    """Extract job data from visible job cards on the search results page.
+
+    Supports both authenticated LinkedIn (div.job-card-container) and
+    public/guest LinkedIn (div.job-search-card) page layouts.
+    """
     try:
         cards = page.query_selector_all("div.job-card-container")
+        is_public = False
+        if not cards:
+            # Public/guest view uses different card selectors
+            cards = page.query_selector_all("div.job-search-card")
+            is_public = True
+        if not cards:
+            return []
     except Exception:
         raise RuntimeError(
-            "LinkedIn session expired — page context destroyed (likely auth redirect)"
+            "LinkedIn session expired -- page context destroyed (likely auth redirect)"
         ) from None
 
     jobs = []
     for card in cards[:25]:
         try:
-            title_el = card.query_selector("a.job-card-list__title--link")
-            company_el = card.query_selector("div.artdeco-entity-lockup__subtitle")
-            location_el = card.query_selector("div.artdeco-entity-lockup__caption")
-            footer_items = card.query_selector_all("li.job-card-container__footer-item")
-            has_easy_apply = any("easy apply" in el.inner_text().lower() for el in footer_items)
+            if is_public:
+                title_el = card.query_selector("h3.base-search-card__title")
+                link_el = card.query_selector("a.base-card__full-link")
+                company_el = card.query_selector("h4.base-search-card__subtitle")
+                location_el = card.query_selector(".job-search-card__location")
+                easy_apply_el = card.query_selector(".job-search-card__easy-apply-label")
+                has_easy_apply = easy_apply_el is not None
+                href = (
+                    link_el.evaluate("el => el.href || el.getAttribute('href') || ''")
+                    if link_el
+                    else ""
+                )
+            else:
+                title_el = card.query_selector("a.job-card-list__title--link")
+                link_el = title_el
+                company_el = card.query_selector("div.artdeco-entity-lockup__subtitle")
+                location_el = card.query_selector("div.artdeco-entity-lockup__caption")
+                footer_items = card.query_selector_all("li.job-card-container__footer-item")
+                has_easy_apply = any("easy apply" in el.inner_text().lower() for el in footer_items)
+                href = (
+                    title_el.evaluate("el => el.href || el.getAttribute('href') || ''")
+                    if title_el
+                    else ""
+                )
+
             if title_el and company_el:
-                href = title_el.evaluate("el => el.href || el.getAttribute('href') || ''")
                 # Ensure absolute URL
                 if href and href.startswith("/"):
                     href = "https://www.linkedin.com" + href
@@ -722,6 +792,52 @@ def _parse_job_cards(page) -> List[Dict]:
             log.debug("Skipping malformed job card: %s", exc)
             continue
     return jobs
+
+
+def _dismiss_linkedin_overlays(page) -> None:
+    """Dismiss cookie consent banners and sign-in modals on LinkedIn search pages.
+
+    When connecting via CDP to a shared browser, new tabs may render the public
+    (guest) view with cookie consent and 'Sign in to view more jobs' overlays
+    that block job card rendering.
+    """
+    page.wait_for_timeout(1500)
+
+    # 1. Dismiss cookie consent banner
+    try:
+        cookie_btn = page.query_selector(
+            "[data-tracking-control-name='ga-cookie.consent.accept.v4'], "
+            "button.artdeco-global-alert-action:has-text('Accept')"
+        )
+        if cookie_btn and cookie_btn.is_visible():
+            cookie_btn.click()
+            log.debug("Dismissed LinkedIn cookie consent banner")
+            page.wait_for_timeout(500)
+    except Exception:  # noqa: S110
+        pass
+
+    # 2. Dismiss 'Sign in to view more jobs' modal
+    try:
+        modal_close = page.query_selector(
+            "button.modal__dismiss[aria-label='Dismiss'], "
+            "[data-tracking-control-name='public_jobs_contextual-sign-in-modal_modal_dismiss']"
+        )
+        if modal_close and modal_close.is_visible():
+            modal_close.click()
+            log.debug("Dismissed LinkedIn sign-in modal")
+            page.wait_for_timeout(500)
+    except Exception:  # noqa: S110
+        pass
+
+    # 3. Fallback: press Escape for any remaining modal
+    try:
+        modal = page.query_selector("[role='dialog']")
+        if modal and modal.is_visible():
+            page.keyboard.press("Escape")
+            log.debug("Dismissed LinkedIn overlay via Escape key")
+            page.wait_for_timeout(500)
+    except Exception:  # noqa: S110
+        pass
 
 
 def _ensure_logged_in(page, target_url: str) -> None:
@@ -1183,8 +1299,13 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             _ensure_logged_in(page, url)
 
+            # Dismiss cookie consent and sign-in overlays that block job cards
+            _dismiss_linkedin_overlays(page)
+
+            # Wait for job cards: authenticated view uses job-card-container,
+            # public/guest view uses job-search-card (base-search-card)
             try:
-                page.wait_for_selector("div.job-card-container", timeout=12000)
+                page.wait_for_selector("div.job-card-container, div.job-search-card", timeout=12000)
             except Exception:
                 raise RuntimeError(
                     f"No results found — LinkedIn may have changed layout. URL: {page.url}"
@@ -1243,13 +1364,17 @@ def _extract_results_count(page) -> Optional[int]:
         r"  const all = document.body.innerText;"
         r"  const m = all.match(/([\d,]+)\s+results/i) || all.match(/([\d,]+)\s+jobs/i);"
         "  if (m) return m[0];"
+        r"  const titleM = document.title.match(/([\d,]+)\+?\s/);"
+        "  if (titleM) return titleM[0];"
+        r"  const headM = all.match(/([\d,]+)\+?\s+\S+.*?jobs/i);"
+        "  if (headM) return headM[0];"
         "  return '';"
         "}"
     )
     # fmt: on
     if not text:
         return None
-    # Parse "1,234 results" → 1234
+    # Parse "1,234 results" or "4,000+" → integer
     match = re.search(r"([\d,]+)", text)
     if match:
         return int(match.group(1).replace(",", ""))
@@ -1279,6 +1404,52 @@ def market_snapshot(
     snapshots = []
     now = time.strftime("%Y-%m-%d %H:%M:%S")
 
+    def _snapshot_one_title(pg, title_kw, base_params):
+        """Fetch counts for one title, returning (page, total, week, day).
+
+        If the CDP page is evicted mid-operation, open a fresh page and
+        retry once so a single flaky page doesn't abort the whole scan.
+        """
+        from playwright._impl._errors import TargetClosedError
+
+        for attempt in range(2):
+            try:
+                # --- All-time count ---
+                url_all = f"https://www.linkedin.com/jobs/search/?{urlencode(base_params)}"
+                pg.goto(url_all, wait_until="domcontentloaded", timeout=30000)
+                _ensure_logged_in(pg, url_all)
+                pg.wait_for_timeout(3000)
+                total_count = _extract_results_count(pg)
+                log.info(f"   Total results: {total_count or 'unknown'}")
+
+                # --- Past 1 week count ---
+                week_params = {**base_params, "f_TPR": "r604800"}
+                url_week = f"https://www.linkedin.com/jobs/search/?{urlencode(week_params)}"
+                pg.goto(url_week, wait_until="domcontentloaded", timeout=30000)
+                _ensure_logged_in(pg, url_week)
+                pg.wait_for_timeout(3000)
+                week_count = _extract_results_count(pg)
+                log.info(f"   Past week:     {week_count or 'unknown'}")
+
+                # --- Past 24 hours count ---
+                day_params = {**base_params, "f_TPR": "r86400"}
+                url_day = f"https://www.linkedin.com/jobs/search/?{urlencode(day_params)}"
+                pg.goto(url_day, wait_until="domcontentloaded", timeout=30000)
+                _ensure_logged_in(pg, url_day)
+                pg.wait_for_timeout(3000)
+                day_count = _extract_results_count(pg)
+                log.info(f"   Past 24 hours: {day_count or 'unknown'}")
+
+                return pg, total_count, week_count, day_count
+            except TargetClosedError:
+                if attempt == 0:
+                    log.warning("   Page closed by browser, opening fresh page and retrying...")
+                    pg = context.new_page()
+                else:
+                    log.error("   Page closed again on retry, skipping '%s'", title_kw)
+                    return pg, None, None, None
+        return pg, None, None, None  # unreachable
+
     with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(p, proxy)
         try:
@@ -1296,34 +1467,9 @@ def market_snapshot(
                 if remote:
                     base_params["f_WT"] = "2"
 
-                # --- All-time count ---
-                url_all = f"https://www.linkedin.com/jobs/search/?{urlencode(base_params)}"
-                page.goto(url_all, wait_until="domcontentloaded", timeout=30000)
-                _ensure_logged_in(page, url_all)
-                page.wait_for_timeout(3000)
-
-                total_count = _extract_results_count(page)
-                log.info(f"   Total results: {total_count or 'unknown'}")
-
-                # --- Past 1 week count (f_TPR = r604800 = 7 days in seconds) ---
-                week_params = {**base_params, "f_TPR": "r604800"}
-                url_week = f"https://www.linkedin.com/jobs/search/?{urlencode(week_params)}"
-                page.goto(url_week, wait_until="domcontentloaded", timeout=30000)
-                _ensure_logged_in(page, url_week)
-                page.wait_for_timeout(3000)
-
-                week_count = _extract_results_count(page)
-                log.info(f"   Past week:     {week_count or 'unknown'}")
-
-                # --- Past 24 hours count (f_TPR = r86400 = 1 day in seconds) ---
-                day_params = {**base_params, "f_TPR": "r86400"}
-                url_day = f"https://www.linkedin.com/jobs/search/?{urlencode(day_params)}"
-                page.goto(url_day, wait_until="domcontentloaded", timeout=30000)
-                _ensure_logged_in(page, url_day)
-                page.wait_for_timeout(3000)
-
-                day_count = _extract_results_count(page)
-                log.info(f"   Past 24 hours: {day_count or 'unknown'}")
+                page, total_count, week_count, day_count = _snapshot_one_title(
+                    page, title, base_params
+                )
 
                 snapshots.append(
                     {
@@ -3498,6 +3644,7 @@ def _queue_for_deep_apply(app_entry: Dict, queue_tier: str = "q2") -> None:
             "title": app_entry.get("title", ""),
             "company": app_entry.get("company", ""),
             "url": app_entry.get("url", ""),
+            "ats_url": app_entry.get("ats_url", ""),
             "match_score": app_entry.get("match_score", 0),
             "failure_reason": app_entry.get("failure_category", ""),
             "original_status": app_entry.get("status", ""),
@@ -6630,6 +6777,7 @@ def auto_apply_workflow(  # noqa: C901
                 "title": job["title"],
                 "company": job["company"],
                 "url": job["url"],
+                "ats_url": _final_ats_url or "",
                 "location": job.get("location", ""),
                 "status": status,
                 "apply_type": job.get("apply_type", "easy_apply"),

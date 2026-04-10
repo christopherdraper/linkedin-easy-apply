@@ -1683,7 +1683,7 @@ def process_application(
     Returns a status string: "submitted", "failed: <reason>", or "escalated: <reason>".
     """
     job_id = queue_entry["job_id"]
-    url = queue_entry["url"]
+    url = queue_entry.get("ats_url") or queue_entry["url"]
     title = queue_entry.get("title", "Unknown")
     company = queue_entry.get("company", "Unknown")
     resume_path = getattr(profile, "resume_path", "")
