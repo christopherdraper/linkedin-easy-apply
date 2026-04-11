@@ -160,7 +160,27 @@ def _match_field_to_profile(label: str, profile: ApplicantProfile) -> Optional[s
     # Skip if the field map already claimed this label (even with empty value).
     if not field_map_matched:
         for key, val in profile.screening_answers.items():
-            if key.lower() in label_lower or label_lower in key.lower():
+            key_lower = key.lower()
+            # Use word-boundary matching for short keys (< 10 chars) to avoid
+            # "state" matching "United States" in a question about work authorization
+            if len(key_lower) < 10:
+                if re.search(r"\b" + re.escape(key_lower) + r"\b", label_lower):
+                    # Extra guard: skip if the label is a question (contains ?) and
+                    # the key is a generic field name that could appear incidentally
+                    if is_question and key_lower in (
+                        "state",
+                        "city",
+                        "country",
+                        "language",
+                        "english",
+                        "travel",
+                        "race",
+                        "gender",
+                        "sex",
+                    ):
+                        continue
+                    return str(val)
+            elif key_lower in label_lower or label_lower in key_lower:
                 return str(val)
 
     return None
@@ -199,7 +219,15 @@ Rules:
 - Do NOT include Submit/Next button clicks in your response - only fill form fields
 - Skip fields you cannot determine a value for
 - Return ONLY the JSON array, no other text
-- Process fields in top-to-bottom order as they appear on the page"""
+- Process fields in top-to-bottom order as they appear on the page
+
+CRITICAL -- read the question carefully and answer what is actually being asked:
+- "Are you authorized to work in the US?" is a YES/NO question, answer "Yes" -- NOT a state name
+- "Do you require visa sponsorship?" is a YES/NO question, answer "No" -- NOT a location
+- "Do you reside in the United States?" is a YES/NO question, answer "Yes" -- NOT a state
+- Questions asking about programming languages want LANGUAGE NAMES (Python, Go, etc.) not spoken languages
+- If a question asks about experience with a technology, describe relevant experience from the profile
+- Do NOT confuse profile location fields (state, city) with question answers -- "Indiana" is NOT a valid answer to a yes/no question"""
 
 
 def _ai_analyze_page(
