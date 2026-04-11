@@ -735,6 +735,62 @@ def _detect_email_verification(page) -> bool:
         return False
 
 
+def _await_verification_result(page, logger: DecisionLogger) -> str:
+    """Poll for verification result: submitted, continue, or failed."""
+    for wait_round in range(4):
+        page.wait_for_timeout(3000)
+
+        if _detect_submission_success(page):
+            logger.log(
+                "submit",
+                "verification",
+                reasoning="Submitted after verification code",
+                confidence="high",
+            )
+            return "submitted"
+
+        # If verification page is gone, the code worked -- continue the form
+        if not _detect_email_verification(page):
+            logger.log(
+                "navigate",
+                "post-verification",
+                reasoning="Verification page cleared, code accepted",
+                confidence="high",
+            )
+            return "continue"
+
+        # Check for explicit error messages on the verification page
+        try:
+            error_text = page.evaluate(
+                "() => (document.body ? document.body.innerText : '').toLowerCase()"
+            )
+            if any(
+                phrase in error_text
+                for phrase in ("invalid code", "expired", "incorrect code", "try again")
+            ):
+                logger.log(
+                    "abort",
+                    "verification",
+                    reasoning="Verification code was invalid or expired",
+                    confidence="high",
+                )
+                return "failed: verification code invalid/expired"
+        except Exception:
+            pass
+
+        if wait_round < 3:
+            log.debug("   Verification page still showing, waiting... (attempt %d)", wait_round + 2)
+
+    _save_debug_snapshot(page, "verification", "code_rejected")
+    logger.log(
+        "abort",
+        "verification",
+        reasoning="Verification code may have been rejected (page unchanged after 12s)",
+        confidence="uncertain",
+    )
+    return "failed: verification code rejected"
+
+
 def _handle_email_verification(page, profile: ApplicantProfile, logger: DecisionLogger) -> str:
     """Handle email verification code prompt. Returns status string.
 
@@ -755,7 +811,7 @@ def _handle_email_verification(page, profile: ApplicantProfile, logger: Decision
     )
 
     code = _fetch_verification_code_from_gmail(
-        profile.email, profile.gmail_app_password, max_wait=45
+        profile.email, profile.gmail_app_password, max_wait=120
     )
     if not code:
         logger.log(
@@ -824,24 +880,7 @@ def _handle_email_verification(page, profile: ApplicantProfile, logger: Decision
     else:
         page.keyboard.press("Enter")
 
-    page.wait_for_timeout(5000)
-
-    if _detect_submission_success(page):
-        logger.log(
-            "submit",
-            "verification",
-            reasoning="Submitted after verification code",
-            confidence="high",
-        )
-        return "submitted"
-
-    logger.log(
-        "abort",
-        "verification",
-        reasoning="Verification code may have been rejected",
-        confidence="uncertain",
-    )
-    return "failed: verification code rejected"
+    return _await_verification_result(page, logger)
 
 
 def _save_debug_snapshot(page, job_id: str, label: str) -> None:
@@ -1548,7 +1587,7 @@ def _handle_empty_page(page, job_id: str, logger: DecisionLogger) -> Optional[st
     return "failed: empty page snapshot"
 
 
-def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path, job_id, logger):
+def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path, job_id, logger):  # noqa: C901
     """Core form-filling loop. Returns a status string."""
     same_page_count = 0
     last_page_snapshot = ""
@@ -1570,7 +1609,12 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
 
         # Handle email verification code (e.g. Greenhouse) before treating as rejection
         if _detect_email_verification(page):
-            return _handle_email_verification(page, profile, logger)
+            verify_result = _handle_email_verification(page, profile, logger)
+            if verify_result != "continue":
+                return verify_result
+            same_page_count = 0
+            last_page_snapshot = ""
+            continue
 
         rejection = _detect_rejection(page)
         if rejection:
