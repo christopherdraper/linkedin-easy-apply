@@ -1361,13 +1361,6 @@ def _extract_results_count(page) -> Optional[int]:
         "    const el = document.querySelector(sel);"
         "    if (el && el.innerText) return el.innerText.trim();"
         "  }"
-        r"  const all = document.body.innerText;"
-        r"  const m = all.match(/([\d,]+)\s+results/i) || all.match(/([\d,]+)\s+jobs/i);"
-        "  if (m) return m[0];"
-        r"  const titleM = document.title.match(/([\d,]+)\+?\s/);"
-        "  if (titleM) return titleM[0];"
-        r"  const headM = all.match(/([\d,]+)\+?\s+\S+.*?jobs/i);"
-        "  if (headM) return headM[0];"
         "  return '';"
         "}"
     )
@@ -1569,6 +1562,36 @@ STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or tale
     except Exception as e:
         log.warning(f"   AI scoring failed, using keyword fallback: {e}")
         return score_job(job, profile)
+
+
+def _save_cover_letter_docx(text: str, job_id: str) -> Path:
+    """Save cover letter text as a .docx file. Returns the file path."""
+    from docx import Document
+    from docx.shared import Pt
+
+    doc = Document()
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+    for line in text.split("\n"):
+        doc.add_paragraph(line)
+    out = COVER_LETTER_DIR / f"{job_id}.docx"
+    doc.save(str(out))
+    return out
+
+
+def _ensure_cover_letter_docx(cl_path: str) -> str:
+    """If cover letter is a .txt file, convert to .docx and return new path."""
+    p = Path(cl_path)
+    if not p.exists() or p.suffix != ".txt":
+        return cl_path
+    docx_path = p.with_suffix(".docx")
+    if docx_path.exists():
+        return str(docx_path)
+    text = p.read_text()
+    job_id = p.stem
+    _save_cover_letter_docx(text, job_id)
+    return str(docx_path)
 
 
 def ai_generate_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
@@ -4639,6 +4662,7 @@ def _handle_file_uploads(
 
     filled = 0
     resume_path = str(Path(profile.resume_path).expanduser()) if profile.resume_path else ""
+    cover_letter_path = _ensure_cover_letter_docx(cover_letter_path) if cover_letter_path else ""
 
     resume_uploaded = "resume" in uploaded_files
     cover_uploaded = "cover" in uploaded_files
@@ -6710,9 +6734,8 @@ def auto_apply_workflow(  # noqa: C901
 
         # Generate AI cover letter
         COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
-        cl_file = COVER_LETTER_DIR / f"{job['id']}.txt"
         cover_letter = ai_generate_cover_letter(job, profile)
-        cl_file.write_text(cover_letter)
+        cl_file = _save_cover_letter_docx(cover_letter, job["id"])
 
         apply_type = job.get("apply_type", "easy_apply")
 

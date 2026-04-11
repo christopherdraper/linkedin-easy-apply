@@ -1115,6 +1115,9 @@ def _auto_upload_files(
                 kw in input_label for kw in ("cover letter", "cover_letter", "coverletter")
             )
             if is_cover_letter and cover_letter_path and Path(cover_letter_path).exists():
+                from job_search_apply import _ensure_cover_letter_docx
+
+                cover_letter_path = _ensure_cover_letter_docx(cover_letter_path)
                 file_input.set_input_files(cover_letter_path)
                 logger.log(
                     "upload", "cover letter", cover_letter_path, "Auto-upload cover letter", "high"
