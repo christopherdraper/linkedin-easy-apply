@@ -1567,6 +1567,15 @@ def _fix_corrupted_fields(page, profile: ApplicantProfile, logger: DecisionLogge
 
 def _handle_empty_page(page, job_id: str, logger: DecisionLogger) -> Optional[str]:
     """Handle pages with no form fields. Returns failure string or None (continue)."""
+    # Check for submission success first -- confirmation pages often have minimal DOM
+    if _detect_submission_success(page):
+        logger.log(
+            "submit",
+            "confirmation page",
+            reasoning="Detected submission success on page with minimal form content",
+            confidence="high",
+        )
+        return "submitted"
     try:
         body_text = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 500) || ''")
     except Exception:
