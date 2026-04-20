@@ -560,6 +560,27 @@ class TestAshbyHandler:
         result = handler.on_submit_clicked(page, ctx)
         assert result is None
 
+    def test_pre_flight_detects_spam_banner_on_load(self):
+        """Spam banner appearing before submit (flagged from prior attempts)."""
+        handler = AshbyHandler()
+        page = MagicMock()
+        page.evaluate.return_value = (
+            "we couldn't submit your application. "
+            "your application submission was flagged as possible spam."
+        )
+        ctx = {"job": {"id": "test"}}
+        result = handler.pre_flight(page, ctx)
+        assert result is not None
+        assert "spam" in result.lower()
+
+    def test_pre_flight_no_spam_returns_none(self):
+        handler = AshbyHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "application form - please fill out"
+        ctx = {}
+        result = handler.pre_flight(page, ctx)
+        assert result is None
+
 
 from ats_handlers.greenhouse import GreenhouseHandler  # noqa: E402
 
