@@ -5964,13 +5964,14 @@ def _navigate_external_form(  # noqa: C901
         # Login wall check on every step (some sites redirect mid-form)
         # Skip if we already resolved login/account for this session to prevent
         # false re-detection (e.g. Workday keeps password fields in page HTML).
-        if not login_resolved:
-            if _is_login_wall(page, profile):
+        if not login_resolved and _detect_login_page(page):
+            handler_resolved = (
+                handler.resolve_login_wall(page, handler_ctx or {}) if handler else False
+            )
+            if not handler_resolved and not _resolve_login_wall(page, profile):
                 log.info(f"   🔒 Requires account: {page.url[:60]}")
                 return "skipped: requires account"
-            if _detect_login_page(page):
-                # _is_login_wall returned False = login was resolved
-                login_resolved = True
+            login_resolved = True
 
         # CAPTCHA detection — attempt solve up to 2 times per page URL
         captcha_info = _detect_captcha(page)
@@ -6394,10 +6395,13 @@ def _navigate_external_form(  # noqa: C901
                     # If we can't fill any more fields, bail out
                     if fields_filled_total == 0 or stalled >= 2:
                         # Recheck — page may have navigated to login wall
-                        # _is_login_wall may resolve it (guest bypass, login,
-                        # account creation) — if so, continue the form loop
+                        # Handler gets first chance, then generic resolution
                         if not login_resolved and _detect_login_page(page):
-                            resolved = _resolve_login_wall(page, profile)
+                            resolved = (
+                                handler.resolve_login_wall(page, handler_ctx or {})
+                                if handler
+                                else False
+                            ) or _resolve_login_wall(page, profile)
                             if resolved:
                                 login_resolved = True
                                 stalled = 0

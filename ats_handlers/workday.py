@@ -153,13 +153,17 @@ class WorkdayHandler(BaseATSHandler):
             return False
 
         page.wait_for_timeout(4000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:  # noqa: BLE001, S110
+            pass
 
         # Step 5: Handle email verification if required
         if not _handle_registration_verification(page, profile):
             return False
 
         # Step 6: Check outcome
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(3000)
         body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
         still_has_password = bool(page.query_selector("input[type='password']:visible"))
 
@@ -180,59 +184,76 @@ class WorkdayHandler(BaseATSHandler):
 
     @staticmethod
     def _check_consent_checkbox(page) -> None:
-        """Check Workday consent checkboxes (React components, not native inputs).
+        """Check Workday consent checkboxes.
 
-        Workday renders checkboxes as custom React components. Native selectors
-        like input[type='checkbox'] don't work. Uses JS to find and click
-        elements containing consent text.
+        Workday renders checkboxes as either native inputs (rare) or React
+        components. Strategies, in order:
+        1. Workday data-automation-id for consent checkbox
+        2. Any visible unchecked native checkbox on the page
+        3. JS: walk DOM from consent text to find nearby checkbox element
         """
         try:
-            # Try native checkbox first (some Workday instances use them)
-            native_cb = page.query_selector(
-                "input[type='checkbox'][name*='agree' i], "
-                "input[type='checkbox'][name*='terms' i], "
-                "input[type='checkbox'][name*='understand' i], "
-                "input[type='checkbox'][id*='agree' i]"
+            # Strategy 1: Workday data-automation-id
+            wd_cb = page.query_selector(
+                "[data-automation-id='createAccountCheckbox'], "
+                "[data-automation-id='termsCheckbox'], "
+                "[data-automation-id='privacyCheckbox']"
             )
-            if native_cb and native_cb.is_visible() and not native_cb.is_checked():
-                native_cb.check()
-                log.info("   Workday: checked consent (native checkbox)")
+            if wd_cb and wd_cb.is_visible():
+                wd_cb.click()
+                page.wait_for_timeout(500)
+                log.info("   Workday: checked consent (data-automation-id)")
                 return
 
-            # React checkbox: find clickable element near consent text
+            # Strategy 2: Any visible unchecked native checkbox
+            # Registration pages typically have exactly one checkbox (consent)
+            all_cbs = page.query_selector_all("input[type='checkbox']")
+            for cb in all_cbs:
+                try:
+                    if cb.is_visible() and not cb.is_checked():
+                        cb.check()
+                        page.wait_for_timeout(500)
+                        log.info("   Workday: checked consent (native checkbox)")
+                        return
+                except Exception:  # noqa: BLE001, S110
+                    pass
+
+            # Strategy 3: JS -- find consent text, then walk up to find
+            # the checkbox element (child, sibling, or in parent container)
             checked = page.evaluate("""() => {
-                // Look for React checkbox components near consent text
+                const consentRe = /i understand|i agree|i acknowledge|checking this box/i;
+                const cbSel = '[role="checkbox"], [data-automation-id*="check"], '
+                    + '[data-automation-id*="Check"], input[type="checkbox"], '
+                    + '[class*="checkbox" i]';
+
                 const allEls = document.querySelectorAll('*');
                 for (const el of allEls) {
                     const text = (el.textContent || '').trim();
-                    if (text.length > 5 && text.length < 500
-                        && (/i understand|i agree|i acknowledge|privacy policy/i.test(text))) {
-                        // Find checkbox-role element inside or nearby
-                        const cb = el.querySelector(
-                            '[role="checkbox"], [data-automation-id*="check"], '
-                            + '[class*="checkbox"], [class*="Checkbox"]'
-                        );
-                        if (cb) {
-                            cb.click();
-                            return 'role-checkbox';
-                        }
-                        // Click the label/container itself
-                        if (el.tagName === 'LABEL' || el.closest('label')) {
-                            (el.closest('label') || el).click();
-                            return 'label-click';
-                        }
-                        // Last resort: click the element itself
-                        if (el.children.length <= 5) {
-                            el.click();
-                            return 'direct-click';
-                        }
+                    if (text.length < 10 || text.length > 500 || !consentRe.test(text))
+                        continue;
+
+                    // Check children first
+                    let cb = el.querySelector(cbSel);
+                    if (cb) { cb.click(); return 'child'; }
+
+                    // Check siblings
+                    if (el.parentElement) {
+                        cb = el.parentElement.querySelector(cbSel);
+                        if (cb) { cb.click(); return 'sibling'; }
+                    }
+
+                    // Walk up 2 more levels
+                    let parent = el.parentElement?.parentElement;
+                    for (let i = 0; i < 2 && parent; i++, parent = parent.parentElement) {
+                        cb = parent.querySelector(cbSel);
+                        if (cb) { cb.click(); return 'ancestor-' + (i + 2); }
                     }
                 }
                 return null;
             }""")
             if checked:
                 page.wait_for_timeout(500)
-                log.info("   Workday: checked consent (%s)", checked)
+                log.info("   Workday: checked consent (JS: %s)", checked)
         except Exception as e:  # noqa: BLE001
             log.debug("Workday consent checkbox: %s", e)
 
