@@ -6541,10 +6541,12 @@ def submit_external_apply(  # noqa: C901
             # Update ATS URL after pre-flight may have navigated
             _final_ats_url = page.url
 
-            # Immediate login wall check
-            if _is_login_wall(page, profile):
-                log.info(f"   🔒 Skipped: requires account ({page.url[:60]})")
-                return "skipped: requires account"
+            # Login wall check: handler gets first chance, then generic resolution
+            if _detect_login_page(page):
+                handler_resolved = handler.resolve_login_wall(page, handler_ctx)
+                if not handler_resolved and not _resolve_login_wall(page, profile):
+                    log.info(f"   🔒 Skipped: requires account ({page.url[:60]})")
+                    return "skipped: requires account"
 
             return _navigate_external_form(
                 page,

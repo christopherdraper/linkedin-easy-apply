@@ -698,3 +698,85 @@ class TestSmartRecruitersHandler:
         result = handler.pre_flight(page, ctx)
         assert result is None
         page.goto.assert_not_called()  # already on oneclick, no navigation
+
+
+class TestWorkdayAccountCreation:
+    """Tests for Workday-specific account creation in WorkdayHandler."""
+
+    def test_resolve_login_wall_not_real_login_page(self):
+        """Pages without 'create account' text should return True (not a real wall)."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "some form fields here"
+        ctx = {"profile": MagicMock()}
+        assert handler.resolve_login_wall(page, ctx) is True
+
+    def test_resolve_login_wall_real_page_no_profile(self):
+        """Real login page but no profile should return False."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "create account sign in already have"
+        ctx = {}
+        assert handler.resolve_login_wall(page, ctx) is False
+
+    def test_resolve_login_wall_uses_stored_creds(self):
+        """Should try stored credentials before account creation."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "create account already have an account"
+        page.url = "https://company.wd5.myworkdayjobs.com/login"
+        profile = MagicMock()
+        profile.auto_create_accounts = True
+        ctx = {"profile": profile}
+        with patch("job_search_apply._attempt_ats_login", return_value=True) as mock_login:
+            result = handler.resolve_login_wall(page, ctx)
+        assert result is True
+        mock_login.assert_called_once()
+
+    def test_resolve_login_wall_creates_account(self):
+        """When no stored creds, should attempt Workday account creation."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.evaluate.side_effect = [
+            "create account sign in already have",  # body text check
+        ]
+        page.url = "https://company.wd5.myworkdayjobs.com/login"
+        profile = MagicMock()
+        profile.auto_create_accounts = True
+        ctx = {"profile": profile}
+        with (
+            patch("job_search_apply._attempt_ats_login", return_value=False),
+            patch.object(handler, "_create_workday_account", return_value=True) as mock_create,
+        ):
+            result = handler.resolve_login_wall(page, ctx)
+        assert result is True
+        mock_create.assert_called_once()
+
+    def test_resolve_login_wall_no_auto_create(self):
+        """Without auto_create_accounts, should not attempt account creation."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "create account sign in already have"
+        page.url = "https://company.wd5.myworkdayjobs.com/login"
+        profile = MagicMock()
+        profile.auto_create_accounts = False
+        ctx = {"profile": profile}
+        with patch("job_search_apply._attempt_ats_login", return_value=False):
+            result = handler.resolve_login_wall(page, ctx)
+        assert result is False
+
+    def test_click_submit_button_data_automation_id(self):
+        """Should try data-automation-id selectors first."""
+        btn = MagicMock()
+        btn.is_visible.return_value = True
+        page = MagicMock()
+        page.query_selector.return_value = btn
+        assert WorkdayHandler._click_submit_button(page) is True
+        btn.click.assert_called_once()
+
+    def test_click_submit_button_js_fallback(self):
+        """Should fall back to JS text matching if no data-automation-id."""
+        page = MagicMock()
+        page.query_selector.return_value = None
+        page.evaluate.return_value = "Create Account"
+        assert WorkdayHandler._click_submit_button(page) is True
