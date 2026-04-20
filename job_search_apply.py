@@ -6073,47 +6073,6 @@ def _navigate_external_form(  # noqa: C901
             log.info("   ⏭  URL looks like a job search page, skipping")
             return "failed: landed on job search page instead of application form"
 
-        # Workday "Start Your Application" popup — click "Autofill with Resume"
-        # This popup appears after clicking Apply on a Workday job listing page.
-        wd_autofill = page.query_selector("a[data-automation-id='autofillWithResume']")
-        if wd_autofill and wd_autofill.is_visible():
-            log.info("   🔗 Workday popup detected, clicking 'Autofill with Resume'...")
-            _safe_click(wd_autofill, page)
-            page.wait_for_timeout(3000)
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=15000)
-            except Exception:  # noqa: S110
-                pass
-            _final_ats_url = page.url
-            continue
-        # Fallback: Workday "Apply Manually" if autofill not available
-        wd_manual = page.query_selector("a[data-automation-id='applyManually']")
-        if wd_manual and wd_manual.is_visible():
-            log.info("   🔗 Workday popup detected, clicking 'Apply Manually'...")
-            _safe_click(wd_manual, page)
-            page.wait_for_timeout(3000)
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=15000)
-            except Exception:  # noqa: S110
-                pass
-            _final_ats_url = page.url
-            continue
-
-        # Dismiss cookie banners that may block Apply buttons
-        try:
-            cookie_btn = page.query_selector(
-                "#onetrust-accept-btn-handler, "
-                "[data-testid='cookie-accept'], "
-                "button:has-text('Accept All'):visible, "
-                "button:has-text('Accept all'):visible"
-            )
-            if cookie_btn and cookie_btn.is_visible():
-                _safe_click(cookie_btn, page)
-                page.wait_for_timeout(1000)
-                log.info("   🍪 Dismissed cookie consent banner")
-        except Exception:  # noqa: S110
-            pass
-
         # Job listing page with Apply button (Workday, company career pages)
         # If no form fields and page has an Apply button, click through to the form
         if not classification.get("has_form_fields") and not classification.get("has_file_upload"):

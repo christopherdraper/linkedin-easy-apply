@@ -456,3 +456,106 @@ class TestQ2HandlerHooks:
             )
 
         assert "q2_resolve_login_wall" in call_order
+
+
+from ats_handlers.workday import WorkdayHandler  # noqa: E402
+
+
+class TestWorkdayHandler:
+    def test_platform_name(self):
+        assert WorkdayHandler().platform_name == "Workday"
+
+    def test_pre_flight_dismisses_cookie_banner(self):
+        handler = WorkdayHandler()
+        page = MagicMock()
+        cookie_btn = MagicMock()
+        cookie_btn.is_visible.return_value = True
+        page.query_selector.return_value = cookie_btn
+        ctx = {}
+        with patch("job_search_apply._safe_click"):
+            result = handler.pre_flight(page, ctx)
+        assert result is None
+
+    def test_on_step_start_autofill_popup(self):
+        handler = WorkdayHandler()
+        page = MagicMock()
+        autofill = MagicMock()
+        autofill.is_visible.return_value = True
+        page.query_selector.side_effect = lambda sel: (
+            autofill if "autofillWithResume" in sel else None
+        )
+        ctx = {}
+        with patch("job_search_apply._safe_click"):
+            result = handler.on_step_start(page, ctx)
+        assert result is None
+        assert ctx.get("skip_step") is True
+
+    def test_on_step_start_no_popup(self):
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.query_selector.return_value = None
+        ctx = {}
+        result = handler.on_step_start(page, ctx)
+        assert result is None
+        assert "skip_step" not in ctx
+
+    def test_resolve_login_wall_returns_true(self):
+        handler = WorkdayHandler()
+        assert handler.resolve_login_wall(MagicMock(), {}) is True
+
+    def test_q2_resolve_login_wall_returns_true(self):
+        handler = WorkdayHandler()
+        assert handler.q2_resolve_login_wall(MagicMock(), {}) is True
+
+
+from ats_handlers.ashby import AshbyHandler  # noqa: E402
+from ats_handlers.lever import LeverHandler  # noqa: E402
+
+
+class TestLeverHandler:
+    def test_platform_name(self):
+        assert LeverHandler().platform_name == "Lever"
+
+    def test_all_hooks_are_noop(self):
+        """Lever is a pure passthrough -- all hooks return defaults."""
+        handler = LeverHandler()
+        page = MagicMock()
+        ctx = {}
+        assert handler.pre_flight(page, ctx) is None
+        assert handler.on_step_start(page, ctx) is None
+        assert handler.resolve_login_wall(page, ctx) is False
+        assert handler.handle_verification_code(page, ctx) is None
+        assert handler.on_submit_clicked(page, ctx) is None
+        assert handler.detect_success(page, ctx) is False
+
+
+class TestAshbyHandler:
+    def test_platform_name(self):
+        assert AshbyHandler().platform_name == "Ashby"
+
+    def test_on_submit_detects_spam_filter(self):
+        handler = AshbyHandler()
+        page = MagicMock()
+        page.evaluate.return_value = (
+            "your application has been flagged as possible spam and could not be submitted"
+        )
+        ctx = {"job": {"id": "test"}}
+        result = handler.on_submit_clicked(page, ctx)
+        assert result is not None
+        assert "spam" in result.lower()
+
+    def test_on_submit_no_spam_returns_none(self):
+        handler = AshbyHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "thank you for applying"
+        ctx = {}
+        result = handler.on_submit_clicked(page, ctx)
+        assert result is None
+
+    def test_on_submit_handles_exception(self):
+        handler = AshbyHandler()
+        page = MagicMock()
+        page.evaluate.side_effect = Exception("page crashed")
+        ctx = {}
+        result = handler.on_submit_clicked(page, ctx)
+        assert result is None
