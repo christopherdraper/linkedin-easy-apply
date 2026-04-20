@@ -559,3 +559,82 @@ class TestAshbyHandler:
         ctx = {}
         result = handler.on_submit_clicked(page, ctx)
         assert result is None
+
+
+from ats_handlers.greenhouse import GreenhouseHandler  # noqa: E402
+
+
+class TestGreenhouseHandler:
+    def test_platform_name(self):
+        assert GreenhouseHandler().platform_name == "Greenhouse"
+
+    def test_handle_verification_no_gmail_password(self):
+        """Falls through to generic handling when no gmail password."""
+        handler = GreenhouseHandler()
+        profile = MagicMock()
+        profile.gmail_app_password = None
+        ctx = {"profile": profile}
+        result = handler.handle_verification_code(MagicMock(), ctx)
+        assert result is None
+
+    def test_handle_verification_code_found_and_submitted(self):
+        handler = GreenhouseHandler()
+        page = MagicMock()
+        profile = MagicMock()
+        profile.gmail_app_password = "test_pw"
+        profile.email = "test@test.com"
+        ctx = {"profile": profile}
+
+        code_input = MagicMock()
+        code_input.is_visible.return_value = True
+        label_loc = MagicMock()
+        label_loc.count.return_value = 1
+        label_loc.first = code_input
+        page.get_by_label.return_value = label_loc
+
+        with (
+            patch("job_search_apply._fetch_verification_code_from_gmail", return_value="123456"),
+            patch("job_search_apply._detect_success_or_confirmation", return_value=True),
+            patch("job_search_apply._extract_page_snapshot", return_value=""),
+            patch("job_search_apply._safe_click"),
+            patch("job_search_apply._find_navigation_button", return_value=(None, None)),
+        ):
+            result = handler.handle_verification_code(page, ctx)
+        assert result == "submitted"
+
+    def test_handle_verification_code_not_found(self):
+        handler = GreenhouseHandler()
+        page = MagicMock()
+        profile = MagicMock()
+        profile.gmail_app_password = "test_pw"
+        profile.email = "test@test.com"
+        ctx = {"profile": profile}
+
+        with patch("job_search_apply._fetch_verification_code_from_gmail", return_value=None):
+            result = handler.handle_verification_code(page, ctx)
+        assert "not received" in result
+
+    def test_handle_verification_code_rejected(self):
+        handler = GreenhouseHandler()
+        page = MagicMock()
+        profile = MagicMock()
+        profile.gmail_app_password = "test_pw"
+        profile.email = "test@test.com"
+        ctx = {"profile": profile}
+
+        code_input = MagicMock()
+        code_input.is_visible.return_value = True
+        label_loc = MagicMock()
+        label_loc.count.return_value = 1
+        label_loc.first = code_input
+        page.get_by_label.return_value = label_loc
+
+        with (
+            patch("job_search_apply._fetch_verification_code_from_gmail", return_value="123456"),
+            patch("job_search_apply._detect_success_or_confirmation", return_value=False),
+            patch("job_search_apply._extract_page_snapshot", return_value=""),
+            patch("job_search_apply._safe_click"),
+            patch("job_search_apply._find_navigation_button", return_value=(None, None)),
+        ):
+            result = handler.handle_verification_code(page, ctx)
+        assert "rejected" in result
