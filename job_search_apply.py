@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ats_handlers import get_handler
+
 try:
     import anthropic as _anthropic
 
@@ -5912,6 +5914,8 @@ def _navigate_external_form(  # noqa: C901
     owns_browser: bool,
     context,
     dry_run: bool = False,
+    handler=None,
+    handler_ctx: dict | None = None,
 ) -> str:
     """Navigate a multi-step external application form. Returns status string."""
     global _final_ats_url  # noqa: PLW0603
@@ -5947,6 +5951,15 @@ def _navigate_external_form(  # noqa: C901
 
         # Keep ATS URL updated as page may redirect during form flow
         _final_ats_url = page.url
+
+        # Handler: per-step hook
+        if handler and handler_ctx:
+            step_result = handler.on_step_start(page, handler_ctx)
+            if step_result:
+                return step_result
+            if handler_ctx.get("skip_step"):
+                handler_ctx.pop("skip_step")
+                continue
 
         # Login wall check on every step (some sites redirect mid-form)
         # Skip if we already resolved login/account for this session to prevent
@@ -5996,7 +6009,10 @@ def _navigate_external_form(  # noqa: C901
         # Take snapshot and check for success
         snapshot = _extract_page_snapshot(page)
 
-        if _detect_success_or_confirmation(page, snapshot):
+        handler_success = (
+            handler.detect_success(page, handler_ctx) if handler and handler_ctx else False
+        )
+        if handler_success or _detect_success_or_confirmation(page, snapshot):
             log.info(f"   ✅ Application confirmed after {step + 1} steps")
             return "submitted"
 
@@ -6024,8 +6040,7 @@ def _navigate_external_form(  # noqa: C901
         log.debug("   Page classification: %s", classification.get("notes", ""))
 
         if classification["page_type"] == "login" or classification.get("has_required_login"):
-            # Workday shows "Sign In" but allows apply without account
-            if "myworkdayjobs.com" not in page.url:
+            if not (handler and handler.resolve_login_wall(page, handler_ctx or {})):
                 return "skipped: requires account"
 
         if classification["page_type"] == "confirmation":
@@ -6133,6 +6148,16 @@ def _navigate_external_form(  # noqa: C901
                     || (lower.includes('security code') && lower.includes('character code'))
                     || lower.includes('enter the') && lower.includes('code to confirm');
             }""")
+            if has_verification_prompt and handler and handler_ctx:
+                hvc_result = handler.handle_verification_code(page, handler_ctx)
+                if hvc_result:
+                    if hvc_result == "submitted":
+                        if owns_browser:
+                            _save_session(context)
+                        return "submitted"
+                    if hvc_result == "continue":
+                        continue
+                    return hvc_result
             if has_verification_prompt:
                 code = _fetch_verification_code_from_gmail(
                     profile.email, profile.gmail_app_password, max_wait=45
@@ -6242,6 +6267,12 @@ def _navigate_external_form(  # noqa: C901
 
         if btn_role == "submit":
             page.wait_for_timeout(3000)
+            if handler and handler_ctx:
+                submit_result = handler.on_submit_clicked(page, handler_ctx)
+                if submit_result:
+                    if submit_result == "submitted" and owns_browser:
+                        _save_session(context)
+                    return submit_result
             post_snapshot = _extract_page_snapshot(page)
             if _detect_success_or_confirmation(page, post_snapshot):
                 if owns_browser:
@@ -6560,13 +6591,37 @@ def submit_external_apply(  # noqa: C901
             # Capture the final ATS URL for platform detection
             _final_ats_url = page.url
 
+            # Platform-specific handler
+            handler = get_handler(page.url)
+            handler_ctx = {
+                "profile": profile,
+                "job": job,
+                "cover_letter_path": cover_letter_path,
+            }
+
+            # Handler pre-flight (SmartRecruiters nav, DataDome, Workday cookies, etc.)
+            pre_flight_result = handler.pre_flight(page, handler_ctx)
+            if pre_flight_result:
+                return pre_flight_result
+
+            # Update ATS URL after pre-flight may have navigated
+            _final_ats_url = page.url
+
             # Immediate login wall check
             if _is_login_wall(page, profile):
                 log.info(f"   🔒 Skipped: requires account ({page.url[:60]})")
                 return "skipped: requires account"
 
             return _navigate_external_form(
-                page, profile, job, cover_letter_path, owns_browser, context, dry_run=dry_run
+                page,
+                profile,
+                job,
+                cover_letter_path,
+                owns_browser,
+                context,
+                dry_run=dry_run,
+                handler=handler,
+                handler_ctx=handler_ctx,
             )
 
         except ApplicationAbortError as e:
