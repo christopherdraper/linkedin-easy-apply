@@ -359,3 +359,100 @@ class TestQ1HandlerIntegration:
         assert handler.handle_verification_code(page, ctx) is None
         assert handler.on_submit_clicked(page, ctx) is None
         assert handler.detect_success(page, ctx) is False
+
+
+class TestQ2HandlerHooks:
+    """Verify Q2 handler hooks have correct signatures and behavior."""
+
+    def test_q2_resolve_login_wall_continues_loop(self):
+        """When handler.q2_resolve_login_wall returns True, loop continues."""
+
+        class ResolveHandler(BaseATSHandler):
+            @property
+            def platform_name(self):
+                return "TestResolve"
+
+            def q2_resolve_login_wall(self, page, ctx):
+                return True
+
+        handler = ResolveHandler()
+        assert handler.q2_resolve_login_wall(MagicMock(), {}) is True
+
+    def test_q2_pre_flight_abort_returns_status(self):
+        """When q2_pre_flight returns a non-None string, it signals abort."""
+
+        class AbortHandler(BaseATSHandler):
+            @property
+            def platform_name(self):
+                return "TestAbort"
+
+            def q2_pre_flight(self, page, ctx):
+                return "failed: pre-flight check failed"
+
+        handler = AbortHandler()
+        result = handler.q2_pre_flight(MagicMock(), {})
+        assert result == "failed: pre-flight check failed"
+
+    def test_q2_hooks_wired_into_run_page_loop(self):
+        """_run_page_loop accepts handler and handler_ctx keyword parameters."""
+        import inspect  # noqa: PLC0415
+
+        from assisted_apply_mcp import _run_page_loop  # noqa: PLC0415
+
+        sig = inspect.signature(_run_page_loop)
+        params = sig.parameters
+        assert "handler" in params
+        assert "handler_ctx" in params
+        assert params["handler"].default is None
+        assert params["handler_ctx"].default is None
+
+    def test_q2_resolve_login_wall_called_before_default_login_wall(self):
+        """handler.q2_resolve_login_wall is called during the page loop."""
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from assisted_apply_mcp import _run_page_loop  # noqa: PLC0415
+
+        call_order = []
+
+        class TrackingHandler(BaseATSHandler):
+            @property
+            def platform_name(self):
+                return "TrackingHandler"
+
+            def q2_resolve_login_wall(self, page, ctx):
+                call_order.append("q2_resolve_login_wall")
+                return False
+
+        page = MagicMock()
+        page.url = "https://test.example.com/apply"
+
+        handler = TrackingHandler()
+        handler_ctx = {"profile": MagicMock(), "job_id": "test_id"}
+
+        with (
+            patch("assisted_apply_mcp._detect_submission_success", return_value=False),
+            patch("assisted_apply_mcp._detect_email_verification", return_value=False),
+            patch("assisted_apply_mcp._detect_rejection", return_value=None),
+            patch("assisted_apply_mcp._handle_captcha", return_value=False),
+            patch("assisted_apply_mcp._handle_login_wall", return_value=False),
+            patch("assisted_apply_mcp._get_page_text_snapshot", return_value="snapshot"),
+            patch("assisted_apply_mcp._fix_corrupted_fields"),
+            patch("assisted_apply_mcp._ai_analyze_page", return_value=None),
+            patch("assisted_apply_mcp._handle_no_actions", return_value="failed: no actions"),
+            patch("assisted_apply_mcp._dismiss_cookie_banner"),
+            patch("assisted_apply_mcp._clear_errored_uploads"),
+        ):
+            _run_page_loop(
+                page,
+                MagicMock(),
+                "Title",
+                "Company",
+                "",
+                "",
+                "job_id",
+                MagicMock(),
+                handler=handler,
+                handler_ctx=handler_ctx,
+            )
+
+        assert "q2_resolve_login_wall" in call_order

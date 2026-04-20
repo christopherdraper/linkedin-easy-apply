@@ -27,6 +27,7 @@ from typing import Dict, List, Optional
 import anthropic
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ats_handlers import get_handler  # noqa: E402
 from job_search_apply import (  # noqa: E402
     ApplicantProfile,
     _attempt_account_creation,
@@ -1624,7 +1625,18 @@ def _handle_empty_page(page, job_id: str, logger: DecisionLogger) -> Optional[st
     return "failed: empty page snapshot"
 
 
-def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path, job_id, logger):  # noqa: C901
+def _run_page_loop(  # noqa: C901
+    page,
+    profile,
+    title,
+    company,
+    resume_path,
+    cover_letter_path,
+    job_id,
+    logger,
+    handler=None,
+    handler_ctx=None,
+):
     """Core form-filling loop. Returns a status string."""
     same_page_count = 0
     last_page_snapshot = ""
@@ -1666,6 +1678,10 @@ def _run_page_loop(page, profile, title, company, resume_path, cover_letter_path
         # CAPTCHA detection + solving (max 2 attempts to avoid burning credits)
         if captcha_attempts < 2 and _handle_captcha(page, profile, logger):
             captcha_attempts += 1
+            continue
+
+        # Handler: Q2 login wall resolution
+        if handler and handler_ctx and handler.q2_resolve_login_wall(page, handler_ctx):
             continue
 
         # Login wall detection + account creation/login
@@ -1797,8 +1813,32 @@ def process_application(
                     page.reload(wait_until="domcontentloaded", timeout=30000)
                     page.wait_for_timeout(3000)
 
+            handler = get_handler(page.url)
+            handler_ctx = {
+                "profile": profile,
+                "logger": logger,
+                "job_id": job_id,
+                "title": title,
+                "company": company,
+            }
+
+            # Handler: Q2 pre-flight
+            q2_abort = handler.q2_pre_flight(page, handler_ctx)
+            if q2_abort:
+                logger.log("abort", "pre_flight", reasoning=q2_abort, confidence="high")
+                return q2_abort
+
             return _run_page_loop(
-                page, profile, title, company, resume_path, cover_letter_path, job_id, logger
+                page,
+                profile,
+                title,
+                company,
+                resume_path,
+                cover_letter_path,
+                job_id,
+                logger,
+                handler=handler,
+                handler_ctx=handler_ctx,
             )
 
         except Exception as e:
