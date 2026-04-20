@@ -638,3 +638,63 @@ class TestGreenhouseHandler:
         ):
             result = handler.handle_verification_code(page, ctx)
         assert "rejected" in result
+
+
+from ats_handlers.smartrecruiters import SmartRecruitersHandler  # noqa: E402
+
+
+class TestSmartRecruitersHandler:
+    def test_platform_name(self):
+        assert SmartRecruitersHandler().platform_name == "SmartRecruiters"
+
+    def test_pre_flight_navigates_to_oneclick(self):
+        handler = SmartRecruitersHandler()
+        page = MagicMock()
+        page.url = "https://jobs.smartrecruiters.com/Company/12345"
+        sr_link = MagicMock()
+        sr_link.get_attribute.return_value = (
+            "https://jobs.smartrecruiters.com/Company/12345/oneclick-ui/apply"
+        )
+        page.query_selector.return_value = sr_link
+        page.content.return_value = "<html>normal content</html>"
+        ctx = {"profile": MagicMock(), "job": {}, "cover_letter_path": ""}
+        result = handler.pre_flight(page, ctx)
+        assert result is None
+        page.goto.assert_called_once()
+
+    def test_pre_flight_datadome_blocks_after_retry(self):
+        handler = SmartRecruitersHandler()
+        page = MagicMock()
+        page.url = "https://jobs.smartrecruiters.com/Company/12345/oneclick-ui/apply"
+        page.query_selector.return_value = None
+        page.content.return_value = "<html>captcha-delivery verification required</html>"
+        ctx = {"profile": MagicMock(), "job": {"id": "test"}, "cover_letter_path": ""}
+        with patch("job_search_apply._dump_form_debug"):
+            result = handler.pre_flight(page, ctx)
+        assert result is not None
+        assert "anti-bot" in result or "DataDome" in result
+
+    def test_pre_flight_datadome_clears_after_retry(self):
+        handler = SmartRecruitersHandler()
+        page = MagicMock()
+        page.url = "https://jobs.smartrecruiters.com/Company/12345/oneclick-ui/apply"
+        page.query_selector.return_value = None
+        # First content() call: has DataDome. After reload: clean
+        page.content.side_effect = [
+            "<html>captcha-delivery</html>",
+            "<html>normal form content</html>",
+        ]
+        ctx = {"profile": MagicMock(), "job": {}, "cover_letter_path": ""}
+        result = handler.pre_flight(page, ctx)
+        assert result is None  # DataDome cleared, continues
+
+    def test_pre_flight_already_on_oneclick(self):
+        handler = SmartRecruitersHandler()
+        page = MagicMock()
+        page.url = "https://jobs.smartrecruiters.com/Company/12345/oneclick-ui/apply"
+        page.query_selector.return_value = None
+        page.content.return_value = "<html>normal</html>"
+        ctx = {}
+        result = handler.pre_flight(page, ctx)
+        assert result is None
+        page.goto.assert_not_called()  # already on oneclick, no navigation

@@ -6519,31 +6519,6 @@ def submit_external_apply(  # noqa: C901
                     except Exception:  # noqa: S110
                         pass
 
-            # SmartRecruiters job listing: navigate to /oneclick-ui/ application form
-            if "smartrecruiters.com" in page.url and "/oneclick-ui/" not in page.url:
-                sr_link = page.query_selector(
-                    "a.js-o-ats-btn[href*='oneclick-ui'], a[href*='oneclick-ui']"
-                )
-                if sr_link:
-                    sr_href = sr_link.get_attribute("href")
-                    if sr_href:
-                        log.debug("SmartRecruiters: navigating to %s", sr_href[:80])
-                        page.goto(sr_href, wait_until="domcontentloaded", timeout=20000)
-                        page.wait_for_timeout(3000)
-
-            # DataDome anti-bot: retry if slider CAPTCHA appears (intermittent)
-            if "smartrecruiters.com" in page.url:
-                body_check = page.content()[:4000].lower()
-                if "captcha-delivery" in body_check or "verification required" in body_check:
-                    log.info("   🛡️  DataDome challenge detected, waiting and retrying...")
-                    page.wait_for_timeout(5000)
-                    page.reload(wait_until="domcontentloaded", timeout=20000)
-                    page.wait_for_timeout(3000)
-                    body_check = page.content()[:4000].lower()
-                    if "captcha-delivery" in body_check or "verification required" in body_check:
-                        _dump_form_debug(page, job.get("id", ""), "DataDome anti-bot")
-                        return "failed: anti-bot challenge (DataDome)"
-
             # Wait for JS rendering and dismiss cookie banners
             _wait_and_dismiss_cookies(page)
 
@@ -6558,7 +6533,7 @@ def submit_external_apply(  # noqa: C901
                 "cover_letter_path": cover_letter_path,
             }
 
-            # Handler pre-flight (SmartRecruiters nav, DataDome, Workday cookies, etc.)
+            # Handler pre-flight (platform-specific setup, e.g. Workday cookie banner)
             pre_flight_result = handler.pre_flight(page, handler_ctx)
             if pre_flight_result:
                 return pre_flight_result
