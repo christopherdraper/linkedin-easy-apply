@@ -75,3 +75,51 @@ class TestDefaultHandlerHooks:
     def test_q2_resolve_login_wall_returns_false(self):
         result = self.handler.q2_resolve_login_wall(self.page, self.ctx)
         assert result is False
+
+
+from ats_handlers import get_handler  # noqa: E402
+
+
+class TestHandlerRegistry:
+    def test_unknown_url_returns_default(self):
+        handler = get_handler("https://some-random-site.com/apply")
+        assert isinstance(handler, DefaultHandler)
+        assert handler.platform_name == "unknown"
+
+    def test_workday_url(self):
+        handler = get_handler("https://company.wd5.myworkdayjobs.com/en-US/External/job/Senior-SRE")
+        assert handler.platform_name == "Workday"
+
+    def test_greenhouse_url(self):
+        handler = get_handler("https://boards.greenhouse.io/company/jobs/123")
+        assert handler.platform_name == "Greenhouse"
+
+    def test_smartrecruiters_url(self):
+        handler = get_handler("https://jobs.smartrecruiters.com/Company/12345")
+        assert handler.platform_name == "SmartRecruiters"
+
+    def test_lever_url(self):
+        handler = get_handler("https://jobs.lever.co/company/abc-123")
+        assert handler.platform_name == "Lever"
+
+    def test_ashby_url(self):
+        handler = get_handler("https://jobs.ashbyhq.com/company/abc-123")
+        assert handler.platform_name == "Ashby"
+
+    def test_handler_is_singleton(self):
+        h1 = get_handler("https://boards.greenhouse.io/a/jobs/1")
+        h2 = get_handler("https://boards.greenhouse.io/b/jobs/2")
+        assert h1 is h2
+
+    def test_all_hooks_callable_on_default(self):
+        handler = get_handler("https://unknown.com/apply")
+        page = object()
+        ctx = {}
+        assert handler.pre_flight(page, ctx) is None
+        assert handler.on_step_start(page, ctx) is None
+        assert handler.resolve_login_wall(page, ctx) is False
+        assert handler.handle_verification_code(page, ctx) is None
+        assert handler.on_submit_clicked(page, ctx) is None
+        assert handler.detect_success(page, ctx) is False
+        assert handler.q2_pre_flight(page, ctx) is None
+        assert handler.q2_resolve_login_wall(page, ctx) is False
