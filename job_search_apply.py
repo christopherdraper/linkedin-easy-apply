@@ -3506,6 +3506,9 @@ _ATS_PATTERNS = [
     ("Greenhouse", "greenhouse.io"),
     ("Greenhouse", "boards.greenhouse.io"),
     ("Greenhouse", "job-boards.greenhouse.io"),
+    # Embedded Greenhouse on a company's own careers page uses ?gh_jid=<id>
+    ("Greenhouse", "gh_jid="),
+    ("Greenhouse", "grnh.se"),
     ("Lever", "jobs.lever.co"),
     ("iCIMS", "icims.com"),
     ("Ashby", "ashbyhq.com"),

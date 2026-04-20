@@ -692,6 +692,16 @@ class TestDetectAtsPlatform:
         for url, expected in cases:
             assert _detect_ats_platform(url) == expected, f"Failed for {url}"
 
+    def test_embedded_greenhouse(self):
+        cases = [
+            ("https://www.nintex.com/careers/jobs/?gh_jid=7776166", "Greenhouse"),
+            ("https://www.nintex.com/careers/jobs/?gh_jid=7776166#nintex-job-form", "Greenhouse"),
+            ("https://grnh.se/abc123", "Greenhouse"),
+            ("https://company.com/jobs?gh_jid=42", "Greenhouse"),
+        ]
+        for url, expected in cases:
+            assert _detect_ats_platform(url) == expected, f"Failed for {url}"
+
     def test_unknown_url(self):
         assert _detect_ats_platform("https://company.com/careers/apply") == "unknown"
         assert _detect_ats_platform("https://www.linkedin.com/jobs/view/123") == "unknown"
