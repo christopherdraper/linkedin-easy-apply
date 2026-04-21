@@ -581,6 +581,28 @@ class TestAshbyHandler:
         result = handler.pre_flight(page, ctx)
         assert result is None
 
+    def test_on_step_start_detects_spam_after_hydration(self):
+        """React SPA renders the spam banner after hydration, so per-step
+        checks catch it even when pre_flight ran too early."""
+        handler = AshbyHandler()
+        page = MagicMock()
+        page.evaluate.return_value = (
+            "sre / devops engineer. we couldn't submit your application. "
+            "your application submission was flagged as possible spam."
+        )
+        ctx = {"job": {"id": "test"}}
+        result = handler.on_step_start(page, ctx)
+        assert result is not None
+        assert "spam" in result.lower()
+
+    def test_on_step_start_no_spam_returns_none(self):
+        handler = AshbyHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "first name last name email phone"
+        ctx = {}
+        result = handler.on_step_start(page, ctx)
+        assert result is None
+
 
 from ats_handlers.greenhouse import GreenhouseHandler  # noqa: E402
 

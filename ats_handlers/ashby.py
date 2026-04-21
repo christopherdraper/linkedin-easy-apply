@@ -27,6 +27,15 @@ class AshbyHandler(BaseATSHandler):
         """Detect spam rejection shown on page load (before form filling)."""
         return self._check_spam_banner(page, "pre-flight")
 
+    def on_step_start(self, page, ctx: dict) -> Optional[str]:
+        """Detect spam rejection on each form-step iteration.
+
+        Ashby is a React SPA; the pre_flight hook may run before the client
+        hydrates and renders the spam banner. The form-step loop gives React
+        multiple chances to finish rendering before we declare the form stuck.
+        """
+        return self._check_spam_banner(page, "per-step")
+
     def on_submit_clicked(self, page, ctx: dict) -> Optional[str]:
         """Detect spam rejection after clicking submit."""
         return self._check_spam_banner(page, "post-submit")
