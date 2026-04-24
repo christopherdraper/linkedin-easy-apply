@@ -1,92 +1,106 @@
-# Job Apply Skill — CLAUDE.md
+# CLAUDE.md
 
-## Project Layout
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-```
-~/.openclaw/skills/job-apply/     # Code lives here
-  job_search_apply.py             # Main module: search, score, apply (Easy Apply + external ATS)
-  dashboard.py                    # Flask dashboard + per-application report pages
-  templates/                      # dashboard.html, report.html
-  tests/                          # pytest suite (scoring, screening, injection defense, etc.)
-  pyproject.toml                  # ruff, pytest, bandit config
-
-~/.local/share/job-apply/         # Runtime data (not in repo)
-  profile.json                    # Applicant profile — source of truth for all form fills
-  applications.json               # Application log (read by dashboard)
-  search_log.json                 # Market snapshot data
-  linkedin_cookies.json           # Auth session
-  cover-letters/                  # Generated cover letters (one per application)
-  debug/                          # Screenshots + HTML dumps of failed forms
-  sessions/                       # Playwright session storage
-```
-
-## Running Batches
+## Quick Reference
 
 ```bash
-python ~/.openclaw/skills/job-apply/job_search_apply.py \
-  --max-applications 50 --min-score 0.5
+# Lint & format
+ruff check --fix .
+ruff format .
+
+# Tests
+pytest                                  # full suite
+pytest tests/test_screening.py          # single file
+pytest tests/test_screening.py -k test_yes_no  # single test by name
+pytest -v --cov=. --cov-report=term-missing     # with coverage
+
+# Security scan
+bandit -r job_search_apply.py -c pyproject.toml
+
+# Dead code check
+vulture job_search_apply.py --min-confidence 80
+
+# Run the main script
+python job_search_apply.py --title "Staff SRE" --dry-run
+python job_search_apply.py --max-applications 50 --min-score 0.5
+
+# Dashboard
+python dashboard.py                     # http://localhost:5050
 ```
 
-## Key CLI Flags
+## Key CLI Flags (job_search_apply.py)
 
-- `--dry-run` — score and log only, no submissions
-- `--max-applications N` — cap submissions per run
-- `--min-score X` — skip jobs below this match score (0.0–1.0)
-- `--title "Staff SRE"` — search specific title (default: all titles from profile)
-- `--source linkedin|remoteok|hn|biotech|all` — job source
-- `--market-snapshot` — count postings per title, no applications
-- `--external-url URL` — apply to a single external ATS URL
+`--dry-run`, `--max-applications N`, `--min-score X`, `--title "..."`,
+`--source linkedin|remoteok|hn|biotech|all`, `--market-snapshot`, `--external-url URL`
 
-## Architecture Notes
+## Architecture
 
-- `job_search_apply.py` is one large module (~4600 lines). Key sections:
-  - Profile loading / dataclass (`ApplicantProfile`)
-  - Job scoring via Claude AI (`_score_job`)
-  - Easy Apply form navigation (`_navigate_form`, `submit_easy_apply`)
-  - External ATS form filling (`_navigate_external_form`, `submit_external_apply`)
-  - AI form answering (`_ai_answer_question`, `_build_form_prompt`)
-  - Cover letter generation
-  - Hiring manager messaging (`_ai_draft_hiring_message`, `_send_hiring_manager_message`)
-  - Deal-breaker detection
-- Dashboard (`dashboard.py`) is a separate Flask app on port 5050
-  - `/` — main dashboard with market pulse + application table
-  - `/report/<job_id>` — per-application audit page (fields filled, cover letter, match reasoning)
+### Modules
 
-## Linting & Tests
+| Module | Lines | Purpose |
+|--------|------:|---------|
+| `job_search_apply.py` | ~7400 | Core: search, score, Easy Apply + external ATS form filling, cover letters, hiring manager messaging |
+| `assisted_apply_mcp.py` | ~2000 | Q2 agent: retries failed applications using Playwright + Claude AI (replaces deep_apply) |
+| `deep_apply_computer_use.py` | ~500 | **Deprecated.** Q1 fallback agent using Xvfb + xdotool + screenshot vision |
+| `batch_analysis.py` | ~400 | Post-batch failure analysis → creates GitHub issues for recurring patterns |
+| `dashboard.py` | ~400 | Flask dashboard (port 5050): market pulse, application table, per-app report pages |
 
-```bash
-ruff check --fix .     # lint (ruff auto-fixes on pre-commit hook)
-ruff format .          # format
-pytest                 # run test suite
-```
+### job_search_apply.py sections
 
-- ruff enforces max complexity 15 (`C901`). Two functions have `# noqa: C901` exemptions:
-  `_navigate_form` and `_send_hiring_manager_message` — both are inherently complex state machines.
-- Pre-commit hook runs ruff check + format. If it modifies files, re-stage before committing.
+- `ApplicantProfile` dataclass — profile loading
+- `_score_job` — job/profile matching via Claude AI (returns score + reasoning)
+- `_navigate_form` / `submit_easy_apply` — Easy Apply modal navigation
+- `_navigate_external_form` / `submit_external_apply` — external ATS (Workday, Greenhouse, Lever)
+- `_ai_answer_question` / `_build_form_prompt` — AI-powered form field answers
+- `_ai_draft_hiring_message` / `_send_hiring_manager_message` — post-apply DMs
+- `auto_apply_workflow` / `main` — batch orchestration
+
+### Data flow
+
+Profile (`~/.local/share/job-apply/profile.json`) → screening answer lookup (fuzzy keyword match on form labels) → Claude AI fallback for unmatched questions → application log (`applications.json`) → dashboard reads log for display.
+
+## CI Pipeline (GitHub Actions)
+
+Three workflows run on push/PR to `main`:
+
+1. **Tests** (`test.yml`): `pytest` with coverage — fails below 15% coverage
+2. **Lint** (`lint.yml`): `ruff check` + `ruff format --check` + `bandit` security scan + `vulture` dead code
+3. **Quality** (`quality.yml`): `radon` complexity (fails if >3 F-grade functions) + `pylint` (fails below 5.0/10)
+
+## Pre-commit Hooks
+
+Defined in `.pre-commit-config.yaml`: ruff lint+format, bandit, vulture, pytest.
+If ruff auto-fixes files, re-stage them before committing.
+
+## Code Style Notes
+
+- ruff config in `pyproject.toml`: line-length 100, Python 3.9 target, double quotes
+- Max cyclomatic complexity 15 (`C901`). Many complex state-machine functions carry `# noqa: C901` — add new exemptions sparingly.
+- Bandit skips: `B110/B112` (intentional try/except/pass), `B310` (urlopen on API URLs), `B311` (random for timing jitter), `B404/B603/B607` (Xvfb subprocess with hardcoded args)
 
 ## AI Usage
 
-- All AI calls go through the Anthropic API (Claude Sonnet for form fills/scoring, same for cover letters)
-- `_ai_answer_question`: form field answers, `max_tokens=25`, retries once at 15 if >100 chars
-- `_ai_draft_hiring_message`: hiring manager DMs, `max_tokens=200`
+- All AI calls use the Anthropic API via `anthropic` SDK. Key: `ANTHROPIC_API_KEY` env var.
+- `_ai_answer_question`: form answers, `max_tokens=25`, retries once at 15 if >100 chars
 - `_score_job`: job/profile matching, returns score + reasoning
-- API key via `ANTHROPIC_API_KEY` env var
+- `_ai_draft_hiring_message`: hiring manager DMs, `max_tokens=200`
+- `assisted_apply_mcp.py` uses `claude-sonnet-4-6` for page-level form reasoning
 
 ## Common Failure Modes
 
-- **"no Apply button found"**: External job listing has no detectable apply link on LinkedIn page
-- **Autocomplete location fields**: Greenhouse/Lever location inputs need type-and-select, standard fill doesn't work
-- **CAPTCHA/security checks**: Unsolvable by bot, form correctly aborts
-- **Form stalls**: Validation errors the bot can't resolve (e.g., missing location). Stall recovery fills empty required fields and retries up to 4 times before dumping debug screenshot.
+- **"no Apply button found"**: External listing has no detectable apply link on LinkedIn page
+- **Autocomplete location fields**: Greenhouse/Lever need type-and-select, standard fill fails
+- **CAPTCHA/security checks**: Unsolvable by bot, correctly aborts
+- **Form stalls**: Validation errors bot can't resolve; stall recovery fills empty required fields and retries up to 4 times, then dumps debug screenshot
 
 ## Profile (profile.json)
 
-The profile is the single source of truth. Key fields:
-- `screening_answers`: dict of question keywords → answers (matched fuzzy against form labels)
-- `years_total`: 12
-- `search_criteria.job_titles`: list of titles to search (cycled through in batch runs)
-- `application_settings.message_hiring_manager`: bool — send DM to poster after apply
-- `resume_path`: path to PDF resume uploaded with applications
+Single source of truth. Key fields:
+- `screening_answers`: question keywords → answers (fuzzy-matched against form labels)
+- `search_criteria.job_titles`: titles to search (cycled in batch runs)
+- `application_settings.message_hiring_manager`: send DM to poster after apply
+- `resume_path`: PDF resume path for uploads
 
 ---
 
