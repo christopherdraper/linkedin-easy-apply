@@ -1,15 +1,19 @@
-# Job Apply Skill -- CLAUDE.md
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Layout
 
 ```
 ~/.openclaw/skills/job-apply/          # Code lives here
-  job_search_apply.py                  # Q1: search, score, Easy Apply + external ATS (~7200 lines)
-  assisted_apply_mcp.py                # Q2: MCP Playwright autonomous retry agent (~1800 lines)
+  job_search_apply.py                  # Q1: search, score, Easy Apply + external ATS (~7400 lines)
+  assisted_apply_mcp.py                # Q2: MCP Playwright autonomous retry agent (~2000 lines)
+  deep_apply_computer_use.py           # Deprecated Q1 fallback (Xvfb + xdotool + screenshot vision)
+  batch_analysis.py                    # Post-batch failure analysis -> GitHub issues for recurring patterns
   dashboard.py                         # Flask dashboard + per-application report pages
   templates/                           # dashboard.html, report.html, decision_log.html
-  ats_handlers/                         # Per-ATS handler modules (Workday, Greenhouse, SmartRecruiters, etc.)
-  tests/                               # pytest suite (258 tests: scoring, screening, injection defense, handlers)
+  ats_handlers/                        # Per-ATS handler modules (Workday, Greenhouse, SmartRecruiters, etc.)
+  tests/                               # pytest suite (scoring, screening, injection defense, handlers)
   pyproject.toml                       # ruff, pytest, bandit config
 
 ~/.local/share/job-apply/              # Runtime data (not in repo)
@@ -21,6 +25,32 @@
   cover-letters/                       # Generated cover letters (.docx, legacy .txt auto-converted)
   debug/                               # Screenshots + HTML dumps of failed forms
   sessions/                            # Playwright session storage
+```
+
+## Quick Reference
+
+```bash
+# Lint & format
+ruff check --fix .
+ruff format .
+
+# Tests
+pytest                                           # full suite
+pytest tests/test_screening.py                   # single file
+pytest tests/test_screening.py -k test_yes_no    # single test by name
+pytest -v --cov=. --cov-report=term-missing      # with coverage
+
+# Security + dead-code scans
+bandit -r job_search_apply.py -c pyproject.toml
+vulture job_search_apply.py --min-confidence 80
+
+# Run the main script
+python job_search_apply.py --max-applications 50 --min-score 0.75
+python job_search_apply.py --market-snapshot
+python job_search_apply.py --external-url <url> --dry-run
+
+# Dashboard
+python dashboard.py                              # http://localhost:5050
 ```
 
 ## Three-Tier Queue System
@@ -132,14 +162,14 @@ Per-platform modules for ATS-specific quirks. Handlers override lifecycle hooks 
 ```
 ats_handlers/
   __init__.py       # Public API: get_handler(url), register()
-  _base.py          # BaseATSHandler ABC -- all hook signatures
+  _base.py          # BaseATSHandler ABC -- all hook signatures + shared helpers (cookie banner dismiss)
   _registry.py      # HandlerRegistry -- maps platform names to handler singletons
   default.py        # DefaultHandler (no-op hooks, used for unknown platforms)
   workday.py        # Cookie banners, autofill popup, login wall override
-  greenhouse.py     # Email verification code flow (IMAP fetch + code entry)
+  greenhouse.py     # Email verification codes, OneTrust dismissal, ?gh_jid= iframe jump
   smartrecruiters.py # /oneclick-ui/ navigation, DataDome anti-bot
   lever.py          # Passthrough (0% success, no special handling yet)
-  ashby.py          # Spam filter detection after submit
+  ashby.py          # Spam filter detection on page load + after submit
 ```
 
 **Lifecycle hooks (Q1):** `pre_flight`, `on_step_start`, `resolve_login_wall`, `handle_verification_code`, `on_submit_clicked`, `detect_success`
@@ -152,11 +182,21 @@ ats_handlers/
 3. Call `register("<PlatformName>", YourHandler)` at module level
 4. Add `import ats_handlers.<platform>` to `ats_handlers/__init__.py`
 5. Add tests to `tests/test_ats_handlers.py`
-6. Test with a real URL: `python job_search_apply.py --external-url <url> --dry-run`
+6. Verify with a real URL: `python job_search_apply.py --external-url <url> --dry-run`
 
 ## Architecture Notes
 
-### Q1 (`job_search_apply.py`, ~7200 lines)
+### Modules at a glance
+
+| Module | Lines | Purpose |
+|--------|------:|---------|
+| `job_search_apply.py` | ~7400 | Core: search, score, Easy Apply + external ATS form filling, cover letters, hiring manager messaging |
+| `assisted_apply_mcp.py` | ~2000 | Q2 agent: retries failed applications using Playwright + Claude AI |
+| `deep_apply_computer_use.py` | ~500 | **Deprecated.** Q1 fallback agent using Xvfb + xdotool + screenshot vision |
+| `batch_analysis.py` | ~400 | Post-batch failure analysis -> creates GitHub issues for recurring patterns |
+| `dashboard.py` | ~400 | Flask dashboard (port 5050): market pulse, application table, per-app report pages |
+
+### Q1 (`job_search_apply.py`)
 - Profile loading / dataclass (`ApplicantProfile`)
 - Job scoring via Claude AI (`_score_job`, `ai_score_job`)
 - Easy Apply form navigation (`_navigate_form`, `submit_easy_apply`)
@@ -171,7 +211,7 @@ ats_handlers/
 - Gmail IMAP verification code fetching (`_fetch_verification_code_from_gmail`)
 - ATS URL capture: `_final_ats_url` global is set during external apply and stored in both application record and queue entry
 
-### Q2 (`assisted_apply_mcp.py`, ~1800 lines)
+### Q2 (`assisted_apply_mcp.py`)
 - `_match_field_to_profile`: deterministic profile lookup (name, email, phone, etc.)
 - `_ai_analyze_page`: sends page snapshot + profile to Claude, returns fill/click/select actions
 - `_ai_answer_field`: single-field AI fallback for fields deterministic matching missed
@@ -190,27 +230,40 @@ ats_handlers/
 - `/report/<job_id>` -- per-application audit page (fields filled, cover letter, match reasoning)
 - Q2/Q3 sections with decision log viewer
 
-## Linting & Tests
+### Data flow
+
+Profile (`~/.local/share/job-apply/profile.json`) -> screening answer lookup (fuzzy keyword match on form labels) -> Claude AI fallback for unmatched questions -> application log (`applications.json`) -> dashboard reads log for display.
+
+## CI Pipeline (GitHub Actions)
+
+Three workflows run on push/PR to `main`:
+
+1. **Tests** (`test.yml`): `pytest` with coverage -- fails below 15% coverage
+2. **Lint** (`lint.yml`): `ruff check` + `ruff format --check` + `bandit` security scan + `vulture` dead code
+3. **Quality** (`quality.yml`): `radon` complexity (fails if >3 F-grade functions) + `pylint` (fails below 5.0/10)
+
+## Linting, Pre-commit Hooks, Code Style
 
 ```bash
 ruff check --fix .     # lint (ruff auto-fixes on pre-commit hook)
 ruff format .          # format
-pytest                 # run test suite (258 tests)
+pytest                 # run test suite
 ```
 
-- ruff enforces max complexity 15 (`C901`). Functions with `# noqa: C901` exemptions:
-  `_navigate_form`, `_send_hiring_manager_message`, `_run_page_loop` -- all complex state machines.
-- Pre-commit hook runs ruff check + format + bandit + vulture + pytest. If it modifies files, re-stage before committing.
+- Pre-commit hooks (`.pre-commit-config.yaml`): ruff lint+format, bandit, vulture, pytest. If ruff auto-fixes files, re-stage them before committing.
+- ruff config in `pyproject.toml`: line-length 100, Python 3.9 target, double quotes.
+- Max cyclomatic complexity 15 (`C901`). Existing `# noqa: C901` exemptions: `_navigate_form`, `_send_hiring_manager_message`, `_run_page_loop` -- all complex state machines. Add new exemptions sparingly.
+- Bandit skips: `B110/B112` (intentional try/except/pass), `B310` (urlopen on API URLs), `B311` (random for timing jitter), `B404/B603/B607` (Xvfb subprocess with hardcoded args)
 
 ## AI Usage
 
-- All AI calls go through the Anthropic API
-- Haiku for job scoring (cost optimization), Sonnet for form fills and cover letters
+- All AI calls go through the Anthropic API (`anthropic` SDK). Key: `ANTHROPIC_API_KEY` env var.
+- Haiku for job scoring (cost optimization), Sonnet for form fills and cover letters.
 - `_ai_answer_question` (Q1): form field answers, `max_tokens=25`, retries once at 15 if >100 chars
 - `_ai_analyze_page` (Q2): full page analysis, `max_tokens=2048`, returns JSON array of actions
 - `_ai_answer_field` (Q2): single-field fallback
 - `_ai_draft_hiring_message`: hiring manager DMs, `max_tokens=200`
-- API key via `ANTHROPIC_API_KEY` env var
+- `assisted_apply_mcp.py` uses `claude-sonnet-4-6` for page-level form reasoning
 
 ## Lessons Learned / Known Issues
 
@@ -222,6 +275,12 @@ Cover letters are generated as `.docx` (Calibri 11pt via python-docx). Legacy `.
 
 ### Screening Answer False Matches (fixed 2026-04-11)
 Short screening answer keys like `"state"` would substring-match against question text containing "United States", causing "Indiana" to be filled for work authorization yes/no questions. Fix: word-boundary matching for short keys (<10 chars) + skip list for generic field names (state, city, country, language, etc.) when the label contains `?`. The AI system prompt also has explicit rules about yes/no questions.
+
+### Generic Apply-button selector required :visible (fixed 2026-04-24)
+The generic Apply-button lookup in `_navigate_external_form` used `button:has-text('Apply')` without a visibility filter. On pages with OneTrust cookie preference-center modals, this matched the hidden `#filter-apply-handler` button ("Apply" = apply cookie filter settings), which `_safe_click`'s JS fallback fired successfully but navigated nowhere, trapping the form loop in a no-op spin ("Job listing page detected" 3x then form_stuck). Fix: added `:visible` to every alternative in the Apply-button selector. Verified on Coalition's embedded Greenhouse.
+
+### Greenhouse iframe embeds (fixed 2026-04-24)
+Sites that embed Greenhouse via `?gh_jid=` on a company careers page (Coalition, Nintex, etc.) render the Greenhouse form inside an iframe. The outer page has no form fields, so the generic loop only sees an Apply button, clicking it does not navigate, and the loop stalls. `GreenhouseHandler.pre_flight` now detects the embed and navigates directly to the iframe's src URL (`job-boards.greenhouse.io/embed/job_app?for=...&token=...`), so the form loop runs against the real Greenhouse form. Verified on Coalition (40 visible inputs after jump).
 
 ### Greenhouse Verification Codes
 - Codes are fetched via Gmail IMAP (`_fetch_verification_code_from_gmail`)
@@ -275,7 +334,7 @@ Q2 processes entries sequentially. If it hits a known-bad platform (Alignerr OAu
 - **Easy Apply**: ~67% success
 - **Greenhouse**: ~57% success (verification codes are the main challenge)
 - **Ashby**: ~3% success (application-level spam filter, proxy doesn't help)
-- **Lever**: 0% success (all 7 attempts failed)
+- **Lever**: 0% success (all 7 attempts failed; hCaptcha the usual blocker)
 - **Workday**: ~29% success (requires account, dropdown loops)
 - **Eightfold**: low success (CAPTCHA loops)
 - **Comeet**: works with .docx fix (only 1 application seen)
@@ -287,6 +346,12 @@ Q2 processes entries sequentially. If it hits a known-bad platform (Alignerr OAu
 - **Workday**: frequently requires account creation, dropdowns loop
 - **Eightfold**: reCAPTCHA loops drain 2captcha credits without progress
 
+### Generic failure categories (surface in `applications.json -> status`)
+- **"no Apply button found"**: External listing has no detectable apply link on LinkedIn page
+- **Autocomplete location fields**: Greenhouse/Lever need type-and-select, standard fill fails
+- **CAPTCHA/security checks**: Correctly aborts when 2captcha can't solve (e.g. recaptchav2_enterprise ERROR_CAPTCHA_UNSOLVABLE)
+- **Form stalls**: Validation errors bot can't resolve; stall recovery fills empty required fields and retries up to 4 times, then dumps debug screenshot
+
 ## Profile (profile.json)
 
 The profile is the single source of truth. Key fields:
@@ -297,6 +362,7 @@ The profile is the single source of truth. Key fields:
 - `application_settings.message_hiring_manager`: bool -- send DM to poster after apply
 - `application_settings.gmail_app_password`: Gmail app password for verification code IMAP fetch
 - `application_settings.auto_fetch_verification_codes`: bool toggle
+- `application_settings.captcha_api_key` + `captcha_service`: 2captcha or capsolver credentials
 - `profile.documents.resume_path`: path to .docx resume
 - `profile.preferences.min_match_score`: 0.75
 - `profile.preferences.proxy_rules`: domain -> SOCKS5 proxy mapping (only smartrecruiters.com currently)
@@ -314,3 +380,71 @@ The profile is the single source of truth. Key fields:
 - Currently only used for SmartRecruiters (Incapsula WAF)
 - PageUp (Incapsula) was also proxied previously
 - Ashby spam filter is application-level, proxy doesn't help
+
+---
+
+# Behavioral Guidelines
+
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
