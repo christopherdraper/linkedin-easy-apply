@@ -3512,6 +3512,8 @@ _ATS_PATTERNS = [
     ("Lever", "jobs.lever.co"),
     ("iCIMS", "icims.com"),
     ("Ashby", "ashbyhq.com"),
+    # Embedded Ashby on a company's own careers page uses ?ashby_jid=<id>
+    ("Ashby", "ashby_jid="),
     ("SmartRecruiters", "smartrecruiters.com"),
     ("Jobvite", "jobvite.com"),
     ("BambooHR", "bamboohr.com"),
@@ -6080,16 +6082,21 @@ def _navigate_external_form(  # noqa: C901
         # Job listing page with Apply button (Workday, company career pages)
         # If no form fields and page has an Apply button, click through to the form
         if not classification.get("has_form_fields") and not classification.get("has_file_upload"):
+            # Apply-button lookup must require :visible -- otherwise generic
+            # :has-text('Apply') selectors can match hidden elements inside
+            # cookie-consent modals (e.g. OneTrust's #filter-apply-handler),
+            # which _safe_click fires via JS and navigates nowhere, stalling
+            # the form loop on "Job listing page detected" forever.
             apply_btn = page.query_selector(
-                "a[data-automation-id='jobPostingApplyButton'], "
-                "button[data-automation-id='jobPostingApplyButton'], "
-                "a[data-automation-id='adventureButton'], "
-                "button[data-automation-id='adventureButton'], "
-                "a:has-text('Apply'):not(:has-text('Indeed')), "
-                "button:has-text('Apply'):not(:has-text('Indeed')), "
-                "a[href*='/apply'], "
-                "a.css-1ixbfil, "  # Workday apply button class
-                "a[data-uxi-element-id='Apply']"
+                "a[data-automation-id='jobPostingApplyButton']:visible, "
+                "button[data-automation-id='jobPostingApplyButton']:visible, "
+                "a[data-automation-id='adventureButton']:visible, "
+                "button[data-automation-id='adventureButton']:visible, "
+                "a:visible:has-text('Apply'):not(:has-text('Indeed')), "
+                "button:visible:has-text('Apply'):not(:has-text('Indeed')), "
+                "a[href*='/apply']:visible, "
+                "a.css-1ixbfil:visible, "  # Workday apply button class
+                "a[data-uxi-element-id='Apply']:visible"
             )
             if apply_btn:
                 log.info("   🔗 Job listing page detected, clicking Apply button...")

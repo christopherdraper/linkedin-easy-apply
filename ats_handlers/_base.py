@@ -73,6 +73,48 @@ class BaseATSHandler(ABC):
         """Short identifier for the ATS platform, e.g. ``"workday"`` or ``"greenhouse"``."""
 
     # ------------------------------------------------------------------
+    # Shared helpers (handlers opt-in by calling these)
+    # ------------------------------------------------------------------
+
+    def _dismiss_cookie_banner(self, page) -> None:
+        """Click visible cookie-consent banners / preference modals, if present.
+
+        Handles two OneTrust variants plus generic accept labels:
+        - The small banner at page bottom (``#onetrust-accept-btn-handler``)
+        - The full Preference Center modal (``#accept-recommended-btn-handler``)
+          which overlays the page and whose internal ``#filter-apply-handler``
+          button gets mis-clicked by generic ``button:has-text('Apply')`` lookups.
+
+        Tries each selector independently so a non-visible earlier match
+        doesn't short-circuit a visible later match (query_selector returns
+        the first DOM-order match regardless of selector order).
+
+        Best-effort: swallows errors so handlers can call this unconditionally
+        in pre_flight or on_step_start.
+        """
+        selectors = [
+            "#onetrust-accept-btn-handler",
+            "#accept-recommended-btn-handler",
+            "[data-testid='cookie-accept']",
+            "button.cc-allow",
+            "button:has-text('Accept All')",
+            "button:has-text('Accept all')",
+            "button:has-text('Accept Cookies')",
+            "button:has-text('Allow All')",
+        ]
+        from job_search_apply import _safe_click
+
+        for sel in selectors:
+            try:
+                btn = page.query_selector(sel)
+                if btn and btn.is_visible():
+                    _safe_click(btn, page)
+                    page.wait_for_timeout(1000)
+                    return
+            except Exception:  # noqa: BLE001, S112
+                continue
+
+    # ------------------------------------------------------------------
     # Q1 hooks
     # ------------------------------------------------------------------
 

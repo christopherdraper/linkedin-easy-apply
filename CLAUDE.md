@@ -122,6 +122,9 @@ Prefer a handler registry pattern (detect platform, dispatch to handler) over gr
 ### Test against the platform you're changing, not just unit tests
 Unit tests verify code correctness, not platform behavior. After changing ATS-specific code, test with a real URL from that platform using `--external-url`. The 258-test suite doesn't catch Workday cookie banners or Greenhouse verification flow regressions.
 
+### Nothing is "fixed" without a real-world test
+A fix is not fixed until it has been exercised against the actual site that was failing. Unit tests and code-path reasoning are necessary but not sufficient. Every handler change must be confirmed with `python job_search_apply.py --external-url <url> --dry-run` (or equivalent Q2 run) against a URL representative of the failure. If the fix applies to several handlers or sites, each one needs its own live run -- do not extrapolate from one success. Report status as "verified on <url>" or "untested against <url>"; never as just "fixed." If you cannot run the live test (no URL available, auth wall, rate limit), say so explicitly and mark the fix pending verification -- do not claim success.
+
 ## ATS Handler Registry (`ats_handlers/` package)
 
 Per-platform modules for ATS-specific quirks. Handlers override lifecycle hooks called by the generic form-filling loop.

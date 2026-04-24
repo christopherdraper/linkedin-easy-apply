@@ -313,23 +313,5 @@ class WorkdayHandler(BaseATSHandler):
     def q2_resolve_login_wall(self, page, ctx):
         return True
 
-    @staticmethod
-    def _dismiss_cookie_banner(page):
-        try:
-            btn = page.query_selector(
-                "#onetrust-accept-btn-handler, "
-                "[data-testid='cookie-accept'], "
-                "button:has-text('Accept All'):visible, "
-                "button:has-text('Accept all'):visible, "
-                "button:has-text('Accept Cookies'):visible"
-            )
-            if btn and btn.is_visible():
-                from job_search_apply import _safe_click
-
-                _safe_click(btn, page)
-                page.wait_for_timeout(1000)
-        except Exception:  # noqa: BLE001, S110
-            pass
-
 
 register("Workday", WorkdayHandler)

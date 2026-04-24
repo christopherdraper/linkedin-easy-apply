@@ -611,6 +611,27 @@ class TestGreenhouseHandler:
     def test_platform_name(self):
         assert GreenhouseHandler().platform_name == "Greenhouse"
 
+    def test_pre_flight_dismisses_cookie_banner(self):
+        """Coalition (embedded Greenhouse via ?gh_jid=) failed because OneTrust
+        overlay blocked Apply-button clicks. pre_flight now accepts the banner."""
+        handler = GreenhouseHandler()
+        page = MagicMock()
+        banner_btn = MagicMock()
+        banner_btn.is_visible.return_value = True
+        page.query_selector.return_value = banner_btn
+        with patch("job_search_apply._safe_click") as safe_click:
+            result = handler.pre_flight(page, {})
+        assert result is None
+        safe_click.assert_called_once()
+
+    def test_pre_flight_noop_without_banner(self):
+        handler = GreenhouseHandler()
+        page = MagicMock()
+        page.query_selector.return_value = None
+        with patch("job_search_apply._safe_click") as safe_click:
+            handler.pre_flight(page, {})
+        safe_click.assert_not_called()
+
     def test_handle_verification_no_gmail_password(self):
         """Falls through to generic handling when no gmail password."""
         handler = GreenhouseHandler()

@@ -20,6 +20,41 @@ class GreenhouseHandler(BaseATSHandler):
     def platform_name(self) -> str:
         return "Greenhouse"
 
+    def pre_flight(self, page, ctx: dict) -> Optional[str]:
+        """Short-circuit embedded Greenhouse (``?gh_jid=``) by navigating
+        directly to the ``job-boards.greenhouse.io/embed/job_app`` iframe URL.
+
+        Coalition, Nintex and similar sites put the Greenhouse form in an
+        iframe on their careers page. The bot's Apply-Now click scrolls the
+        outer page but never exposes the form to the outer-page form-filling
+        logic -- inputs live inside the iframe's frame context. Jumping
+        straight to the iframe URL puts the Greenhouse form on the main page
+        so the generic loop can fill it. Also dismisses OneTrust cookie
+        banners that appear on the outer page before the jump.
+        """
+        self._dismiss_cookie_banner(page)
+        if "gh_jid=" in (page.url or "") and "greenhouse.io" not in page.url:
+            try:
+                iframe = page.query_selector("iframe[src*='greenhouse.io']")
+                if iframe:
+                    src = iframe.get_attribute("src")
+                    if src:
+                        log.info("   Greenhouse: jumping to embedded iframe URL: %s", src[:100])
+                        page.goto(src, timeout=30000)
+                        page.wait_for_timeout(2000)
+            except Exception as e:  # noqa: BLE001
+                log.debug("Greenhouse embed iframe jump failed: %s", e)
+        return None
+
+    def on_step_start(self, page, ctx: dict) -> Optional[str]:
+        """Re-dismiss the cookie overlay between steps. OneTrust's Preference
+        Center can re-open after navigation, and its internal
+        ``#filter-apply-handler`` button is what the generic Apply-button
+        selector ends up clicking, putting the loop into a no-op spin.
+        """
+        self._dismiss_cookie_banner(page)
+        return None
+
     def handle_verification_code(self, page, ctx: dict) -> Optional[str]:  # noqa: C901
         """Handle Greenhouse email verification code flow.
 

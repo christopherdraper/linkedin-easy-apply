@@ -702,6 +702,15 @@ class TestDetectAtsPlatform:
         for url, expected in cases:
             assert _detect_ats_platform(url) == expected, f"Failed for {url}"
 
+    def test_embedded_ashby(self):
+        cases = [
+            ("https://www.valon.ai/about?ashby_jid=71dcb68c-302d-4f8c-80cf-c1bd5ac106d5", "Ashby"),
+            ("https://www.valon.ai/about?ashby_jid=71dcb68c&utm_source=x#careers", "Ashby"),
+            ("https://company.com/jobs?ashby_jid=42", "Ashby"),
+        ]
+        for url, expected in cases:
+            assert _detect_ats_platform(url) == expected, f"Failed for {url}"
+
     def test_unknown_url(self):
         assert _detect_ats_platform("https://company.com/careers/apply") == "unknown"
         assert _detect_ats_platform("https://www.linkedin.com/jobs/view/123") == "unknown"
