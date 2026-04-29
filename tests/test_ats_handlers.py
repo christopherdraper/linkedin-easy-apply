@@ -844,3 +844,56 @@ class TestWorkdayAccountCreation:
         page.query_selector.return_value = None
         page.evaluate.return_value = "Create Account"
         assert WorkdayHandler._click_submit_button(page) is True
+
+
+from ats_handlers.paylocity import PaylocityHandler  # noqa: E402
+
+
+class TestPaylocityHandler:
+    def test_platform_name(self):
+        assert PaylocityHandler().platform_name == "Paylocity"
+
+    def test_pre_flight_uploads_resume_to_force_modal(self):
+        """Paylocity gates apply on a forceUploadResumeModal whose visible
+        button only opens an OS picker. Direct set_input_files on the hidden
+        <input type=file> dismisses the modal AND triggers resume autofill."""
+        handler = PaylocityHandler()
+        page = MagicMock()
+        modal = MagicMock()
+        modal.is_visible.return_value = True
+        file_input = MagicMock()
+
+        def query(sel):
+            if sel == "#forceUploadResumeModal":
+                return modal
+            if sel == "#forceUploadResumeModal input[type='file']":
+                return file_input
+            return None
+
+        page.query_selector.side_effect = query
+        profile = MagicMock()
+        profile.resume_path = "/tmp/resume.docx"
+        ctx = {"profile": profile}
+
+        result = handler.pre_flight(page, ctx)
+        assert result is None
+        file_input.set_input_files.assert_called_once_with("/tmp/resume.docx")
+
+    def test_pre_flight_skips_when_no_modal(self):
+        handler = PaylocityHandler()
+        page = MagicMock()
+        page.query_selector.return_value = None
+        profile = MagicMock()
+        profile.resume_path = "/tmp/resume.docx"
+        result = handler.pre_flight(page, {"profile": profile})
+        assert result is None
+
+    def test_pre_flight_skips_when_no_resume(self):
+        handler = PaylocityHandler()
+        page = MagicMock()
+        profile = MagicMock()
+        profile.resume_path = None
+        # Should not even query DOM; return early
+        result = handler.pre_flight(page, {"profile": profile})
+        assert result is None
+        page.query_selector.assert_not_called()
