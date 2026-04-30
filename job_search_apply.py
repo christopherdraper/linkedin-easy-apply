@@ -5997,10 +5997,22 @@ def _navigate_external_form(  # noqa: C901
                             break
                 if solved:
                     captcha_solved_urls.add(page.url)
-                    _btn_role, _btn_el = _find_navigation_button(page)
-                    if _btn_el:
-                        _safe_click(_btn_el, page)
-                        page.wait_for_timeout(3000)
+                    # Only auto-click a navigation button if this looks like a
+                    # captcha-GATE page (no form fields underneath). On forms
+                    # with inline captchas (Ashby, Workable, Lever, ...), the
+                    # nav button IS the form's Submit -- clicking it now would
+                    # submit an empty form right after the captcha token,
+                    # which Ashby's spam filter (and similar) flag as bot.
+                    visible_form_fields = page.query_selector_all(
+                        "input[type='text']:visible, input[type='email']:visible, "
+                        "input[type='tel']:visible, input[type='url']:visible, "
+                        "input[type='number']:visible, textarea:visible"
+                    )
+                    if len(visible_form_fields) < 3:
+                        _btn_role, _btn_el = _find_navigation_button(page)
+                        if _btn_el:
+                            _safe_click(_btn_el, page)
+                            page.wait_for_timeout(3000)
                     log.info("   🧩 CAPTCHA solved, continuing form flow")
                     continue
                 else:
