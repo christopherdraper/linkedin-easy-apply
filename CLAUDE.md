@@ -155,6 +155,8 @@ Unit tests verify code correctness, not platform behavior. After changing ATS-sp
 ### Nothing is "fixed" without a real-world test
 A fix is not fixed until it has been exercised against the actual site that was failing. Unit tests and code-path reasoning are necessary but not sufficient. Every handler change must be confirmed with `python job_search_apply.py --external-url <url> --dry-run` (or equivalent Q2 run) against a URL representative of the failure. If the fix applies to several handlers or sites, each one needs its own live run -- do not extrapolate from one success. Report status as "verified on <url>" or "untested against <url>"; never as just "fixed." If you cannot run the live test (no URL available, auth wall, rate limit), say so explicitly and mark the fix pending verification -- do not claim success.
 
+**This rule means iterate, not abstain.** When you can hit the URL, the workflow is: hypothesize the fix from debug dumps -> implement -> run `--external-url` against the failing URL -> read the new debug dump -> refine -> re-run. Three or four cycles per ATS is normal. Don't punt on a failure because you "can't be sure without more debug" -- the live run *is* the debug. Only abstain when you genuinely cannot reach the URL (account wall, rate limit, deleted listing).
+
 ## ATS Handler Registry (`ats_handlers/` package)
 
 Per-platform modules for ATS-specific quirks. Handlers override lifecycle hooks called by the generic form-filling loop.

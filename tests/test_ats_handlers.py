@@ -897,3 +897,35 @@ class TestPaylocityHandler:
         result = handler.pre_flight(page, {"profile": profile})
         assert result is None
         page.query_selector.assert_not_called()
+
+
+from ats_handlers.workable import WorkableHandler  # noqa: E402
+
+
+class TestWorkableHandler:
+    def test_platform_name(self):
+        assert WorkableHandler().platform_name == "Workable"
+
+    def test_pre_flight_dismisses_cookie_banner(self):
+        """Workable's cookie-consent renders an aria-modal dialog with a
+        backdrop that intercepts pointer events, silently swallowing Submit
+        clicks. pre_flight must accept the banner."""
+        handler = WorkableHandler()
+        page = MagicMock()
+        accept_btn = MagicMock()
+        accept_btn.is_visible.return_value = True
+        page.query_selector.return_value = accept_btn
+        with patch("job_search_apply._safe_click") as safe_click:
+            result = handler.pre_flight(page, {})
+        assert result is None
+        safe_click.assert_called_once()
+
+    def test_on_step_start_redismisses_banner(self):
+        handler = WorkableHandler()
+        page = MagicMock()
+        accept_btn = MagicMock()
+        accept_btn.is_visible.return_value = True
+        page.query_selector.return_value = accept_btn
+        with patch("job_search_apply._safe_click") as safe_click:
+            handler.on_step_start(page, {})
+        safe_click.assert_called_once()
