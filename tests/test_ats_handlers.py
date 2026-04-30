@@ -845,6 +845,25 @@ class TestWorkdayAccountCreation:
         page.evaluate.return_value = "Create Account"
         assert WorkdayHandler._click_submit_button(page) is True
 
+    def test_close_blocking_modal_runs_evaluate(self):
+        """on_step_start should call _close_blocking_modal which runs JS that
+        finds known Workday modal heading IDs and clicks the close button."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "changeEmailModal"
+        page.query_selector.return_value = None  # short-circuit autofillWithResume etc.
+        # Should run without raising
+        handler.on_step_start(page, {})
+        # First call to evaluate is the close-modal JS
+        assert page.evaluate.called
+
+    def test_close_blocking_modal_no_op_when_no_modal(self):
+        page = MagicMock()
+        page.evaluate.return_value = None
+        WorkdayHandler._close_blocking_modal(page)
+        # Should not raise; wait_for_timeout NOT called when nothing closed
+        page.wait_for_timeout.assert_not_called()
+
 
 from ats_handlers.paylocity import PaylocityHandler  # noqa: E402
 

@@ -25,6 +25,11 @@ class WorkdayHandler(BaseATSHandler):
         return None
 
     def on_step_start(self, page, ctx):
+        # Close blocking Workday confirmation modals BEFORE anything else --
+        # if a 'Change Email' / similar dialog opens mid-form, the form-step
+        # loop fills 0 fields per iteration until it hits max steps (20).
+        self._close_blocking_modal(page)
+
         # "Start Your Application" popup -- "Autofill with Resume"
         try:
             autofill = page.query_selector("a[data-automation-id='autofillWithResume']")
@@ -312,6 +317,46 @@ class WorkdayHandler(BaseATSHandler):
 
     def q2_resolve_login_wall(self, page, ctx):
         return True
+
+    @staticmethod
+    def _close_blocking_modal(page):
+        """Close Workday confirmation/change-email modals that block form
+        progression.
+
+        Strayer (and other Workday tenants) open a 'Change Email' modal mid-form
+        when the bot reuses a stored account email. The modal sits over the
+        application form and the form-step loop spins for 20 iterations because
+        it can't see new fields under the modal. The modal has a heading id
+        like ``changeEmailModal`` and a close button with ``aria-label="close"``.
+        """
+        try:
+            closed = page.evaluate("""() => {
+                // Find any Workday modal heading we want to dismiss
+                const modalHeadingIds = [
+                    'changeEmailModal',
+                    'changeEmailHeader',
+                ];
+                for (const hid of modalHeadingIds) {
+                    const h = document.getElementById(hid);
+                    if (!h) continue;
+                    // Walk up to find the modal container
+                    let container = h;
+                    for (let i = 0; i < 4 && container; i++) {
+                        const closeBtn = container.querySelector('button[aria-label="close"], button[aria-label="Close"]');
+                        if (closeBtn) {
+                            closeBtn.click();
+                            return hid;
+                        }
+                        container = container.parentElement;
+                    }
+                }
+                return null;
+            }""")
+            if closed:
+                page.wait_for_timeout(800)
+                log.info("   Workday: closed blocking modal (%s)", closed)
+        except Exception as e:  # noqa: BLE001
+            log.debug("Workday close modal failed: %s", e)
 
 
 register("Workday", WorkdayHandler)
