@@ -24,7 +24,43 @@ class AshbyHandler(BaseATSHandler):
         return "Ashby"
 
     def pre_flight(self, page, ctx: dict) -> Optional[str]:
-        """Detect spam rejection shown on page load (before form filling)."""
+        """Short-circuit embedded Ashby (``?ashby_jid=``) by navigating
+        directly to the ``jobs.ashbyhq.com`` iframe URL, then check for a
+        spam-banner rejection.
+
+        Voleon, Vultr, and similar sites put the Ashby application form in
+        an iframe on their careers page. The form-step loop never sees inputs
+        on the outer page so it stalls at step 3. Mirroring the Greenhouse
+        ``?gh_jid=`` iframe-jump fixes the same class of failure for Ashby.
+        """
+        if "ashby_jid=" in (page.url or "") and "ashbyhq.com" not in page.url:
+            try:
+                iframe = page.query_selector("iframe[src*='ashbyhq.com']")
+                if iframe:
+                    src = iframe.get_attribute("src") or ""
+                    # Strip the embed=js suffix so we land on the full page,
+                    # not the JS-only embed frame.
+                    src = (
+                        src.replace("&embed=js", "")
+                        .replace("?embed=js&", "?")
+                        .replace("?embed=js", "")
+                    )
+                    # Ashby's iframe lands on the job-detail page; rewrite to
+                    # the /application suffix so the form-step loop sees inputs
+                    # immediately rather than having to click 'Apply for this Job'.
+                    if src and "/application" not in src:
+                        # Insert /application before the query string
+                        if "?" in src:
+                            base, q = src.split("?", 1)
+                            src = base.rstrip("/") + "/application?" + q
+                        else:
+                            src = src.rstrip("/") + "/application"
+                    if src:
+                        log.info("   Ashby: jumping to embedded application URL: %s", src[:100])
+                        page.goto(src, timeout=30000)
+                        page.wait_for_timeout(2000)
+            except Exception as e:  # noqa: BLE001
+                log.debug("Ashby embed iframe jump failed: %s", e)
         return self._check_spam_banner(page, "pre-flight")
 
     def on_step_start(self, page, ctx: dict) -> Optional[str]:
