@@ -14,6 +14,22 @@ For day-to-day operation see [USAGE.md](USAGE.md). For internal architecture see
 
 ---
 
+## Setup with Claude Code (recommended)
+
+If you have [Claude Code](https://claude.com/claude-code) installed, the fastest path is to let it drive setup.
+
+1. Clone the repo and `cd` into it.
+2. Open Claude Code in the directory.
+3. Paste this prompt:
+
+   > Read AGENTS.md and walk me through the full setup. Ask me for anything you need (resume path, API keys, etc.) and verify each step before moving on.
+
+Claude will follow the runbook in [AGENTS.md](AGENTS.md): install deps, capture a LinkedIn session, bootstrap your profile from your resume, and run a verification dry-run. Total time is about 15 minutes of attended work.
+
+If you would rather set up manually, follow the [First-run walkthrough](#first-run-walkthrough) below.
+
+---
+
 ## Requirements
 
 - Python 3.9+
