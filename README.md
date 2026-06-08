@@ -1,17 +1,16 @@
-# LinkedIn Easy Apply Automation
+# job-apply
 
-[![Tests](https://github.com/christopherdraper/linkedin-easy-apply/actions/workflows/test.yml/badge.svg)](https://github.com/christopherdraper/linkedin-easy-apply/actions/workflows/test.yml)
-[![Lint](https://github.com/christopherdraper/linkedin-easy-apply/actions/workflows/lint.yml/badge.svg)](https://github.com/christopherdraper/linkedin-easy-apply/actions/workflows/lint.yml)
+Automated job search and application across LinkedIn Easy Apply and external ATS platforms (Greenhouse, Workday, Ashby, Lever, SmartRecruiters, Paylocity, Workable, Comeet, PageUp), powered by Claude.
 
-Automated LinkedIn job search and Easy Apply submission using Claude AI.
+A three-tier queue progressively escalates work:
 
-**What it does:**
-- Searches LinkedIn for Easy Apply jobs matching your titles and criteria
-- Scores each job against your profile using Claude (skips poor matches and deal-breakers)
-- Generates a personalized cover letter for each application
-- Fills out screening questions — explicit answers from your profile first, Claude as fallback
-- Logs every application with AI-written notes so you know what you applied to if they call
-- Detects and aborts applications that request sensitive data (SSN, bank info) or contain prompt injection
+- **Q1 (batch)** searches LinkedIn, scores each posting against your profile, generates a tailored cover letter, and submits via Easy Apply or by navigating the external ATS form.
+- **Q2 (autonomous retry)** picks up Q1 failures above a score threshold and retries them with Playwright plus Claude page analysis. Handles email verification codes (Gmail IMAP), captchas (2captcha or capsolver), and per-ATS quirks.
+- **Q3 (escalation)** surfaces anything Q2 can't finish on a web dashboard with pre-computed answers, so you complete the application by hand in under a minute.
+
+A Flask dashboard tracks market posting volumes, per-application reports, and the Q2/Q3 queues.
+
+For day-to-day operation see [USAGE.md](USAGE.md). For internal architecture see [CLAUDE.md](CLAUDE.md).
 
 ---
 
@@ -19,7 +18,11 @@ Automated LinkedIn job search and Easy Apply submission using Claude AI.
 
 - Python 3.9+
 - A LinkedIn account
-- An Anthropic API key (free tier works — get one at https://console.anthropic.com)
+- An Anthropic API key (https://console.anthropic.com)
+- Optional but recommended:
+  - Gmail account with an App Password (for ATS email verification codes)
+  - 2captcha or capsolver API key (for ATS captcha challenges)
+  - A SOCKS5 residential proxy (only needed for SmartRecruiters / Incapsula WAF)
 
 ---
 
@@ -31,243 +34,210 @@ git clone https://github.com/christopherdraper/linkedin-easy-apply
 cd linkedin-easy-apply
 
 # 2. Install Python dependencies
-pip install playwright anthropic
+pip install -r requirements.txt  # or: pip install playwright anthropic python-docx flask
 
-# 3. Install the Chromium browser used for automation
+# 3. Install the Chromium build Playwright uses
 playwright install chromium
 ```
 
 ---
 
-## LinkedIn Session Setup
+## First-run walkthrough
 
-The script runs a headless browser and needs an active LinkedIn session. LinkedIn
-ties session cookies to the IP address where you logged in, so **you must log in
-from the same machine that will run the script**.
+The fastest way to onboard is to let Claude bootstrap your profile from your resume.
 
-### Option A — Desktop machine (simplest)
-
-If you're running the script on your own laptop or desktop:
-
-```bash
-# Run this helper to open a visible browser window, log in manually, then save cookies
-python - <<'EOF'
-from playwright.sync_api import sync_playwright
-from pathlib import Path
-import json
-
-session_file = Path.home() / ".local/share/job-apply/sessions/linkedin.json"
-session_file.parent.mkdir(parents=True, exist_ok=True)
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=False)
-    context = browser.new_context()
-    page = context.new_page()
-    page.goto("https://www.linkedin.com/login")
-    input("Log in to LinkedIn in the browser window, then press Enter here...")
-    context.storage_state(path=str(session_file))
-    browser.close()
-    print(f"Session saved to {session_file}")
-EOF
-```
-
-### Option B — Headless server
-
-If you're running on a remote server without a display, use Xvfb + a VNC viewer:
-
-```bash
-# Install virtual display and VNC server
-sudo dnf install -y xorg-x11-server-Xvfb x11vnc chromium   # Fedora/RHEL
-# sudo apt install -y xvfb x11vnc chromium-browser           # Debian/Ubuntu
-
-# Start virtual display
-Xvfb :99 -screen 0 1280x800x24 &
-export DISPLAY=:99
-
-# Start VNC (bind to localhost only — tunnel via SSH or WireGuard)
-x11vnc -display :99 -forever -localhost &
-
-# Open Chromium on the virtual display
-chromium-browser --no-sandbox &
-```
-
-Then connect with a VNC client (e.g. RealVNC, TigerVNC) and navigate to
-`linkedin.com`, log in, then extract cookies:
-
-```bash
-python - <<'EOF'
-from playwright.sync_api import sync_playwright
-from pathlib import Path
-
-session_file = Path.home() / ".local/share/job-apply/sessions/linkedin.json"
-session_file.parent.mkdir(parents=True, exist_ok=True)
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=False)  # set headless=False, use DISPLAY=:99
-    context = browser.new_context()
-    page = context.new_page()
-    page.goto("https://www.linkedin.com/login")
-    input("Log in to LinkedIn, then press Enter...")
-    context.storage_state(path=str(session_file))
-    browser.close()
-    print(f"Session saved to {session_file}")
-EOF
-```
-
-> Sessions expire after a few weeks. Re-run this whenever the script reports that
-> your session has expired.
-
----
-
-## Profile Setup
-
-Copy the template and fill in your information:
+### Step 1. Create the runtime directory and copy the profile template
 
 ```bash
 mkdir -p ~/.local/share/job-apply
 cp profile_template.json ~/.local/share/job-apply/profile.json
 ```
 
-Then edit `~/.local/share/job-apply/profile.json`. Key sections:
+### Step 2. Have Claude fill out your profile from your resume
 
-### `personal`
-Your name, email, phone, location, and profile URLs. The city/state/zip are used
-to auto-fill contact fields in application forms.
+Open Claude Code in the repo directory. Drop in your resume (PDF or .docx) and give it this prompt:
 
-### `experience`
-Your current title, employer, total years, and specializations. Specializations
-are used by the AI when answering questions about related skills.
+> Read my resume at `~/Documents/resume.pdf` and any past job application questionnaires I have saved. Then fully populate `~/.local/share/job-apply/profile.json` using `profile_template.json` as the structure. Fill in `personal`, `work_authorization`, `experience`, `skills`, `screening_answers`, and `search_criteria.job_titles` based on what you can infer from my resume. For `screening_answers`, prepopulate the common categories: years of experience per major skill, work authorization, visa sponsorship, expected start date, salary expectation, willingness to relocate, security clearance, and remote vs hybrid preference. Leave `gmail_app_password`, `captcha_api_key`, and `proxy_rules` empty so I can fill them in manually. Set `documents.resume_path` to the absolute path of my resume.
 
-### `skills`
-List your programming languages, frameworks, and tools. The AI uses this when
-scoring jobs and answering "years of experience with X" questions.
+Claude will produce a complete `profile.json`. Skim it once before continuing. The profile is the single source of truth for every form fill, so accurate `screening_answers` keys matter more than anything else.
 
-### `screening_answers`
-Pre-written answers for common questions. Keys are matched against form field
-labels (case-insensitive substring match). For example:
+### Step 3. Set your environment variables
 
-```json
-"screening_answers": {
-  "years of experience with kubernetes": "5+",
-  "years of experience with python": "9",
-  "why leave current job": "Seeking new challenges",
-  "do you require visa sponsorship": "No",
-  "are you authorized to work in the us": "Yes"
-}
+See the [Environment variable checklist](#environment-variable-checklist) below.
+
+### Step 4. Capture a LinkedIn session
+
+LinkedIn ties session cookies to the IP address where you logged in, so log in from the same machine that runs the script. Run this once:
+
+```bash
+python -c "
+from playwright.sync_api import sync_playwright
+from pathlib import Path
+session_file = Path.home() / '.local/share/job-apply/sessions/linkedin.json'
+session_file.parent.mkdir(parents=True, exist_ok=True)
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=False)
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto('https://www.linkedin.com/login')
+    input('Log in in the browser, then press Enter...')
+    context.storage_state(path=str(session_file))
+    browser.close()
+"
 ```
 
-For any question not matched here, Claude will generate an answer from your
-profile context.
+If you are running on a headless server, install Xvfb plus a VNC server, point `DISPLAY=:99` at the virtual display, and run the same snippet through VNC. Sessions expire every few weeks. Re-run when the script reports an expired session.
 
-### `application_settings`
+### Step 5. Do a dry run
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `max_applications_per_day` | `10` | Hard cap per run |
-| `min_match_score` | `0.30` | 0.0–1.0 — skip jobs below this threshold |
+Submits nothing. Confirms scoring, cover-letter generation, and form discovery work.
 
-### `search_criteria`
+```bash
+python job_search_apply.py --title "Senior DevOps Engineer" --dry-run
+```
 
-| Field | Description |
-|-------|-------------|
-| `job_titles` | Used as `--title` args when running via the wrapper script |
-| `keywords_excluded` | Skip jobs whose title contains these strings |
-| `company_blacklist` | Skip jobs from these companies (exact match, case-insensitive) |
+Check the output. You should see jobs found, AI scoring, cover letters generated to `~/.local/share/job-apply/cover-letters/`, and decisions logged to `~/.local/share/job-apply/applications.json`.
+
+### Step 6. First live batch
+
+Start small. Five applications, conservative threshold.
+
+```bash
+python job_search_apply.py --max-applications 5 --min-score 0.75
+```
+
+### Step 7. Start the dashboard
+
+```bash
+python dashboard.py  # http://localhost:5050
+```
+
+The dashboard shows market posting volumes, every application with its match score and status, the per-application audit page (fields filled, cover letter, AI reasoning), and the Q2/Q3 queues.
+
+### Step 8. Process the Q2 queue
+
+Q1 failures above the 0.70 match threshold get auto-queued to Q2. Process them with the autonomous retry agent:
+
+```bash
+python assisted_apply_mcp.py --max 10
+```
+
+That is the full daily cycle.
 
 ---
 
-## Cover Letter Template (optional)
+## Environment variable checklist
 
-Create a cover letter template at `~/.local/share/job-apply/cover_letter_template.txt`.
+The only required environment variable is the Anthropic key. Everything else lives inside `profile.json` so it is one source of truth.
 
-The template supports `{PLACEHOLDER}` tokens that Claude will fill in. You can also
-add a section after `---\nTEMPLATE INSTRUCTIONS FOR AI:` with tone/style guidance.
-Point to it in your profile:
-
-```json
-"documents": {
-  "resume_path": "~/Documents/resume.pdf",
-  "cover_letter_template_path": "~/.local/share/job-apply/cover_letter_template.txt"
-}
-```
-
-If no template is provided, a minimal cover letter is generated automatically.
-
----
-
-## Anthropic API Key
-
-Set your API key in your shell environment:
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `ANTHROPIC_API_KEY` | yes | AI scoring, form fills, cover letters |
 
 ```bash
 echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-The script works without an API key (falls back to keyword-based scoring and
-template cover letters), but AI features are strongly recommended.
+### Profile-based credentials
+
+These live in `profile.json` under `application_settings`, not as env vars.
+
+| Field | Required for | How to get it |
+|-------|-------------|---------------|
+| `gmail_app_password` | Greenhouse and PageUp email verification codes | Google Account, Security, 2-Step Verification, App Passwords. Generate one for "Mail". 16 characters, no spaces. |
+| `captcha_api_key` | Lever (hCaptcha), Eightfold (reCAPTCHA), some Workdays | Sign up at 2captcha.com or capsolver.com. Add credits. |
+| `captcha_service` | as above | `"2captcha"` or `"capsolver"`. Defaults to `2captcha`. |
+| `proxy_rules` | SmartRecruiters (Incapsula WAF). Optional everywhere else. | Dict of `domain: socks5://host:port`. Example: `{"smartrecruiters.com": "socks5://127.0.0.1:1080"}`. |
+| `auto_create_accounts` | Workday accounts | Boolean. When true the bot creates ATS accounts and stores credentials locally. |
+| `max_applications_per_day` | always | Hard daily cap. Default 10. Override per-run with `--max-applications`. |
+| `min_match_score` | always | Floor for the AI match score (0.0 to 1.0). Default 0.30 in code, 0.75 in the profile template. Override per-run with `--min-score`. |
+
+Example block in `profile.json`:
+
+```json
+"application_settings": {
+  "max_applications_per_day": 50,
+  "min_match_score": 0.75,
+  "gmail_app_password": "xxxxxxxxxxxxxxxx",
+  "captcha_api_key": "abcd1234...",
+  "captcha_service": "2captcha",
+  "auto_create_accounts": true,
+  "proxy_rules": {
+    "smartrecruiters.com": "socks5://127.0.0.1:1080"
+  }
+}
+```
 
 ---
 
 ## Running
 
 ```bash
-# Always do a dry run first — no applications will be submitted
-python job_search_apply.py \
-  --profile ~/.local/share/job-apply/profile.json \
-  --title "Senior DevOps Engineer" \
-  --dry-run
+# Always dry-run first
+python job_search_apply.py --title "Senior SRE" --dry-run
 
-# Live run for one title
-python job_search_apply.py \
-  --profile ~/.local/share/job-apply/profile.json \
-  --title "Senior Site Reliability Engineer"
+# Live batch across every title in your profile
+python job_search_apply.py --max-applications 50 --min-score 0.75
 
-# Limit to 5 applications, raise the score threshold
-python job_search_apply.py \
-  --title "Staff Platform Engineer" \
-  --max-applications 5 \
-  --min-score 0.65
+# Market snapshot (counts postings per title, no applications)
+python job_search_apply.py --market-snapshot
+
+# Single external URL (bypasses LinkedIn)
+python job_search_apply.py --external-url https://boards.greenhouse.io/company/jobs/123
+
+# Q2 autonomous retry
+python assisted_apply_mcp.py --max 20
+python assisted_apply_mcp.py --list           # show queue
+python assisted_apply_mcp.py --job-id li_abc  # retry a specific entry
+
+# Dashboard
+python dashboard.py                            # http://localhost:5050
 ```
 
-### All flags
+### Common flags (Q1)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--profile` | `~/.local/share/job-apply/profile.json` | Path to your profile |
-| `--title` | *(required)* | Job title to search for |
-| `--location` | none | City/region to filter by (leave blank for remote) |
-| `--max-applications` | from profile | Max applications this run |
-| `--min-score` | from profile | Minimum AI match score (0.0–1.0) |
-| `--dry-run` | false | Score and log jobs without submitting |
-| `--proxy` | none | HTTP/SOCKS5 proxy URL if needed |
+| `--profile` | `~/.local/share/job-apply/profile.json` | Profile path |
+| `--title` | all titles in profile | Search a single job title |
+| `--max-applications` | from profile | Cap submissions this run |
+| `--min-score` | from profile | Floor for match score |
+| `--dry-run` | false | Score and log only |
+| `--external-url` | none | Apply to a single non-LinkedIn URL |
+| `--market-snapshot` | false | Count postings per title, do not apply |
+| `--source` | `linkedin` | `linkedin`, `remoteok`, `hn`, `biotech`, `all` |
 
 ---
 
-## Data Storage
+## Data storage
 
-All data is stored locally. Profile data (name, skills, experience) is sent to the
-Anthropic API for AI scoring and form-filling. No data is sent to any other
-external service besides LinkedIn and Anthropic.
+All data is local. Profile content goes to the Anthropic API for scoring and form fills. Nothing else leaves the machine.
 
 | Data | Location |
 |------|----------|
-| Your profile | `~/.local/share/job-apply/profile.json` |
+| Profile | `~/.local/share/job-apply/profile.json` |
 | LinkedIn session | `~/.local/share/job-apply/sessions/linkedin.json` |
 | Application log | `~/.local/share/job-apply/applications.json` |
+| Q2/Q3 queue | `~/.local/share/job-apply/deep_apply_queue.json` |
+| Market snapshots | `~/.local/share/job-apply/search_log.json` |
 | Cover letters | `~/.local/share/job-apply/cover-letters/` |
+| Failed-form debug dumps | `~/.local/share/job-apply/debug/` |
 
 ---
 
-## Safety Features
+## Safety features
 
-- **Prompt injection detection** — job descriptions and form field labels are
-  scanned for injection patterns before being passed to the AI
-- **Sensitive field abort** — applications are immediately aborted if a form
-  requests SSN, bank account numbers, passport numbers, or other data that should
-  never appear in a job application
-- **AI response validation** — AI-generated form answers are checked for length
-  and injection before being typed into fields
-- **`--dry-run` flag** — test everything without submitting
-- **Already-applied tracking** — the script skips jobs you've previously applied
-  to (tracked by URL in `applications.json`)
+- **Dry-run flag** lets you test the full pipeline without submitting.
+- **Sensitive field abort** halts immediately if a form asks for SSN, bank account, passport, or similar.
+- **Prompt-injection detection** scans job descriptions and form labels before passing them to the AI.
+- **AI response validation** caps generated answers at sensible lengths and screens for injection.
+- **Already-applied tracking** dedupes by URL via `applications.json`.
+- **Per-day cap** prevents runaway batches.
+
+---
+
+## Where to go next
+
+- [USAGE.md](USAGE.md) covers the daily workflow, dashboard tour, per-ATS notes, and troubleshooting.
+- [CLAUDE.md](CLAUDE.md) is the developer reference: architecture, handler registry, lessons learned, and contribution guidelines.
