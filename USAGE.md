@@ -58,18 +58,13 @@ The whole cycle takes 20 to 45 minutes of wall time depending on how many applic
 
 ---
 
-## Dashboard tour
+## Dashboard
 
 Run `python dashboard.py` and open http://localhost:5050.
 
-| Section | What it shows |
-|---------|---------------|
-| Market pulse | Posting volume per title over time. Backed by `search_log.json`, fed by `--market-snapshot` runs. |
-| Application table | Every Q1 application with title, company, score, status, timestamp. |
-| Per-application report (`/report/<job_id>`) | Field-by-field log of what got filled, the generated cover letter, AI match reasoning. Click any row to open. |
-| Q2 queue | Pending and in-progress autonomous retries. |
-| Q3 queue | Entries that need you. Each shows pre-computed answers (cover letter, screening answers, reasoning) so you can finish the application by hand in under a minute. |
-| Decision log | Per-application structured log of every action Q2 took (step, action, target, value, reasoning, confidence). |
+The home page surfaces market pulse, application history, success rates by ATS, failure breakdowns, score histogram, cost stats, interview tracking, and the Q2/Q3 queues. Per-application audit pages, the Q2 decision log, and the Q3 deep-apply prompts are all linked from there.
+
+Full reference in [DASHBOARD.md](DASHBOARD.md).
 
 ---
 

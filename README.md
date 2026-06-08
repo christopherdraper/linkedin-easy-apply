@@ -112,7 +112,7 @@ python job_search_apply.py --max-applications 5 --min-score 0.75
 python dashboard.py  # http://localhost:5050
 ```
 
-The dashboard shows market posting volumes, every application with its match score and status, the per-application audit page (fields filled, cover letter, AI reasoning), and the Q2/Q3 queues.
+The dashboard shows market posting volumes, application history with match scores, per-application audit pages, Q2/Q3 queues, cost stats, and interview tracking. Full reference in [DASHBOARD.md](DASHBOARD.md).
 
 ### Step 8. Process the Q2 queue
 
@@ -239,5 +239,6 @@ All data is local. Profile content goes to the Anthropic API for scoring and for
 
 ## Where to go next
 
-- [USAGE.md](USAGE.md) covers the daily workflow, dashboard tour, per-ATS notes, and troubleshooting.
+- [USAGE.md](USAGE.md) covers the daily workflow, per-ATS notes, queue maintenance, and troubleshooting.
+- [DASHBOARD.md](DASHBOARD.md) is the full reference for the web dashboard (every section, every route, data sources, interview tracking).
 - [CLAUDE.md](CLAUDE.md) is the developer reference: architecture, handler registry, lessons learned, and contribution guidelines.
