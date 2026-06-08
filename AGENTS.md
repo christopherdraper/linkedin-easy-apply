@@ -96,9 +96,28 @@ Once they give you the resume path:
      - willingness to relocate (ASK USER)
      - security clearance (default: "None" unless resume says otherwise)
      - remote vs hybrid preference (ASK USER)
-   - `search_criteria.job_titles`: 5 to 10 titles consistent with the resume
+   - `search_criteria.job_titles`: see the dedicated subsection below
    - `search_criteria.keywords_excluded`: sensible defaults (`["junior", "entry level", "intern"]` unless resume suggests otherwise)
    - `search_criteria.company_blacklist`: empty list
+
+### Step 5a. Job titles (do not skip)
+
+`search_criteria.job_titles` is the most important field in the whole profile. It drives both the Q1 application searches and every market snapshot. Get this wrong and the bot searches for the wrong jobs forever.
+
+Do not just copy whatever the resume's most recent title says. Real searches cover variations and adjacent roles.
+
+`RUN`: Based on the resume, propose 5 to 10 titles that:
+- Cover the seniority bands the user is open to (one level down, current, one level up).
+- Cover obvious naming variations the same role goes by at different companies. Example for a mechanical engineer: `["Mechanical Engineer", "Senior Mechanical Engineer", "Mechanical Design Engineer", "Product Design Engineer", "R&D Engineer", "Manufacturing Engineer", "Mechanical Engineering Manager"]`. Example for an SRE: `["Site Reliability Engineer", "Senior SRE", "Staff SRE", "Platform Engineer", "DevOps Engineer", "Infrastructure Engineer"]`.
+- Are domain-correct. A mechanical engineer should not get "Software Engineer" suggestions. A backend engineer should not get "QA Engineer". Look at the resume's actual experience.
+
+`ASK USER`: "These are the job titles I would track for both LinkedIn searches and market snapshots. Are these right? Add, remove, or replace any. Aim for 5 to 10 total."
+
+Then list the proposed titles. Wait for confirmation. Edit the JSON.
+
+If the user is clearly a domain you have no examples for (geologist, paralegal, pastry chef), do not invent titles. Ask them what they would search for if they were doing it by hand, then refine from there.
+
+### Continuing Step 5
 
 Leave these fields blank or null for now (step 7 will offer to fill them):
 - `application_settings.gmail_app_password`
@@ -195,6 +214,24 @@ python3 job_search_apply.py --max-applications 5 --min-score 0.75
 ```
 
 `VERIFY`: Output shows submissions or rational skips (low score, already applied). Check `~/.local/share/job-apply/applications.json` is no longer empty.
+
+---
+
+## Step 10a. Seed the market snapshot
+
+`ASK USER`: "Want me to run an initial market snapshot? It counts how many open postings match each of your `job_titles` on LinkedIn and seeds the dashboard chart. Takes a few minutes. Doesn't submit anything."
+
+If yes:
+`RUN`:
+```bash
+python3 job_search_apply.py --market-snapshot
+```
+
+`VERIFY`: `~/.local/share/job-apply/search_log.json` exists and contains an entry with today's date. Each title in their profile has a count (a number or `null` if the LinkedIn selector did not resolve).
+
+If most titles return `null`, the LinkedIn UI likely changed or the session expired. Tell the user and stop. Do not retry blindly.
+
+If counts look extremely low (every title under 10), the titles in their profile may be too narrow. Suggest revisiting Step 5a with broader phrasing.
 
 ---
 
