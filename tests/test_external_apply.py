@@ -10,6 +10,7 @@ from job_search_apply import (  # noqa: E402
     ApplicantProfile,
     _2captcha_solve,
     _attempt_ats_login,
+    _capsolver_solve,
     _classify_page,
     _detect_ats_platform,
     _detect_captcha,
@@ -662,6 +663,82 @@ class Test2CaptchaSolve:
         mock_urlopen.side_effect = [submit_resp, poll_resp]
         result = _2captcha_solve("key", "https://2captcha.com", "recaptchav2", "sk", "url")
         assert result == "solved-token"
+
+
+# ---------------------------------------------------------------------------
+# _capsolver_solve tests
+# ---------------------------------------------------------------------------
+
+
+class TestCapsolverSolve:
+    @staticmethod
+    def _resp(payload):
+        resp = MagicMock()
+        resp.read.return_value = payload
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    @patch("urllib.request.urlopen")
+    def test_unsupported_type_returns_none(self, mock_urlopen):
+        assert _capsolver_solve("key", "funcaptcha", "sk", "url") is None
+        mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_create_task_error(self, mock_urlopen):
+        mock_urlopen.return_value = self._resp(
+            b'{"errorId": 1, "errorDescription": "ERROR_KEY_DENIED"}'
+        )
+        assert _capsolver_solve("bad-key", "recaptchav2", "sk", "url") is None
+        mock_urlopen.assert_called_once()
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_success_returns_token(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = [
+            self._resp(b'{"errorId": 0, "taskId": "t1"}'),
+            self._resp(
+                b'{"errorId": 0, "status": "ready", "solution": {"gRecaptchaResponse": "cs-token"}}'
+            ),
+        ]
+        result = _capsolver_solve("key", "recaptchav2", "sk", "https://x.com/apply")
+        assert result == "cs-token"
+        create_req = mock_urlopen.call_args_list[0][0][0]
+        assert create_req.full_url == "https://api.capsolver.com/createTask"
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_pending_then_ready(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = [
+            self._resp(b'{"errorId": 0, "taskId": "t1"}'),
+            self._resp(b'{"errorId": 0, "status": "processing"}'),
+            self._resp(b'{"errorId": 0, "status": "ready", "solution": {"token": "cf-token"}}'),
+        ]
+        result = _capsolver_solve("key", "turnstile", "sk", "url")
+        assert result == "cf-token"
+        assert mock_urlopen.call_count == 3
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_task_failed(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = [
+            self._resp(b'{"errorId": 0, "taskId": "t1"}'),
+            self._resp(
+                b'{"errorId": 1, "status": "failed",'
+                b' "errorDescription": "ERROR_CAPTCHA_UNSOLVABLE"}'
+            ),
+        ]
+        assert _capsolver_solve("key", "recaptchav2", "sk", "url") is None
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_timeout_after_max_polls(self, mock_urlopen, mock_sleep):
+        processing = self._resp(b'{"errorId": 0, "status": "processing"}')
+        mock_urlopen.side_effect = [self._resp(b'{"errorId": 0, "taskId": "t1"}')] + (
+            [processing] * 36
+        )
+        assert _capsolver_solve("key", "recaptchav2", "sk", "url") is None
+        assert mock_urlopen.call_count == 37
 
 
 # ---------------------------------------------------------------------------

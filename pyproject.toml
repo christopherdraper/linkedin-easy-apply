@@ -36,8 +36,9 @@ exclude_dirs = ["tests"]
 omit = ["tests/*"]
 
 [tool.coverage.report]
-# True source coverage (tests/ omitted). RATCHET: raise to 40 after test
-# Wave 1 lands, 52 after Wave 2. Never lower.
-fail_under = 24
+# True source coverage (tests/ omitted). Actual: 40.6% after test Wave 1.
+# RATCHET: raise to ~52 after Wave 2 lands. Never lower.
+# Gate sits ~2pts under actual so unrelated small changes don't flake CI.
+fail_under = 38
 precision = 1
 show_missing = true

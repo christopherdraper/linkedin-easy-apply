@@ -946,3 +946,248 @@ class TestWorkableHandler:
         with patch("job_search_apply._safe_click") as safe_click:
             handler.on_step_start(page, {})
         safe_click.assert_called_once()
+
+
+class TestGreenhouseEmbedIframeJump:
+    """pre_flight short-circuits ?gh_jid= embeds by navigating to the
+    job-boards.greenhouse.io iframe src (Coalition, Nintex pattern)."""
+
+    EMBED_SRC = "https://job-boards.greenhouse.io/embed/job_app?for=coalition&token=1234"
+
+    def _make_page(self, url, iframe_src=None):
+        """Page with no cookie banner; optionally a greenhouse embed iframe."""
+        page = MagicMock()
+        page.url = url
+        iframe = None
+        if iframe_src is not None:
+            iframe = MagicMock()
+            iframe.get_attribute.return_value = iframe_src
+
+        def query(sel):
+            if sel == "iframe[src*='greenhouse.io']":
+                return iframe
+            return None
+
+        page.query_selector.side_effect = query
+        return page
+
+    def test_embed_detected_and_jumped(self):
+        handler = GreenhouseHandler()
+        page = self._make_page(
+            "https://careers.coalitioninc.com/jobs?gh_jid=1234", iframe_src=self.EMBED_SRC
+        )
+        result = handler.pre_flight(page, {})
+        assert result is None
+        page.goto.assert_called_once_with(self.EMBED_SRC, timeout=30000)
+
+    def test_no_gh_jid_param_does_nothing(self):
+        handler = GreenhouseHandler()
+        page = self._make_page("https://careers.example.com/jobs/1234", iframe_src=self.EMBED_SRC)
+        result = handler.pre_flight(page, {})
+        assert result is None
+        page.goto.assert_not_called()
+
+    def test_gh_jid_but_no_iframe_does_nothing(self):
+        handler = GreenhouseHandler()
+        page = self._make_page("https://careers.example.com/jobs?gh_jid=1234")
+        result = handler.pre_flight(page, {})
+        assert result is None
+        page.goto.assert_not_called()
+
+    def test_direct_greenhouse_url_does_nothing(self):
+        """A URL already on greenhouse.io must not re-jump even with gh_jid."""
+        handler = GreenhouseHandler()
+        page = self._make_page(
+            "https://job-boards.greenhouse.io/embed/job_app?for=x&token=1&gh_jid=1234",
+            iframe_src=self.EMBED_SRC,
+        )
+        result = handler.pre_flight(page, {})
+        assert result is None
+        page.goto.assert_not_called()
+
+    def test_iframe_without_src_does_nothing(self):
+        """get_attribute returning an empty src must skip the jump."""
+        handler = GreenhouseHandler()
+        page = self._make_page("https://careers.example.com/jobs?gh_jid=1234", iframe_src="")
+        result = handler.pre_flight(page, {})
+        assert result is None
+        page.goto.assert_not_called()
+
+
+class TestWorkdayConsentCheckbox:
+    """_check_consent_checkbox tries data-automation-id, then any visible
+    unchecked native checkbox, then a JS DOM walk from the consent text."""
+
+    def test_strategy1_data_automation_id(self):
+        page = MagicMock()
+        wd_cb = MagicMock()
+        wd_cb.is_visible.return_value = True
+        page.query_selector.return_value = wd_cb
+        WorkdayHandler._check_consent_checkbox(page)
+        wd_cb.click.assert_called_once()
+        # Strategy 1 hit means strategies 2 and 3 never run
+        page.query_selector_all.assert_not_called()
+        page.evaluate.assert_not_called()
+
+    def test_strategy2_native_checkbox_checked(self):
+        page = MagicMock()
+        page.query_selector.return_value = None
+        cb = MagicMock()
+        cb.is_visible.return_value = True
+        cb.is_checked.return_value = False
+        page.query_selector_all.return_value = [cb]
+        WorkdayHandler._check_consent_checkbox(page)
+        cb.check.assert_called_once()
+        page.evaluate.assert_not_called()
+
+    def test_already_checked_native_checkbox_skipped(self):
+        page = MagicMock()
+        page.query_selector.return_value = None
+        cb = MagicMock()
+        cb.is_visible.return_value = True
+        cb.is_checked.return_value = True
+        page.query_selector_all.return_value = [cb]
+        page.evaluate.return_value = None
+        WorkdayHandler._check_consent_checkbox(page)
+        cb.check.assert_not_called()
+        # Falls through to the JS walk since nothing was checked
+        page.evaluate.assert_called_once()
+
+    def test_strategy3_js_walk_fallback(self):
+        page = MagicMock()
+        page.query_selector.return_value = None
+        page.query_selector_all.return_value = []
+        page.evaluate.return_value = "sibling"
+        WorkdayHandler._check_consent_checkbox(page)
+        page.evaluate.assert_called_once()
+        page.wait_for_timeout.assert_called_once_with(500)
+
+    def test_nothing_found_no_crash(self):
+        page = MagicMock()
+        page.query_selector.return_value = None
+        page.query_selector_all.return_value = []
+        page.evaluate.return_value = None
+        WorkdayHandler._check_consent_checkbox(page)
+        page.wait_for_timeout.assert_not_called()
+
+    def test_page_error_swallowed(self):
+        page = MagicMock()
+        page.query_selector.side_effect = Exception("page crashed")
+        # Must not raise
+        WorkdayHandler._check_consent_checkbox(page)
+
+
+class TestAshbyLocationCombobox:
+    """_fill_location_combobox types the profile city into Ashby's
+    'Start typing...' combobox and clicks the first visible suggestion."""
+
+    def _make_combobox(self, value=""):
+        cb = MagicMock()
+        cb.is_visible.return_value = True
+        cb.input_value.return_value = value
+        return cb
+
+    def test_combobox_found_and_filled(self):
+        page = MagicMock()
+        cb = self._make_combobox()
+        page.query_selector_all.return_value = [cb]
+        page.evaluate.return_value = "Austin, Texas, United States"
+        AshbyHandler._fill_location_combobox(page, MagicMock(city="Austin"))
+        cb.type.assert_called_once_with("Austin", delay=60)
+        page.evaluate.assert_called_once()
+
+    def test_combobox_absent_is_noop(self):
+        page = MagicMock()
+        page.query_selector_all.return_value = []
+        AshbyHandler._fill_location_combobox(page, MagicMock(city="Austin"))
+        page.evaluate.assert_not_called()
+
+    def test_already_selected_tag_skipped(self):
+        page = MagicMock()
+        cb = self._make_combobox(value="Indianapolis")
+        cb.evaluate.return_value = True  # adjacent tag element exists
+        page.query_selector_all.return_value = [cb]
+        AshbyHandler._fill_location_combobox(page, MagicMock(city="Indianapolis"))
+        cb.click.assert_not_called()
+        cb.type.assert_not_called()
+
+    def test_no_suggestion_clears_typed_text(self):
+        page = MagicMock()
+        cb = self._make_combobox()
+        page.query_selector_all.return_value = [cb]
+        page.evaluate.return_value = None  # no role=option appeared
+        AshbyHandler._fill_location_combobox(page, MagicMock(city="Austin"))
+        # fill("") before typing, then fill("") again to clear the stray text
+        assert cb.fill.call_count == 2
+        assert cb.fill.call_args_list[-1].args == ("",)
+
+    def test_profile_without_city_falls_back_to_default(self):
+        """Pins current behavior: a missing city falls back to the hardcoded
+        'Indianapolis' default (suspicious for non-Indianapolis users, but
+        that is what the code does today)."""
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        page = MagicMock()
+        cb = self._make_combobox()
+        page.query_selector_all.return_value = [cb]
+        page.evaluate.return_value = "Indianapolis, Indiana, United States"
+        AshbyHandler._fill_location_combobox(page, SimpleNamespace(city=None))
+        cb.type.assert_called_once_with("Indianapolis", delay=60)
+
+
+from datetime import datetime, timedelta  # noqa: E402
+
+
+class TestAshbyDatePickers:
+    """_fill_required_date_pickers opens react-datepicker popups on empty
+    required inputs and clicks a date roughly two weeks out."""
+
+    def _make_wrapper(self, input_value=None, required_input=True):
+        wrapper = MagicMock()
+        inp = MagicMock()
+        inp.get_attribute.return_value = input_value
+        wrapper.query_selector.return_value = inp if required_input else None
+        return wrapper, inp
+
+    def test_required_empty_picker_filled(self):
+        page = MagicMock()
+        wrapper, inp = self._make_wrapper(input_value=None)
+        page.query_selector_all.return_value = [wrapper]
+
+        target = datetime.now() + timedelta(days=14)
+        month_label = MagicMock()
+        month_label.inner_text.return_value = target.strftime("%B %Y")
+        day_btn = MagicMock()
+        day_btn.is_visible.return_value = True
+
+        def query(sel):
+            if "current-month" in sel:
+                return month_label
+            if sel.startswith("[aria-label="):
+                return day_btn
+            return None
+
+        page.query_selector.side_effect = query
+        AshbyHandler._fill_required_date_pickers(page)
+        inp.click.assert_called_once_with(force=True)
+        day_btn.click.assert_called_once()
+
+    def test_no_pickers_is_noop(self):
+        page = MagicMock()
+        page.query_selector_all.return_value = []
+        AshbyHandler._fill_required_date_pickers(page)
+        page.query_selector.assert_not_called()
+
+    def test_picker_without_required_input_skipped(self):
+        page = MagicMock()
+        wrapper, _ = self._make_wrapper(required_input=False)
+        page.query_selector_all.return_value = [wrapper]
+        AshbyHandler._fill_required_date_pickers(page)
+        page.query_selector.assert_not_called()
+
+    def test_already_filled_picker_skipped(self):
+        page = MagicMock()
+        wrapper, inp = self._make_wrapper(input_value="07/22/2026")
+        page.query_selector_all.return_value = [wrapper]
+        AshbyHandler._fill_required_date_pickers(page)
+        inp.click.assert_not_called()
