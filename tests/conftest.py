@@ -218,6 +218,7 @@ def data_dir(tmp_path, monkeypatch):
     import jobapply.browser
     import jobapply.content
     import jobapply.queue
+    import jobapply.workflow
 
     monkeypatch.setattr(jobapply.browser, "SESSION_FILE", tmp_path / "session.json")
     monkeypatch.setattr(jobapply.browser, "CREDENTIALS_FILE", tmp_path / "credentials.json")
@@ -228,6 +229,8 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(jobapply.queue, "DATA_DIR", tmp_path)
     monkeypatch.setattr(jobapply.queue, "LOG_FILE", tmp_path / "applications.json")
     monkeypatch.setattr(jobapply.queue, "DEEP_APPLY_QUEUE_FILE", tmp_path / "deep_apply_queue.json")
+    monkeypatch.setattr(jobapply.workflow, "COVER_LETTER_DIR", tmp_path / "cover-letters")
+    monkeypatch.setattr(jobapply.workflow, "LOG_FILE", tmp_path / "applications.json")
     monkeypatch.setattr(job_search_apply, "DATA_DIR", tmp_path)
     monkeypatch.setattr(job_search_apply, "LOG_FILE", tmp_path / "applications.json")
     monkeypatch.setattr(job_search_apply, "SEARCH_LOG_FILE", tmp_path / "search_log.json")

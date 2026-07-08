@@ -235,8 +235,10 @@ Q1 captures `_final_ats_url` after LinkedIn redirects to external ATS. This URL 
 ### Cover Letters are .docx (fixed 2026-04-11)
 Cover letters are generated as `.docx` (Calibri 11pt via python-docx). Legacy `.txt` files are auto-converted to `.docx` on upload via `_ensure_cover_letter_docx()`. This matters because some ATS platforms (e.g., Comeet) silently reject `.txt` uploads and the form won't submit. Also, .docx is better for ATS keyword extraction and AI screening.
 
-### Screening Answer False Matches (fixed 2026-04-11)
+### Screening Answer False Matches (partially fixed 2026-04-11)
 Short screening answer keys like `"state"` would substring-match against question text containing "United States", causing "Indiana" to be filled for work authorization yes/no questions. Fix: word-boundary matching for short keys (<10 chars) + skip list for generic field names (state, city, country, language, etc.) when the label contains `?`. The AI system prompt also has explicit rules about yes/no questions.
+
+**Scope caveat (found 2026-07-08):** the word-boundary guard was only ever applied to Q2's `_match_field_to_profile` (assisted_apply_mcp.py). Q1's `_match_screening_answer` (jobapply/forms.py) is still plain substring matching and can false-match short generic keys. Porting the guard to Q1 is a known open item; it changes hot-path behavior, so do it with live verification.
 
 ### Generic Apply-button selector required :visible (fixed 2026-04-24)
 The generic Apply-button lookup in `_navigate_external_form` used `button:has-text('Apply')` without a visibility filter. On pages with OneTrust cookie preference-center modals, this matched the hidden `#filter-apply-handler` button ("Apply" = apply cookie filter settings), which `_safe_click`'s JS fallback fired successfully but navigated nowhere, trapping the form loop in a no-op spin ("Job listing page detected" 3x then form_stuck). Fix: added `:visible` to every alternative in the Apply-button selector. Verified on Coalition's embedded Greenhouse.

@@ -1409,6 +1409,591 @@ def _ai_find_navigation_button(page):
     return None
 
 
+def _switch_to_form_iframe(page):
+    """Return the frame hosting the form when the main page has no inputs."""
+    # Detect iframe-based forms (e.g. SmartRecruiters /oneclick-ui/)
+    # If main page has no visible inputs but an iframe does, switch to that frame.
+    main_inputs = page.query_selector_all("input:not([type=hidden]), textarea, select")
+    if not main_inputs:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                frame_inputs = frame.query_selector_all(
+                    "input:not([type=hidden]), textarea, select"
+                )
+                if len(frame_inputs) >= 2:
+                    log.debug("Form is inside iframe (%s), switching context", frame.url[:60])
+                    page = frame  # type: ignore[assignment]
+                    break
+            except Exception:  # noqa: S110
+                pass
+    return page
+
+
+def _handle_login_wall_step(page, profile, handler, handler_ctx, login_resolved):
+    """Resolve a login wall on the current step.
+
+    Returns (status, login_resolved): status is a final status string when the
+    application must stop, or None to proceed.
+    """
+    # Login wall check on every step (some sites redirect mid-form)
+    # Skip if we already resolved login/account for this session to prevent
+    # false re-detection (e.g. Workday keeps password fields in page HTML).
+    if not login_resolved and _detect_login_page(page):
+        handler_resolved = handler.resolve_login_wall(page, handler_ctx or {}) if handler else False
+        if not handler_resolved and not _resolve_login_wall(page, profile):
+            log.info(f"   🔒 Requires account: {page.url[:60]}")
+            return "skipped: requires account", login_resolved
+        login_resolved = True
+    return None, login_resolved
+
+
+def _handle_captcha_step(page, profile, job, captcha_solved_urls):
+    """Detect and solve a CAPTCHA on the current step.
+
+    Returns "continue" to re-enter the loop after a solve, a final status
+    string on failure, or None to proceed with this step.
+    """
+    # CAPTCHA detection — attempt solve up to 2 times per page URL
+    captcha_info = _detect_captcha(page)
+    if captcha_info and page.url not in captcha_solved_urls:
+        if profile.captcha_api_key:
+            solved = False
+            for captcha_attempt in range(2):
+                solved = _solve_captcha(
+                    page, captcha_info, profile.captcha_api_key, profile.captcha_service
+                )
+                if solved:
+                    break
+                if captcha_attempt == 0:
+                    log.info("   🧩 Retrying CAPTCHA solve (attempt 2)...")
+                    page.wait_for_timeout(2000)
+                    captcha_info = _detect_captcha(page)
+                    if not captcha_info:
+                        break
+            if solved:
+                captcha_solved_urls.add(page.url)
+                # Only auto-click a navigation button if this looks like a
+                # captcha-GATE page (no form fields underneath). On forms
+                # with inline captchas (Ashby, Workable, Lever, ...), the
+                # nav button IS the form's Submit -- clicking it now would
+                # submit an empty form right after the captcha token,
+                # which Ashby's spam filter (and similar) flag as bot.
+                visible_form_fields = page.query_selector_all(
+                    "input[type='text']:visible, input[type='email']:visible, "
+                    "input[type='tel']:visible, input[type='url']:visible, "
+                    "input[type='number']:visible, textarea:visible"
+                )
+                if len(visible_form_fields) < 3:
+                    _btn_role, _btn_el = _find_navigation_button(page)
+                    if _btn_el:
+                        _safe_click(_btn_el, page)
+                        page.wait_for_timeout(3000)
+                log.info("   🧩 CAPTCHA solved, continuing form flow")
+                return "continue"
+            else:
+                log.warning("   🛡️  CAPTCHA solve failed — cannot proceed")
+                _dump_form_debug(page, job.get("id", ""), "CAPTCHA solve failed")
+                return "failed: captcha solve failed"
+        else:
+            log.warning("   🛡️  CAPTCHA detected but no captcha_api_key configured")
+            _dump_form_debug(page, job.get("id", ""), "CAPTCHA detected")
+            return "failed: captcha required"
+    return None
+
+
+def _check_success_and_confirmation(page, snapshot, handler, handler_ctx):
+    """Return truthy when the handler or generic detection confirms submission."""
+    handler_success = (
+        handler.detect_success(page, handler_ctx) if handler and handler_ctx else False
+    )
+    return handler_success or _detect_success_or_confirmation(page, snapshot)
+
+
+def _recover_from_stall(page, profile, job, stalled, fields_filled_total, step):
+    """Refill fields after a stalled step.
+
+    Returns (status, stalled, fields_filled_total): status is a final status
+    string when the form is stuck, or None to proceed.
+    """
+    # Re-attempt field filling on stall (fields may have appeared after click)
+    n_refilled = _answer_external_screening_questions(
+        page, profile, job_title=job.get("title"), company=job.get("company")
+    )
+    if n_refilled > 0:
+        log.debug("External form stalled but filled %d new fields, retrying", n_refilled)
+        fields_filled_total += n_refilled
+        stalled = 0  # reset — we made progress
+    else:
+        stalled += 1
+        if stalled >= 3:
+            _dump_form_debug(page, job.get("id", ""), "External form stalled")
+            return (
+                f"failed: external form stuck (step {step + 1}/{_MAX_EXTERNAL_STEPS})",
+                stalled,
+                fields_filled_total,
+            )
+    return None, stalled, fields_filled_total
+
+
+def _classify_and_route_page(page, job, snapshot, handler, handler_ctx):  # noqa: C901
+    """Classify the current page and route non-form pages.
+
+    Returns (action, payload): ("return", status) to end with that status,
+    ("continue", None) to re-enter the loop, or ("proceed", classification).
+    """
+    # Classify the page
+    classification = _classify_page(snapshot, page.url)
+    log.debug("   Page classification: %s", classification.get("notes", ""))
+
+    if classification["page_type"] == "login" or classification.get("has_required_login"):
+        if not (handler and handler.resolve_login_wall(page, handler_ctx or {})):
+            return "return", "skipped: requires account"
+
+    if classification["page_type"] == "confirmation":
+        return "return", "submitted"
+
+    if classification["page_type"] == "error":
+        _dump_form_debug(page, job.get("id", ""), "Error page")
+        return "return", "failed: ATS error page"
+
+    if classification["page_type"] == "job_search":
+        # Check for Apply button before bailing -- Workday job listing pages
+        # are often classified as "job_search" but have a clickable Apply button
+        _has_apply = page.query_selector(
+            "a[data-automation-id='jobPostingApplyButton'], "
+            "a[data-automation-id='adventureButton'], "
+            "button[data-automation-id='adventureButton'], "
+            "a:has-text('Apply'):not(:has-text('Indeed'))"
+        )
+        if not _has_apply:
+            log.info("   ⏭  Page is a job search/listing page, not an application form")
+            return "return", "failed: landed on job search page instead of application form"
+        log.info("   🔗 Job listing page with Apply button detected, proceeding...")
+
+    # Also catch job search pages by URL pattern (fast path, no AI needed)
+    _url_lower = page.url.lower()
+    if any(
+        pattern in _url_lower
+        for pattern in ("/jobs/search", "/search?query=", "/job-search", "kiosk+mode")
+    ):
+        log.info("   ⏭  URL looks like a job search page, skipping")
+        return "return", "failed: landed on job search page instead of application form"
+
+    # Job listing page with Apply button (Workday, company career pages)
+    # If no form fields and page has an Apply button, click through to the form
+    if not classification.get("has_form_fields") and not classification.get("has_file_upload"):
+        # Apply-button lookup must require :visible -- otherwise generic
+        # :has-text('Apply') selectors can match hidden elements inside
+        # cookie-consent modals (e.g. OneTrust's #filter-apply-handler),
+        # which _safe_click fires via JS and navigates nowhere, stalling
+        # the form loop on "Job listing page detected" forever.
+        apply_btn = page.query_selector(
+            "a[data-automation-id='jobPostingApplyButton']:visible, "
+            "button[data-automation-id='jobPostingApplyButton']:visible, "
+            "a[data-automation-id='adventureButton']:visible, "
+            "button[data-automation-id='adventureButton']:visible, "
+            "a:visible:has-text('Apply'):not(:has-text('Indeed')), "
+            "button:visible:has-text('Apply'):not(:has-text('Indeed')), "
+            "a[href*='/apply']:visible, "
+            "a.css-1ixbfil:visible, "  # Workday apply button class
+            "a[data-uxi-element-id='Apply']:visible"
+        )
+        if apply_btn:
+            log.info("   🔗 Job listing page detected, clicking Apply button...")
+            _safe_click(apply_btn, page)
+            page.wait_for_timeout(3000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except Exception:  # noqa: S110
+                pass
+            stats._final_ats_url = page.url
+            return "continue", None  # re-enter loop on the new page
+
+    return "proceed", classification
+
+
+def _handle_verification_step(  # noqa: C901
+    page, profile, job, handler, handler_ctx, owns_browser, context
+):
+    """Handle an email verification code prompt before filling fields.
+
+    Returns (action, status): ("continue", None) to re-enter the loop,
+    ("return", status) to end with that status, or ("proceed", None).
+    """
+    has_verification_prompt = page.evaluate("""() => {
+        const text = document.body ? document.body.innerText : '';
+        const lower = text.toLowerCase();
+        return lower.includes('verification code was sent')
+            || (lower.includes('security code') && lower.includes('character code'))
+            || lower.includes('enter the') && lower.includes('code to confirm');
+    }""")
+    if has_verification_prompt and handler and handler_ctx:
+        hvc_result = handler.handle_verification_code(page, handler_ctx)
+        if hvc_result:
+            if hvc_result == "submitted":
+                if owns_browser:
+                    _save_session(context)
+                return "return", "submitted"
+            if hvc_result == "continue":
+                return "continue", None
+            return "return", hvc_result
+    if has_verification_prompt:
+        code = _fetch_verification_code_from_gmail(
+            profile.email, profile.gmail_app_password, max_wait=45
+        )
+        if code:
+            # Find the security code input — try multiple strategies
+            code_input = None
+            # Strategy 1: Playwright's label-based locator
+            for label_text in ("Security code", "Verification code", "Security Code"):
+                try:
+                    loc = page.get_by_label(label_text)
+                    if loc.count() > 0 and loc.first.is_visible():
+                        code_input = loc.first
+                        break
+                except Exception:
+                    continue
+            # Strategy 2: attribute-based selector
+            if not code_input:
+                code_input = page.query_selector(
+                    "input[name*='security' i], input[name*='code' i], "
+                    "input[name*='verif' i], input[placeholder*='code' i], "
+                    "input[aria-label*='code' i], input[aria-label*='security' i]"
+                )
+            # Strategy 3: empty visible text input near "code" label
+            if not code_input:
+                for inp in page.query_selector_all("input[type='text'], input:not([type])"):
+                    try:
+                        if inp.is_visible() and not inp.input_value():
+                            label = _get_field_label(page, inp)
+                            if label and "code" in label.lower():
+                                code_input = inp
+                                break
+                    except Exception:
+                        continue
+            if code_input:
+                # Use click + clear + type for security code inputs
+                # (React controlled components reject programmatic fill)
+                code_input.click()
+                code_input.evaluate("el => el.value = ''")
+                code_input.type(code, delay=50)
+                page.wait_for_timeout(500)
+                log.info(f"   📧 Filled verification code: {code}")
+                submit_btn = page.query_selector(
+                    "button[type='submit'], input[type='submit'], button:has-text('Submit')"
+                )
+                if submit_btn:
+                    _safe_click(submit_btn, page)
+                else:
+                    _btn_role, _btn_el = _find_navigation_button(page)
+                    if _btn_el:
+                        _safe_click(_btn_el, page)
+                page.wait_for_timeout(5000)
+                post_snap = _extract_page_snapshot(page)
+                if _detect_success_or_confirmation(page, post_snap):
+                    log.info("   ✅ Application submitted after verification code")
+                    if owns_browser:
+                        _save_session(context)
+                    return "return", "submitted"
+                log.warning("   ⚠️ Verification code may have been rejected")
+                _dump_form_debug(page, job.get("id", ""), "Verification code rejected")
+                return "return", "failed: verification code rejected"
+        else:
+            log.warning("   ⚠️ Could not retrieve verification code from email")
+            _dump_form_debug(page, job.get("id", ""), "Verification code not received")
+            return "return", "failed: verification code not received from email"
+    return "proceed", None
+
+
+def _run_form_fill_phase(
+    page,
+    profile,
+    job,
+    cover_letter_path,
+    classification,
+    uploaded_files,
+    fields_filled_total,
+    zero_fill_steps,
+    stalled,
+    step,
+):
+    """Upload files and fill form fields for the current step.
+
+    Returns (status, fields_filled_total, zero_fill_steps, stalled): status is
+    a final status string when the form is not progressing, or None to proceed.
+    """
+    # Handle file uploads
+    if classification.get("has_file_upload"):
+        n = _handle_file_uploads(page, profile, cover_letter_path, uploaded_files)
+        fields_filled_total += n
+        if n > 0:
+            zero_fill_steps = 0
+
+    # Fill form fields
+    if classification.get("has_form_fields") or classification["page_type"] == "form":
+        n = _answer_external_screening_questions(
+            page, profile, job_title=job.get("title"), company=job.get("company")
+        )
+        fields_filled_total += n
+        if n > 0:
+            stalled = 0  # filling fields counts as progress
+            zero_fill_steps = 0
+        else:
+            zero_fill_steps += 1
+            if zero_fill_steps >= 4:
+                _dump_form_debug(page, job.get("id", ""), "No progress (zero fields filled)")
+                return (
+                    "failed: form not progressing (no new fields filled)",
+                    fields_filled_total,
+                    zero_fill_steps,
+                    stalled,
+                )
+        log.info(f"   Step {step + 1}: filled {n} fields on {page.url[:60]}")
+
+    return None, fields_filled_total, zero_fill_steps, stalled
+
+
+def _resubmit_with_email_code(  # noqa: C901
+    page, profile, job, error_summary, owns_browser, context
+):
+    """Fetch an emailed verification code after submit and retry.
+
+    Always returns a final status string.
+    """
+    # Try to fetch the code from Gmail via IMAP
+    if profile.gmail_app_password:
+        code = _fetch_verification_code_from_gmail(
+            profile.email, profile.gmail_app_password, max_wait=45
+        )
+        if code:
+            # Find the security code input
+            code_input = None
+            for lbl in ("Security code", "Verification code"):
+                try:
+                    loc = page.get_by_label(lbl)
+                    if loc.count() > 0 and loc.first.is_visible():
+                        code_input = loc.first
+                        break
+                except Exception:
+                    continue
+            if not code_input:
+                code_input = page.query_selector(
+                    "input[name*='security' i], input[name*='code' i], "
+                    "input[name*='verif' i], input[placeholder*='code' i], "
+                    "input[aria-label*='code' i]"
+                )
+            if not code_input:
+                for inp in page.query_selector_all("input[type='text'], input:not([type])"):
+                    try:
+                        if inp.is_visible() and not inp.input_value():
+                            lbl = _get_field_label(page, inp)
+                            if lbl and "code" in lbl.lower():
+                                code_input = inp
+                                break
+                    except Exception:
+                        continue
+            if code_input:
+                code_input.click()
+                code_input.evaluate("el => el.value = ''")
+                code_input.type(code, delay=50)
+                page.wait_for_timeout(500)
+                log.info(f"   📧 Filled verification code: {code}")
+                # Click submit again
+                _btn_role, _btn_el = _find_navigation_button(page)
+                if _btn_el:
+                    _safe_click(_btn_el, page)
+                    page.wait_for_timeout(5000)
+                # Check for success immediately
+                post_code_snap = _extract_page_snapshot(page)
+                if _detect_success_or_confirmation(page, post_code_snap):
+                    log.info("   ✅ Application submitted after verification code")
+                    if owns_browser:
+                        _save_session(context)
+                    return "submitted"
+                # Code might be wrong/expired — bail rather than loop
+                log.warning("   ⚠️ Verification code did not resolve the error")
+                _dump_form_debug(
+                    page,
+                    job.get("id", ""),
+                    f"Verification code failed: {error_summary[:200]}",
+                )
+                return f"failed: verification code rejected: {error_summary[:200]}"
+            else:
+                log.warning("   ⚠️ Got code but couldn't find input field")
+    else:
+        log.info(
+            "   ℹ️  Email verification required but no gmail_app_password configured in profile"
+        )
+    _dump_form_debug(
+        page,
+        job.get("id", ""),
+        f"Human verification required: {error_summary[:200]}",
+    )
+    return f"failed: human verification required: {error_summary[:200]}"
+
+
+def _resolve_post_submit_captcha(page, profile, job, error_summary):
+    """Solve a CAPTCHA surfaced by post-submit validation errors.
+
+    Returns "continue" after a successful solve and resubmit, or a final
+    failure status string.
+    """
+    captcha_info = _detect_captcha(page)
+    if captcha_info and profile.captcha_api_key:
+        solved = _solve_captcha(
+            page,
+            captcha_info,
+            profile.captcha_api_key,
+            profile.captcha_service,
+        )
+        if solved:
+            page.wait_for_timeout(2000)
+            # Click submit again after solving
+            _btn_role, _btn_el = _find_navigation_button(page)
+            if _btn_el:
+                _safe_click(_btn_el, page)
+                page.wait_for_timeout(3000)
+            return "continue"  # re-enter loop to check outcome
+    _dump_form_debug(
+        page,
+        job.get("id", ""),
+        f"CAPTCHA required: {error_summary[:200]}",
+    )
+    return f"failed: captcha required: {error_summary[:200]}"
+
+
+def _handle_post_submit_click(  # noqa: C901
+    page,
+    profile,
+    job,
+    handler,
+    handler_ctx,
+    owns_browser,
+    context,
+    fields_filled_total,
+    stalled,
+    login_resolved,
+):
+    """Run post-submit hooks, success detection, and validation-error recovery.
+
+    Returns (action, status, login_resolved, stalled, fields_filled_total)
+    with action one of "proceed", "continue", or "return".
+    """
+    if handler and handler_ctx:
+        submit_result = handler.on_submit_clicked(page, handler_ctx)
+        if submit_result:
+            if submit_result == "submitted" and owns_browser:
+                _save_session(context)
+            return "return", submit_result, login_resolved, stalled, fields_filled_total
+    post_snapshot = _extract_page_snapshot(page)
+    if _detect_success_or_confirmation(page, post_snapshot):
+        if owns_browser:
+            _save_session(context)
+        return "return", "submitted", login_resolved, stalled, fields_filled_total
+    # Check for validation errors after submit attempt
+    try:
+        validation_errors = page.evaluate("""() => {
+            const errors = [];
+            // Common error selectors across ATS systems
+            const errorEls = document.querySelectorAll(
+                '[class*="error"]:not([style*="display: none"]):not(.iti__hide), '
+                + '[class*="Error"]:not([style*="display: none"]), '
+                + '[role="alert"], '
+                + '.field-error, .form-error, .invalid-feedback, '
+                + '[aria-invalid="true"]'
+            );
+            for (const el of errorEls) {
+                const text = el.textContent.trim();
+                if (text && text.length < 200 && !errors.includes(text))
+                    errors.push(text);
+            }
+            return errors.slice(0, 5);
+        }""")
+        if validation_errors:
+            error_summary = "; ".join(validation_errors)
+            log.warning(f"   ⚠️ Validation errors: {error_summary[:200]}")
+            # Detect human verification (CAPTCHA, email verification codes)
+            es_lower = error_summary.lower()
+            email_code_patterns = (
+                "verification code",
+                "security code",
+                "verify you're a human",
+                "confirm you're a human",
+            )
+            captcha_patterns = (
+                "captcha",
+                "recaptcha",
+                "hcaptcha",
+                "flagged as possible spam",
+                "perform the security check",
+                "bot detection",
+            )
+            if any(bp in es_lower for bp in email_code_patterns):
+                status = _resubmit_with_email_code(
+                    page, profile, job, error_summary, owns_browser, context
+                )
+                return "return", status, login_resolved, stalled, fields_filled_total
+            if any(bp in es_lower for bp in captcha_patterns):
+                captcha_status = _resolve_post_submit_captcha(page, profile, job, error_summary)
+                if captcha_status == "continue":
+                    return "continue", None, login_resolved, stalled, fields_filled_total
+                return "return", captcha_status, login_resolved, stalled, fields_filled_total
+            # Jobvite "View Full Application Form" — expand to full form
+            if "view full application" in es_lower or "minimum required" in es_lower:
+                try:
+                    expand_link = page.query_selector(
+                        "a:has-text('View Full Application'), "
+                        "a:has-text('Full Application Form'), "
+                        "button:has-text('View Full Application')"
+                    )
+                    if expand_link and expand_link.is_visible():
+                        _safe_click(expand_link, page)
+                        page.wait_for_timeout(2000)
+                        log.info("   🔗 Expanded to full application form")
+                        # re-enter loop with full form
+                        return "continue", None, login_resolved, stalled, fields_filled_total
+                except Exception:  # noqa: S110
+                    pass
+            # If we can't fill any more fields, bail out
+            if fields_filled_total == 0 or stalled >= 2:
+                # Recheck — page may have navigated to login wall
+                # Handler gets first chance, then generic resolution
+                if not login_resolved and _detect_login_page(page):
+                    resolved = (
+                        handler.resolve_login_wall(page, handler_ctx or {}) if handler else False
+                    ) or _resolve_login_wall(page, profile)
+                    if resolved:
+                        login_resolved = True
+                        stalled = 0
+                        fields_filled_total = 0
+                        # retry from the new page state
+                        return "continue", None, login_resolved, stalled, fields_filled_total
+                    log.info("   🔒 Requires account: %s", page.url[:60])
+                    return (
+                        "return",
+                        "skipped: requires account",
+                        login_resolved,
+                        stalled,
+                        fields_filled_total,
+                    )
+                _dump_form_debug(
+                    page, job.get("id", ""), f"Validation errors: {error_summary[:200]}"
+                )
+                return (
+                    "return",
+                    f"failed: form validation errors: {error_summary[:200]}",
+                    login_resolved,
+                    stalled,
+                    fields_filled_total,
+                )
+    except Exception:  # noqa: S110
+        pass
+    # Submit clicked but no confirmation — continue loop to check next state
+    return "proceed", None, login_resolved, stalled, fields_filled_total
+
+
 def _navigate_external_form(  # noqa: C901
     page,
     profile: ApplicantProfile,
@@ -1430,23 +2015,7 @@ def _navigate_external_form(  # noqa: C901
     uploaded_files: set = set()  # track file uploads across steps to prevent re-uploads
     login_resolved = False  # set True after login/account creation succeeds once
 
-    # Detect iframe-based forms (e.g. SmartRecruiters /oneclick-ui/)
-    # If main page has no visible inputs but an iframe does, switch to that frame.
-    main_inputs = page.query_selector_all("input:not([type=hidden]), textarea, select")
-    if not main_inputs:
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            try:
-                frame_inputs = frame.query_selector_all(
-                    "input:not([type=hidden]), textarea, select"
-                )
-                if len(frame_inputs) >= 2:
-                    log.debug("Form is inside iframe (%s), switching context", frame.url[:60])
-                    page = frame  # type: ignore[assignment]
-                    break
-            except Exception:  # noqa: S110
-                pass
+    page = _switch_to_form_iframe(page)
 
     for step in range(_MAX_EXTERNAL_STEPS):
         page.wait_for_timeout(1500)
@@ -1463,268 +2032,69 @@ def _navigate_external_form(  # noqa: C901
                 handler_ctx.pop("skip_step")
                 continue
 
-        # Login wall check on every step (some sites redirect mid-form)
-        # Skip if we already resolved login/account for this session to prevent
-        # false re-detection (e.g. Workday keeps password fields in page HTML).
-        if not login_resolved and _detect_login_page(page):
-            handler_resolved = (
-                handler.resolve_login_wall(page, handler_ctx or {}) if handler else False
-            )
-            if not handler_resolved and not _resolve_login_wall(page, profile):
-                log.info(f"   🔒 Requires account: {page.url[:60]}")
-                return "skipped: requires account"
-            login_resolved = True
+        login_status, login_resolved = _handle_login_wall_step(
+            page, profile, handler, handler_ctx, login_resolved
+        )
+        if login_status:
+            return login_status
 
-        # CAPTCHA detection — attempt solve up to 2 times per page URL
-        captcha_info = _detect_captcha(page)
-        if captcha_info and page.url not in captcha_solved_urls:
-            if profile.captcha_api_key:
-                solved = False
-                for captcha_attempt in range(2):
-                    solved = _solve_captcha(
-                        page, captcha_info, profile.captcha_api_key, profile.captcha_service
-                    )
-                    if solved:
-                        break
-                    if captcha_attempt == 0:
-                        log.info("   🧩 Retrying CAPTCHA solve (attempt 2)...")
-                        page.wait_for_timeout(2000)
-                        captcha_info = _detect_captcha(page)
-                        if not captcha_info:
-                            break
-                if solved:
-                    captcha_solved_urls.add(page.url)
-                    # Only auto-click a navigation button if this looks like a
-                    # captcha-GATE page (no form fields underneath). On forms
-                    # with inline captchas (Ashby, Workable, Lever, ...), the
-                    # nav button IS the form's Submit -- clicking it now would
-                    # submit an empty form right after the captcha token,
-                    # which Ashby's spam filter (and similar) flag as bot.
-                    visible_form_fields = page.query_selector_all(
-                        "input[type='text']:visible, input[type='email']:visible, "
-                        "input[type='tel']:visible, input[type='url']:visible, "
-                        "input[type='number']:visible, textarea:visible"
-                    )
-                    if len(visible_form_fields) < 3:
-                        _btn_role, _btn_el = _find_navigation_button(page)
-                        if _btn_el:
-                            _safe_click(_btn_el, page)
-                            page.wait_for_timeout(3000)
-                    log.info("   🧩 CAPTCHA solved, continuing form flow")
-                    continue
-                else:
-                    log.warning("   🛡️  CAPTCHA solve failed — cannot proceed")
-                    _dump_form_debug(page, job.get("id", ""), "CAPTCHA solve failed")
-                    return "failed: captcha solve failed"
-            else:
-                log.warning("   🛡️  CAPTCHA detected but no captcha_api_key configured")
-                _dump_form_debug(page, job.get("id", ""), "CAPTCHA detected")
-                return "failed: captcha required"
+        captcha_signal = _handle_captcha_step(page, profile, job, captcha_solved_urls)
+        if captcha_signal == "continue":
+            continue
+        if captcha_signal:
+            return captcha_signal
 
         # Take snapshot and check for success
         snapshot = _extract_page_snapshot(page)
 
-        handler_success = (
-            handler.detect_success(page, handler_ctx) if handler and handler_ctx else False
-        )
-        if handler_success or _detect_success_or_confirmation(page, snapshot):
+        if _check_success_and_confirmation(page, snapshot, handler, handler_ctx):
             log.info(f"   ✅ Application confirmed after {step + 1} steps")
             return "submitted"
 
         # Stall detection — try filling missed fields before giving up
         if snapshot == prev_snapshot:
-            # Re-attempt field filling on stall (fields may have appeared after click)
-            n_refilled = _answer_external_screening_questions(
-                page, profile, job_title=job.get("title"), company=job.get("company")
+            stall_status, stalled, fields_filled_total = _recover_from_stall(
+                page, profile, job, stalled, fields_filled_total, step
             )
-            if n_refilled > 0:
-                log.debug("External form stalled but filled %d new fields, retrying", n_refilled)
-                fields_filled_total += n_refilled
-                stalled = 0  # reset — we made progress
-            else:
-                stalled += 1
-                if stalled >= 3:
-                    _dump_form_debug(page, job.get("id", ""), "External form stalled")
-                    return f"failed: external form stuck (step {step + 1}/{_MAX_EXTERNAL_STEPS})"
+            if stall_status:
+                return stall_status
         else:
             stalled = 0
         prev_snapshot = snapshot
 
-        # Classify the page
-        classification = _classify_page(snapshot, page.url)
-        log.debug("   Page classification: %s", classification.get("notes", ""))
-
-        if classification["page_type"] == "login" or classification.get("has_required_login"):
-            if not (handler and handler.resolve_login_wall(page, handler_ctx or {})):
-                return "skipped: requires account"
-
-        if classification["page_type"] == "confirmation":
-            return "submitted"
-
-        if classification["page_type"] == "error":
-            _dump_form_debug(page, job.get("id", ""), "Error page")
-            return "failed: ATS error page"
-
-        if classification["page_type"] == "job_search":
-            # Check for Apply button before bailing -- Workday job listing pages
-            # are often classified as "job_search" but have a clickable Apply button
-            _has_apply = page.query_selector(
-                "a[data-automation-id='jobPostingApplyButton'], "
-                "a[data-automation-id='adventureButton'], "
-                "button[data-automation-id='adventureButton'], "
-                "a:has-text('Apply'):not(:has-text('Indeed'))"
-            )
-            if not _has_apply:
-                log.info("   ⏭  Page is a job search/listing page, not an application form")
-                return "failed: landed on job search page instead of application form"
-            log.info("   🔗 Job listing page with Apply button detected, proceeding...")
-
-        # Also catch job search pages by URL pattern (fast path, no AI needed)
-        _url_lower = page.url.lower()
-        if any(
-            pattern in _url_lower
-            for pattern in ("/jobs/search", "/search?query=", "/job-search", "kiosk+mode")
-        ):
-            log.info("   ⏭  URL looks like a job search page, skipping")
-            return "failed: landed on job search page instead of application form"
-
-        # Job listing page with Apply button (Workday, company career pages)
-        # If no form fields and page has an Apply button, click through to the form
-        if not classification.get("has_form_fields") and not classification.get("has_file_upload"):
-            # Apply-button lookup must require :visible -- otherwise generic
-            # :has-text('Apply') selectors can match hidden elements inside
-            # cookie-consent modals (e.g. OneTrust's #filter-apply-handler),
-            # which _safe_click fires via JS and navigates nowhere, stalling
-            # the form loop on "Job listing page detected" forever.
-            apply_btn = page.query_selector(
-                "a[data-automation-id='jobPostingApplyButton']:visible, "
-                "button[data-automation-id='jobPostingApplyButton']:visible, "
-                "a[data-automation-id='adventureButton']:visible, "
-                "button[data-automation-id='adventureButton']:visible, "
-                "a:visible:has-text('Apply'):not(:has-text('Indeed')), "
-                "button:visible:has-text('Apply'):not(:has-text('Indeed')), "
-                "a[href*='/apply']:visible, "
-                "a.css-1ixbfil:visible, "  # Workday apply button class
-                "a[data-uxi-element-id='Apply']:visible"
-            )
-            if apply_btn:
-                log.info("   🔗 Job listing page detected, clicking Apply button...")
-                _safe_click(apply_btn, page)
-                page.wait_for_timeout(3000)
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=10000)
-                except Exception:  # noqa: S110
-                    pass
-                stats._final_ats_url = page.url
-                continue  # re-enter loop on the new page
+        route_action, route_payload = _classify_and_route_page(
+            page, job, snapshot, handler, handler_ctx
+        )
+        if route_action == "return":
+            return route_payload
+        if route_action == "continue":
+            continue
+        classification = route_payload
 
         # Detect email verification code prompt and handle it before filling fields
         if profile.gmail_app_password:
-            has_verification_prompt = page.evaluate("""() => {
-                const text = document.body ? document.body.innerText : '';
-                const lower = text.toLowerCase();
-                return lower.includes('verification code was sent')
-                    || (lower.includes('security code') && lower.includes('character code'))
-                    || lower.includes('enter the') && lower.includes('code to confirm');
-            }""")
-            if has_verification_prompt and handler and handler_ctx:
-                hvc_result = handler.handle_verification_code(page, handler_ctx)
-                if hvc_result:
-                    if hvc_result == "submitted":
-                        if owns_browser:
-                            _save_session(context)
-                        return "submitted"
-                    if hvc_result == "continue":
-                        continue
-                    return hvc_result
-            if has_verification_prompt:
-                code = _fetch_verification_code_from_gmail(
-                    profile.email, profile.gmail_app_password, max_wait=45
-                )
-                if code:
-                    # Find the security code input — try multiple strategies
-                    code_input = None
-                    # Strategy 1: Playwright's label-based locator
-                    for label_text in ("Security code", "Verification code", "Security Code"):
-                        try:
-                            loc = page.get_by_label(label_text)
-                            if loc.count() > 0 and loc.first.is_visible():
-                                code_input = loc.first
-                                break
-                        except Exception:
-                            continue
-                    # Strategy 2: attribute-based selector
-                    if not code_input:
-                        code_input = page.query_selector(
-                            "input[name*='security' i], input[name*='code' i], "
-                            "input[name*='verif' i], input[placeholder*='code' i], "
-                            "input[aria-label*='code' i], input[aria-label*='security' i]"
-                        )
-                    # Strategy 3: empty visible text input near "code" label
-                    if not code_input:
-                        for inp in page.query_selector_all("input[type='text'], input:not([type])"):
-                            try:
-                                if inp.is_visible() and not inp.input_value():
-                                    label = _get_field_label(page, inp)
-                                    if label and "code" in label.lower():
-                                        code_input = inp
-                                        break
-                            except Exception:
-                                continue
-                    if code_input:
-                        # Use click + clear + type for security code inputs
-                        # (React controlled components reject programmatic fill)
-                        code_input.click()
-                        code_input.evaluate("el => el.value = ''")
-                        code_input.type(code, delay=50)
-                        page.wait_for_timeout(500)
-                        log.info(f"   📧 Filled verification code: {code}")
-                        submit_btn = page.query_selector(
-                            "button[type='submit'], input[type='submit'], button:has-text('Submit')"
-                        )
-                        if submit_btn:
-                            _safe_click(submit_btn, page)
-                        else:
-                            _btn_role, _btn_el = _find_navigation_button(page)
-                            if _btn_el:
-                                _safe_click(_btn_el, page)
-                        page.wait_for_timeout(5000)
-                        post_snap = _extract_page_snapshot(page)
-                        if _detect_success_or_confirmation(page, post_snap):
-                            log.info("   ✅ Application submitted after verification code")
-                            if owns_browser:
-                                _save_session(context)
-                            return "submitted"
-                        log.warning("   ⚠️ Verification code may have been rejected")
-                        _dump_form_debug(page, job.get("id", ""), "Verification code rejected")
-                        return "failed: verification code rejected"
-                else:
-                    log.warning("   ⚠️ Could not retrieve verification code from email")
-                    _dump_form_debug(page, job.get("id", ""), "Verification code not received")
-                    return "failed: verification code not received from email"
-
-        # Handle file uploads
-        if classification.get("has_file_upload"):
-            n = _handle_file_uploads(page, profile, cover_letter_path, uploaded_files)
-            fields_filled_total += n
-            if n > 0:
-                zero_fill_steps = 0
-
-        # Fill form fields
-        if classification.get("has_form_fields") or classification["page_type"] == "form":
-            n = _answer_external_screening_questions(
-                page, profile, job_title=job.get("title"), company=job.get("company")
+            verif_action, verif_status = _handle_verification_step(
+                page, profile, job, handler, handler_ctx, owns_browser, context
             )
-            fields_filled_total += n
-            if n > 0:
-                stalled = 0  # filling fields counts as progress
-                zero_fill_steps = 0
-            else:
-                zero_fill_steps += 1
-                if zero_fill_steps >= 4:
-                    _dump_form_debug(page, job.get("id", ""), "No progress (zero fields filled)")
-                    return "failed: form not progressing (no new fields filled)"
-            log.info(f"   Step {step + 1}: filled {n} fields on {page.url[:60]}")
+            if verif_action == "continue":
+                continue
+            if verif_action == "return":
+                return verif_status
+
+        fill_status, fields_filled_total, zero_fill_steps, stalled = _run_form_fill_phase(
+            page,
+            profile,
+            job,
+            cover_letter_path,
+            classification,
+            uploaded_files,
+            fields_filled_total,
+            zero_fill_steps,
+            stalled,
+            step,
+        )
+        if fill_status:
+            return fill_status
 
         if dry_run:
             return "dry_run"
@@ -1746,195 +2116,28 @@ def _navigate_external_form(  # noqa: C901
 
         if btn_role == "submit":
             page.wait_for_timeout(3000)
-            if handler and handler_ctx:
-                submit_result = handler.on_submit_clicked(page, handler_ctx)
-                if submit_result:
-                    if submit_result == "submitted" and owns_browser:
-                        _save_session(context)
-                    return submit_result
-            post_snapshot = _extract_page_snapshot(page)
-            if _detect_success_or_confirmation(page, post_snapshot):
-                if owns_browser:
-                    _save_session(context)
-                return "submitted"
-            # Check for validation errors after submit attempt
-            try:
-                validation_errors = page.evaluate("""() => {
-                    const errors = [];
-                    // Common error selectors across ATS systems
-                    const errorEls = document.querySelectorAll(
-                        '[class*="error"]:not([style*="display: none"]):not(.iti__hide), '
-                        + '[class*="Error"]:not([style*="display: none"]), '
-                        + '[role="alert"], '
-                        + '.field-error, .form-error, .invalid-feedback, '
-                        + '[aria-invalid="true"]'
-                    );
-                    for (const el of errorEls) {
-                        const text = el.textContent.trim();
-                        if (text && text.length < 200 && !errors.includes(text))
-                            errors.push(text);
-                    }
-                    return errors.slice(0, 5);
-                }""")
-                if validation_errors:
-                    error_summary = "; ".join(validation_errors)
-                    log.warning(f"   ⚠️ Validation errors: {error_summary[:200]}")
-                    # Detect human verification (CAPTCHA, email verification codes)
-                    es_lower = error_summary.lower()
-                    email_code_patterns = (
-                        "verification code",
-                        "security code",
-                        "verify you're a human",
-                        "confirm you're a human",
-                    )
-                    captcha_patterns = (
-                        "captcha",
-                        "recaptcha",
-                        "hcaptcha",
-                        "flagged as possible spam",
-                        "perform the security check",
-                        "bot detection",
-                    )
-                    if any(bp in es_lower for bp in email_code_patterns):
-                        # Try to fetch the code from Gmail via IMAP
-                        if profile.gmail_app_password:
-                            code = _fetch_verification_code_from_gmail(
-                                profile.email, profile.gmail_app_password, max_wait=45
-                            )
-                            if code:
-                                # Find the security code input
-                                code_input = None
-                                for lbl in ("Security code", "Verification code"):
-                                    try:
-                                        loc = page.get_by_label(lbl)
-                                        if loc.count() > 0 and loc.first.is_visible():
-                                            code_input = loc.first
-                                            break
-                                    except Exception:
-                                        continue
-                                if not code_input:
-                                    code_input = page.query_selector(
-                                        "input[name*='security' i], input[name*='code' i], "
-                                        "input[name*='verif' i], input[placeholder*='code' i], "
-                                        "input[aria-label*='code' i]"
-                                    )
-                                if not code_input:
-                                    for inp in page.query_selector_all(
-                                        "input[type='text'], input:not([type])"
-                                    ):
-                                        try:
-                                            if inp.is_visible() and not inp.input_value():
-                                                lbl = _get_field_label(page, inp)
-                                                if lbl and "code" in lbl.lower():
-                                                    code_input = inp
-                                                    break
-                                        except Exception:
-                                            continue
-                                if code_input:
-                                    code_input.click()
-                                    code_input.evaluate("el => el.value = ''")
-                                    code_input.type(code, delay=50)
-                                    page.wait_for_timeout(500)
-                                    log.info(f"   📧 Filled verification code: {code}")
-                                    # Click submit again
-                                    _btn_role, _btn_el = _find_navigation_button(page)
-                                    if _btn_el:
-                                        _safe_click(_btn_el, page)
-                                        page.wait_for_timeout(5000)
-                                    # Check for success immediately
-                                    post_code_snap = _extract_page_snapshot(page)
-                                    if _detect_success_or_confirmation(page, post_code_snap):
-                                        log.info(
-                                            "   ✅ Application submitted after verification code"
-                                        )
-                                        if owns_browser:
-                                            _save_session(context)
-                                        return "submitted"
-                                    # Code might be wrong/expired — bail rather than loop
-                                    log.warning("   ⚠️ Verification code did not resolve the error")
-                                    _dump_form_debug(
-                                        page,
-                                        job.get("id", ""),
-                                        f"Verification code failed: {error_summary[:200]}",
-                                    )
-                                    return (
-                                        f"failed: verification code rejected: {error_summary[:200]}"
-                                    )
-                                else:
-                                    log.warning("   ⚠️ Got code but couldn't find input field")
-                        else:
-                            log.info(
-                                "   ℹ️  Email verification required but no gmail_app_password "
-                                "configured in profile"
-                            )
-                        _dump_form_debug(
-                            page,
-                            job.get("id", ""),
-                            f"Human verification required: {error_summary[:200]}",
-                        )
-                        return f"failed: human verification required: {error_summary[:200]}"
-                    if any(bp in es_lower for bp in captcha_patterns):
-                        captcha_info = _detect_captcha(page)
-                        if captcha_info and profile.captcha_api_key:
-                            solved = _solve_captcha(
-                                page,
-                                captcha_info,
-                                profile.captcha_api_key,
-                                profile.captcha_service,
-                            )
-                            if solved:
-                                page.wait_for_timeout(2000)
-                                # Click submit again after solving
-                                _btn_role, _btn_el = _find_navigation_button(page)
-                                if _btn_el:
-                                    _safe_click(_btn_el, page)
-                                    page.wait_for_timeout(3000)
-                                continue  # re-enter loop to check outcome
-                        _dump_form_debug(
-                            page,
-                            job.get("id", ""),
-                            f"CAPTCHA required: {error_summary[:200]}",
-                        )
-                        return f"failed: captcha required: {error_summary[:200]}"
-                    # Jobvite "View Full Application Form" — expand to full form
-                    if "view full application" in es_lower or "minimum required" in es_lower:
-                        try:
-                            expand_link = page.query_selector(
-                                "a:has-text('View Full Application'), "
-                                "a:has-text('Full Application Form'), "
-                                "button:has-text('View Full Application')"
-                            )
-                            if expand_link and expand_link.is_visible():
-                                _safe_click(expand_link, page)
-                                page.wait_for_timeout(2000)
-                                log.info("   🔗 Expanded to full application form")
-                                continue  # re-enter loop with full form
-                        except Exception:  # noqa: S110
-                            pass
-                    # If we can't fill any more fields, bail out
-                    if fields_filled_total == 0 or stalled >= 2:
-                        # Recheck — page may have navigated to login wall
-                        # Handler gets first chance, then generic resolution
-                        if not login_resolved and _detect_login_page(page):
-                            resolved = (
-                                handler.resolve_login_wall(page, handler_ctx or {})
-                                if handler
-                                else False
-                            ) or _resolve_login_wall(page, profile)
-                            if resolved:
-                                login_resolved = True
-                                stalled = 0
-                                fields_filled_total = 0
-                                continue  # retry from the new page state
-                            log.info("   🔒 Requires account: %s", page.url[:60])
-                            return "skipped: requires account"
-                        _dump_form_debug(
-                            page, job.get("id", ""), f"Validation errors: {error_summary[:200]}"
-                        )
-                        return f"failed: form validation errors: {error_summary[:200]}"
-            except Exception:  # noqa: S110
-                pass
-            # Submit clicked but no confirmation — continue loop to check next state
+            (
+                submit_action,
+                submit_status,
+                login_resolved,
+                stalled,
+                fields_filled_total,
+            ) = _handle_post_submit_click(
+                page,
+                profile,
+                job,
+                handler,
+                handler_ctx,
+                owns_browser,
+                context,
+                fields_filled_total,
+                stalled,
+                login_resolved,
+            )
+            if submit_action == "continue":
+                continue
+            if submit_action == "return":
+                return submit_status
 
     _dump_form_debug(page, job.get("id", ""), "Exceeded max external form steps")
     return f"failed: exceeded max form steps ({_MAX_EXTERNAL_STEPS})"
