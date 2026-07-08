@@ -35,33 +35,32 @@ jobs:
       - name: Radon cyclomatic complexity
         run: |
           echo "## Complexity Grades (C or worse = needs attention)"
-          radon cc jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s -n C --total-average
+          radon cc jobapply/ assisted_apply_mcp.py q2apply/ batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s -n C --total-average
           echo ""
           echo "## Maintainability Index"
-          radon mi jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s
+          radon mi jobapply/ assisted_apply_mcp.py q2apply/ batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s
 
       - name: Radon complexity gate
         run: |
           # Fail if F-count (unmaintainable functions) grows across ALL source modules.
-          # RATCHET: 2 F-grade functions as of 2026-07:
-          #   jobapply/external.py _find_navigation_button (48),
+          # RATCHET: 1 F-grade function as of 2026-07:
           #   batch_analysis._fingerprint_failure (41)
           # Lower this limit as refactors land. NEVER raise it.
-          F_COUNT=$(radon cc jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s -n F --json | python3 -c "
+          F_COUNT=$(radon cc jobapply/ assisted_apply_mcp.py q2apply/ batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s -n F --json | python3 -c "
           import json, sys
           data = json.load(sys.stdin)
           total = sum(len(v) for v in data.values())
           print(total)
           ")
           echo "Functions with F complexity: $F_COUNT"
-          if [ "$F_COUNT" -gt 2 ]; then
-            echo "::error::Too many F-complexity functions ($F_COUNT > 2). Refactor before merging."
+          if [ "$F_COUNT" -gt 1 ]; then
+            echo "::error::Too many F-complexity functions ($F_COUNT > 1). Refactor before merging."
             exit 1
           fi
 
       - name: Pylint score and gate
         run: |
-          pylint jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py \
+          pylint jobapply/ assisted_apply_mcp.py q2apply/ batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py \
             --disable=C0114,C0115,C0116,C0301,C0302,W0603,W0718,R0902,R0911,R0912,R0913,R0914,R0915,R0917,E0401,W0511 \
             --max-line-length=100 \
             --exit-zero | tee pylint-report.txt
@@ -75,7 +74,7 @@ jobs:
       - name: Code metrics summary
         run: |
           echo "## Raw Metrics"
-          radon raw jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py job_search_apply.py -s
+          radon raw jobapply/ assisted_apply_mcp.py q2apply/ batch_analysis.py dashboard.py job_search_apply.py -s
           echo ""
           echo "## Halstead Metrics (top 10 most complex)"
           radon hal jobapply/ -s 2>/dev/null | head -40 || true

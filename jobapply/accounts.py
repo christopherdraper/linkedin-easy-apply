@@ -102,18 +102,23 @@ def _fetch_verification_code_from_gmail(  # noqa: C901
                             if ct == "text/plain":
                                 payload = part.get_payload(decode=True)
                                 if payload:
-                                    body = payload.decode("utf-8", errors="replace")
+                                    # decode=True always yields bytes here
+                                    body = payload.decode("utf-8", errors="replace")  # type: ignore[union-attr]
                                     break
                             elif ct == "text/html" and not body:
                                 payload = part.get_payload(decode=True)
                                 if payload:
+                                    # decode=True always yields bytes here
                                     body = re.sub(
-                                        r"<[^>]+>", " ", payload.decode("utf-8", errors="replace")
+                                        r"<[^>]+>",
+                                        " ",
+                                        payload.decode("utf-8", errors="replace"),  # type: ignore[union-attr]
                                     )
                     else:
                         payload = msg.get_payload(decode=True)
                         if payload:
-                            body = payload.decode("utf-8", errors="replace")
+                            # decode=True always yields bytes here
+                            body = payload.decode("utf-8", errors="replace")  # type: ignore[union-attr]
 
                     if not body:
                         continue

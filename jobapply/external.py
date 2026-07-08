@@ -1177,51 +1177,54 @@ def _answer_external_screening_questions(
     return filled
 
 
-def _find_navigation_button(page):  # noqa: C901
-    """Find the Next/Continue/Submit button on an external form page.
-    Returns (role, element) where role is 'submit', 'next', or 'none'."""
-    # Scroll to bottom to ensure below-fold buttons are rendered/visible
+# Navigation-button text lists (priority: submit > next/continue)
+_NAV_SUBMIT_TEXTS = [
+    "Submit Application",
+    "Submit application",
+    "Submit",
+    "Apply",
+    "Send Application",
+    "Complete Application",
+    "Finish",
+    "Apply Now",
+    "Submit & Continue",
+    "Apply for this job",
+    "Apply for this position",
+    "Confirm",
+    "Submit my application",
+    "Save",
+]
+_NAV_NEXT_TEXTS = [
+    "Next",
+    "Continue",
+    "Next Step",
+    "Proceed",
+    "Save and Continue",
+    "Save & Continue",
+    "Save and Next",
+    "Review",
+    "Review Application",
+    "Preview",
+    "Go to next step",
+    "Save & Next",
+    "Next step",
+]
+
+# Skip third-party apply buttons (Indeed, LinkedIn Easy Apply, etc.)
+_THIRD_PARTY_KEYWORDS = ("indeed", "linkedin", "glassdoor")
+
+
+def _nav_scroll_to_bottom(page):
+    """Scroll to bottom to ensure below-fold buttons are rendered/visible."""
     try:
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         page.wait_for_timeout(300)
     except Exception:  # noqa: S110
         pass
 
-    # Priority: submit > next/continue
-    submit_texts = [
-        "Submit Application",
-        "Submit application",
-        "Submit",
-        "Apply",
-        "Send Application",
-        "Complete Application",
-        "Finish",
-        "Apply Now",
-        "Submit & Continue",
-        "Apply for this job",
-        "Apply for this position",
-        "Confirm",
-        "Submit my application",
-        "Save",
-    ]
-    next_texts = [
-        "Next",
-        "Continue",
-        "Next Step",
-        "Proceed",
-        "Save and Continue",
-        "Save & Continue",
-        "Save and Next",
-        "Review",
-        "Review Application",
-        "Preview",
-        "Go to next step",
-        "Save & Next",
-        "Next step",
-    ]
 
-    # Skip third-party apply buttons (Indeed, LinkedIn Easy Apply, etc.)
-    _THIRD_PARTY_KEYWORDS = ("indeed", "linkedin", "glassdoor")
+def _nav_find_submit_by_text(page, submit_texts):
+    """Visible submit-text <button>, skipping third-party apply buttons."""
     for text in submit_texts:
         try:
             btn = page.query_selector(f"button:has-text('{text}')")
@@ -1231,15 +1234,22 @@ def _find_navigation_button(page):  # noqa: C901
                     return ("submit", btn)
         except Exception:
             continue
+    return None
 
-    # Also check input[type='submit']
+
+def _nav_find_input_submit(page):
+    """Also check input[type='submit']."""
     try:
         btn = page.query_selector("input[type='submit']")
         if btn and btn.is_visible():
             return ("submit", btn)
-    except Exception:
+    except Exception:  # noqa: S110
         pass
+    return None
 
+
+def _nav_find_button_type_submit(page):
+    """button[type='submit'], skipping sign-in/cookie buttons."""
     try:
         btn = page.query_selector("button[type='submit']")
         if btn and btn.is_visible():
@@ -1247,9 +1257,13 @@ def _find_navigation_button(page):  # noqa: C901
             _skip_btn_texts = ("sign in", "log in", "login", "cookie", "cookies")
             if not any(s in text for s in _skip_btn_texts):
                 return ("submit", btn)
-    except Exception:
+    except Exception:  # noqa: S110
         pass
+    return None
 
+
+def _nav_find_next_by_text(page, next_texts):
+    """Visible next-text <button>."""
     for text in next_texts:
         try:
             btn = page.query_selector(f"button:has-text('{text}')")
@@ -1257,8 +1271,11 @@ def _find_navigation_button(page):  # noqa: C901
                 return ("next", btn)
         except Exception:
             continue
+    return None
 
-    # Try anchor-based buttons (submit texts first, then next texts)
+
+def _nav_find_anchor_button(page, submit_texts, next_texts):
+    """Try anchor-based buttons (submit texts first, then next texts)."""
     for text in submit_texts:
         try:
             btn = page.query_selector(f"a:has-text('{text}')")
@@ -1273,8 +1290,11 @@ def _find_navigation_button(page):  # noqa: C901
                 return ("next", btn)
         except Exception:  # noqa: S112
             continue
+    return None
 
-    # Try div[role='button'] (some ATS frameworks use styled divs)
+
+def _nav_find_div_role_button(page, submit_texts, next_texts):
+    """Try div[role='button'] (some ATS frameworks use styled divs)."""
     for text in submit_texts:
         try:
             btn = page.query_selector(f"div[role='button']:has-text('{text}')")
@@ -1289,8 +1309,11 @@ def _find_navigation_button(page):  # noqa: C901
                 return ("next", btn)
         except Exception:  # noqa: S112
             continue
+    return None
 
-    # Last resort: any visible button with submit-like aria-label
+
+def _nav_find_aria_submit(page):
+    """Last resort: any visible button with submit-like aria-label."""
     try:
         btn = page.query_selector(
             "button[aria-label*='submit' i], "
@@ -1302,10 +1325,13 @@ def _find_navigation_button(page):  # noqa: C901
             return ("submit", btn)
     except Exception:  # noqa: S110
         pass
+    return None
 
-    # Web Components / Shadow DOM fallback using Playwright's role-based locator
-    # (pierces custom elements like SmartRecruiters' <spl-button>)
-    # Search next_texts first to avoid matching third-party apply buttons
+
+def _nav_find_shadow_dom_button(page, submit_texts, next_texts):
+    """Web Components / Shadow DOM fallback using Playwright's role-based locator
+    (pierces custom elements like SmartRecruiters' <spl-button>).
+    Search next_texts first to avoid matching third-party apply buttons."""
     for text in next_texts + submit_texts:
         try:
             loc = page.get_by_role("button", name=text, exact=True)
@@ -1314,6 +1340,43 @@ def _find_navigation_button(page):  # noqa: C901
                 return (role, loc.first)
         except Exception:  # noqa: S112
             continue
+    return None
+
+
+def _find_navigation_button(page):
+    """Find the Next/Continue/Submit button on an external form page.
+    Returns (role, element) where role is 'submit', 'next', or 'none'.
+
+    The selector cascade order below is load-bearing; do not reorder."""
+    _nav_scroll_to_bottom(page)
+
+    submit_texts = _NAV_SUBMIT_TEXTS
+    next_texts = _NAV_NEXT_TEXTS
+
+    result = _nav_find_submit_by_text(page, submit_texts)
+    if result:
+        return result
+    result = _nav_find_input_submit(page)
+    if result:
+        return result
+    result = _nav_find_button_type_submit(page)
+    if result:
+        return result
+    result = _nav_find_next_by_text(page, next_texts)
+    if result:
+        return result
+    result = _nav_find_anchor_button(page, submit_texts, next_texts)
+    if result:
+        return result
+    result = _nav_find_div_role_button(page, submit_texts, next_texts)
+    if result:
+        return result
+    result = _nav_find_aria_submit(page)
+    if result:
+        return result
+    result = _nav_find_shadow_dom_button(page, submit_texts, next_texts)
+    if result:
+        return result
 
     # AI vision fallback: screenshot the page and ask Claude to find the button
     if _AI_AVAILABLE:
@@ -2194,7 +2257,9 @@ def submit_external_apply(  # noqa: C901
 
     with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(
-            p, effective_proxy, headed=use_headed
+            p,
+            effective_proxy,
+            headed=use_headed,  # type: ignore[arg-type]  # truthy str/None used as bool
         )
         try:
             page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)

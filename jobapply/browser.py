@@ -5,7 +5,7 @@ import logging
 import os
 import random
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from jobapply.config import CDP_URL, CREDENTIALS_FILE, SESSION_FILE
 
@@ -276,7 +276,7 @@ def _playwright_context(p, proxy: Optional[str] = None, headed: bool = False):
             log.debug("CDP connection unavailable, falling back to standalone browser")
 
     # Fallback: launch a standalone browser with stored cookies
-    opts = {}
+    opts: Dict[str, Any] = {}
     if SESSION_FILE.exists():
         opts["storage_state"] = str(SESSION_FILE)
     if proxy:
