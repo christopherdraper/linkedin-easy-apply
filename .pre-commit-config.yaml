@@ -25,6 +25,7 @@ repos:
         args:
           [
             "job_search_apply.py",
+            "jobapply",
             "assisted_apply_mcp.py",
             "batch_analysis.py",
             "dashboard.py",

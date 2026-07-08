@@ -143,7 +143,7 @@ class TestQ1HandlerIntegration:
 
     def test_get_handler_called_in_submit_external_apply(self):
         """submit_external_apply calls get_handler to obtain a platform handler."""
-        with patch("job_search_apply.get_handler") as mock_gh:
+        with patch("jobapply.external.get_handler") as mock_gh:
             mock_handler = MagicMock()
             mock_handler.pre_flight.return_value = "failed: test abort"
             mock_gh.return_value = mock_handler
@@ -153,10 +153,10 @@ class TestQ1HandlerIntegration:
             context.pages = [page]
 
             with (
-                patch("job_search_apply._stealth_playwright"),
-                patch("job_search_apply._playwright_context") as mock_ctx,
-                patch("job_search_apply._ensure_logged_in"),
-                patch("job_search_apply._wait_and_dismiss_cookies"),
+                patch("jobapply.external._stealth_playwright"),
+                patch("jobapply.external._playwright_context") as mock_ctx,
+                patch("jobapply.external._ensure_logged_in"),
+                patch("jobapply.external._wait_and_dismiss_cookies"),
             ):
                 mock_ctx.return_value = (MagicMock(), context, page, True)
                 from job_search_apply import submit_external_apply
@@ -223,7 +223,7 @@ class TestQ1HandlerIntegration:
         handler = SuccessHandler()
         ctx = {"profile": MagicMock(), "job": {}}
 
-        with patch("job_search_apply._extract_page_snapshot", return_value="snapshot"):
+        with patch("jobapply.external._extract_page_snapshot", return_value="snapshot"):
             result = _navigate_external_form(
                 page,
                 MagicMock(),
@@ -271,13 +271,13 @@ class TestQ1HandlerIntegration:
         }
 
         with (
-            patch("job_search_apply._extract_page_snapshot", return_value="snapshot"),
-            patch("job_search_apply._detect_success_or_confirmation", return_value=False),
-            patch("job_search_apply._classify_page", return_value=login_classification),
-            patch("job_search_apply._find_navigation_button", return_value=("none", None)),
-            patch("job_search_apply._answer_external_screening_questions", return_value=0),
-            patch("job_search_apply._detect_login_page", return_value=False),
-            patch("job_search_apply._detect_captcha", return_value=None),
+            patch("jobapply.external._extract_page_snapshot", return_value="snapshot"),
+            patch("jobapply.external._detect_success_or_confirmation", return_value=False),
+            patch("jobapply.external._classify_page", return_value=login_classification),
+            patch("jobapply.external._find_navigation_button", return_value=("none", None)),
+            patch("jobapply.external._answer_external_screening_questions", return_value=0),
+            patch("jobapply.external._detect_login_page", return_value=False),
+            patch("jobapply.external._detect_captcha", return_value=None),
         ):
             result = _navigate_external_form(
                 page,
@@ -320,15 +320,17 @@ class TestQ1HandlerIntegration:
         }
 
         with (
-            patch("job_search_apply._extract_page_snapshot", return_value="snapshot"),
-            patch("job_search_apply._detect_success_or_confirmation", return_value=False),
-            patch("job_search_apply._classify_page", return_value=form_classification),
-            patch("job_search_apply._find_navigation_button", return_value=("submit", MagicMock())),
-            patch("job_search_apply._answer_external_screening_questions", return_value=0),
-            patch("job_search_apply._detect_login_page", return_value=False),
-            patch("job_search_apply._detect_captcha", return_value=None),
-            patch("job_search_apply._safe_click"),
-            patch("job_search_apply._save_session") as mock_save,
+            patch("jobapply.external._extract_page_snapshot", return_value="snapshot"),
+            patch("jobapply.external._detect_success_or_confirmation", return_value=False),
+            patch("jobapply.external._classify_page", return_value=form_classification),
+            patch(
+                "jobapply.external._find_navigation_button", return_value=("submit", MagicMock())
+            ),
+            patch("jobapply.external._answer_external_screening_questions", return_value=0),
+            patch("jobapply.external._detect_login_page", return_value=False),
+            patch("jobapply.external._detect_captcha", return_value=None),
+            patch("jobapply.external._safe_click"),
+            patch("jobapply.external._save_session") as mock_save,
         ):
             result = _navigate_external_form(
                 page,

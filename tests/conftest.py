@@ -156,8 +156,13 @@ def playwright_ctx():
             patch("job_search_apply._playwright_context") as mock_ctx,
             patch("job_search_apply._ensure_logged_in"),
             patch("job_search_apply._wait_and_dismiss_cookies"),
+            patch("jobapply.external._stealth_playwright"),
+            patch("jobapply.external._playwright_context") as mock_ctx_ext,
+            patch("jobapply.external._ensure_logged_in"),
+            patch("jobapply.external._wait_and_dismiss_cookies"),
         ):
             mock_ctx.return_value = (browser, context, page, True)
+            mock_ctx_ext.return_value = (browser, context, page, True)
             yield browser, context, page
 
     return _patched

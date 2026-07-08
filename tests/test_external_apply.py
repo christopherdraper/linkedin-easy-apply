@@ -840,7 +840,7 @@ class TestHandleFileUploads:
         page = MagicMock()
         page.query_selector_all.return_value = [file_input]
 
-        with patch("job_search_apply._get_field_label", return_value="resume"):
+        with patch("jobapply.external._get_field_label", return_value="resume"):
             n1 = _handle_file_uploads(page, profile, "", uploaded_files)
 
         assert n1 == 1
@@ -853,7 +853,7 @@ class TestHandleFileUploads:
         page2 = MagicMock()
         page2.query_selector_all.return_value = [file_input2]
 
-        with patch("job_search_apply._get_field_label", return_value="resume"):
+        with patch("jobapply.external._get_field_label", return_value="resume"):
             n2 = _handle_file_uploads(page2, profile, "", uploaded_files)
 
         assert n2 == 0  # should skip
@@ -868,7 +868,7 @@ class TestHandleFileUploads:
         page = MagicMock()
         page.query_selector_all.return_value = [file_input]
 
-        with patch("job_search_apply._get_field_label", return_value="resume"):
+        with patch("jobapply.external._get_field_label", return_value="resume"):
             n = _handle_file_uploads(page, profile)
 
         assert n == 1

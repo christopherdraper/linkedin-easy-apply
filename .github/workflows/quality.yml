@@ -35,10 +35,10 @@ jobs:
       - name: Radon cyclomatic complexity
         run: |
           echo "## Complexity Grades (C or worse = needs attention)"
-          radon cc job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ -s -n C --total-average
+          radon cc jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s -n C --total-average
           echo ""
           echo "## Maintainability Index"
-          radon mi job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ -s
+          radon mi jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s
 
       - name: Radon complexity gate
         run: |
@@ -48,7 +48,7 @@ jobs:
           #   auto_apply_workflow (55), _find_navigation_button (48), main (44),
           #   batch_analysis._fingerprint_failure (41)
           # Lower this limit as refactors land. NEVER raise it.
-          F_COUNT=$(radon cc job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ -s -n F --json | python3 -c "
+          F_COUNT=$(radon cc jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s -n F --json | python3 -c "
           import json, sys
           data = json.load(sys.stdin)
           total = sum(len(v) for v in data.values())
@@ -62,7 +62,7 @@ jobs:
 
       - name: Pylint score and gate
         run: |
-          pylint job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ \
+          pylint jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py \
             --disable=C0114,C0115,C0116,C0301,C0302,W0603,W0718,R0902,R0911,R0912,R0913,R0914,R0915,R0917,E0401,W0511 \
             --max-line-length=100 \
             --exit-zero | tee pylint-report.txt
@@ -76,7 +76,7 @@ jobs:
       - name: Code metrics summary
         run: |
           echo "## Raw Metrics"
-          radon raw job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py -s
+          radon raw jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py job_search_apply.py -s
           echo ""
           echo "## Halstead Metrics (top 10 most complex)"
-          radon hal job_search_apply.py -s 2>/dev/null | head -40 || true
+          radon hal jobapply/ -s 2>/dev/null | head -40 || true
