@@ -126,14 +126,14 @@ class TestDeepApplyEligible:
 
 class TestDeepApplyQueueStorage:
     def test_load_empty(self, tmp_path):
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", tmp_path / "queue.json"):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", tmp_path / "queue.json"):
             assert _load_deep_apply_queue() == []
 
     def test_save_and_load(self, tmp_path):
         queue_file = tmp_path / "queue.json"
         entry = {"job_id": "li_abc", "status": "pending"}
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 _save_deep_apply_queue([entry])
             result = _load_deep_apply_queue()
         assert len(result) == 1
@@ -142,7 +142,7 @@ class TestDeepApplyQueueStorage:
     def test_load_corrupt_file(self, tmp_path):
         queue_file = tmp_path / "queue.json"
         queue_file.write_text("not json")
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
             assert _load_deep_apply_queue() == []
 
 
@@ -160,8 +160,8 @@ class TestQueueForDeepApply:
             "cover_letter_path": "/tmp/cl.txt",
             "reasoning": "Strong match on SRE, Kubernetes, AWS",
         }
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 with patch(
                     "jobapply.stats._field_fills",
                     [
@@ -194,8 +194,8 @@ class TestQueueForDeepApply:
             "cover_letter_path": "",
             "reasoning": "",
         }
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 with patch("jobapply.stats._field_fills", []):
                     _queue_for_deep_apply(app_entry)
 
@@ -316,8 +316,8 @@ class TestMarkDeepApplyDone:
         ]
         queue_file.write_text(json.dumps(queue))
 
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 result = _mark_deep_apply_done("li_abc", "submitted", None)
 
         assert result is True
@@ -339,8 +339,8 @@ class TestMarkDeepApplyDone:
         ]
         queue_file.write_text(json.dumps(queue))
 
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 result = _mark_deep_apply_done("li_abc", "failed", "site was down")
 
         assert result is True
@@ -351,8 +351,8 @@ class TestMarkDeepApplyDone:
         queue_file = tmp_path / "queue.json"
         queue_file.write_text("[]")
 
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 result = _mark_deep_apply_done("li_nonexist", "submitted", None)
 
         assert result is False
@@ -390,8 +390,8 @@ class TestDeepApplyIntegration:
             screening_answers={"salary": "150000"},
         )
 
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 with patch(
                     "jobapply.stats._field_fills",
                     [
@@ -415,7 +415,10 @@ class TestDeepApplyIntegration:
                     assert "~/Downloads/resume.pdf" in prompt
 
                     # Step 4: Mark done
-                    with patch("job_search_apply.LOG_FILE", log_file):
+                    with (
+                        patch("jobapply.queue.LOG_FILE", log_file),
+                        patch("jobapply.applog.LOG_FILE", log_file),
+                    ):
                         ok = _mark_deep_apply_done("li_integ", "submitted", None)
                     assert ok is True
 
@@ -445,8 +448,8 @@ class TestQueueSchemaExtensions:
             "cover_letter_path": "",
             "reasoning": "",
         }
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 with patch("jobapply.stats._field_fills", []):
                     _queue_for_deep_apply(app_entry)
 
@@ -469,8 +472,8 @@ class TestQueueSchemaExtensions:
             "cover_letter_path": "",
             "reasoning": "",
         }
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 with patch("jobapply.stats._field_fills", []):
                     _queue_for_deep_apply(app_entry, queue_tier="q3")
 
@@ -498,8 +501,8 @@ class TestEscalateToQ3:
         ]
         queue_file.write_text(json.dumps(queue))
 
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 result = _escalate_to_q3("li_esc", "stuck on captcha page")
 
         assert result is True
@@ -512,8 +515,8 @@ class TestEscalateToQ3:
         queue_file = tmp_path / "queue.json"
         queue_file.write_text("[]")
 
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 result = _escalate_to_q3("li_nonexist", "reason")
 
         assert result is False
@@ -544,8 +547,8 @@ class TestMarkDoneWithDecisionLog:
             }
         ]
 
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 result = _mark_deep_apply_done(
                     "li_log", "submitted", None, decision_log=decision_log
                 )
@@ -568,8 +571,8 @@ class TestMarkDoneWithDecisionLog:
         ]
         queue_file.write_text(json.dumps(queue))
 
-        with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
-            with patch("job_search_apply.DATA_DIR", tmp_path):
+        with patch("jobapply.queue.DEEP_APPLY_QUEUE_FILE", queue_file):
+            with patch("jobapply.queue.DATA_DIR", tmp_path):
                 _mark_deep_apply_done("li_nolog", "submitted", None)
 
         updated = json.loads(queue_file.read_text())

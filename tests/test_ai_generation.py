@@ -83,7 +83,7 @@ class TestAiScoreJob:
         assert result == score_job(job, profile)
 
     def test_ai_unavailable_falls_back_to_keyword_score(self, profile, job):
-        with patch("job_search_apply._AI_AVAILABLE", False):
+        with patch("jobapply.content._AI_AVAILABLE", False):
             result = ai_score_job(job, profile)
         assert result == score_job(job, profile)
 
@@ -179,7 +179,7 @@ class TestAiBuildNotes:
         assert result == _basic_notes(job, compat)
 
     def test_ai_unavailable_falls_back_to_basic_notes(self, job, compat):
-        with patch("job_search_apply._AI_AVAILABLE", False):
+        with patch("jobapply.content._AI_AVAILABLE", False):
             result = ai_build_notes(job, compat)
         assert result == _basic_notes(job, compat)
 
@@ -210,7 +210,7 @@ class TestAiDraftHiringMessage:
         assert result == "Hey Jane, quick note about the role."
 
     def test_ai_unavailable_returns_none(self, profile, job):
-        with patch("job_search_apply._AI_AVAILABLE", False):
+        with patch("jobapply.outreach._AI_AVAILABLE", False):
             assert _ai_draft_hiring_message(job, profile, "Jane Doe") is None
 
     def test_api_error_returns_none(self, ai_client, profile, job):

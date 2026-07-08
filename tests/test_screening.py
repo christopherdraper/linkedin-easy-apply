@@ -1,5 +1,7 @@
 """Tests for screening question matching and answer validation."""
 
+from unittest.mock import patch
+
 from job_search_apply import (
     _determine_radio_answer,
     _match_screening_answer,
@@ -70,5 +72,8 @@ class TestDetermineRadioAnswer:
         assert _determine_radio_answer("background check required?", profile) == "no"
 
     def test_unknown_defaults_to_yes(self, profile):
-        # Unknown questions with no AI should default to "yes"
-        assert _determine_radio_answer("some completely unknown question?", profile) == "yes"
+        # Unknown questions with no AI should default to "yes".
+        # _AI_AVAILABLE must be forced off or this test calls the real API
+        # whenever ANTHROPIC_API_KEY is set in the environment.
+        with patch("jobapply.forms._AI_AVAILABLE", False):
+            assert _determine_radio_answer("some completely unknown question?", profile) == "yes"

@@ -3,7 +3,7 @@
 import pytest
 from docx import Document
 
-import job_search_apply
+import jobapply.content
 from job_search_apply import (
     _basic_cover_letter,
     _basic_notes,
@@ -15,7 +15,7 @@ from job_search_apply import (
 @pytest.fixture
 def cover_letter_dir(tmp_path, monkeypatch):
     """Point COVER_LETTER_DIR at tmp_path so no test touches real data."""
-    monkeypatch.setattr(job_search_apply, "COVER_LETTER_DIR", tmp_path)
+    monkeypatch.setattr(jobapply.content, "COVER_LETTER_DIR", tmp_path)
     return tmp_path
 
 
@@ -129,7 +129,7 @@ class TestEnsureCoverLetterDocx:
         # When the .txt lives elsewhere, the returned path does not exist.
         cl_dir = tmp_path / "cover-letters"
         cl_dir.mkdir()
-        monkeypatch.setattr(job_search_apply, "COVER_LETTER_DIR", cl_dir)
+        monkeypatch.setattr(jobapply.content, "COVER_LETTER_DIR", cl_dir)
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         txt_path = elsewhere / "li_stray.txt"

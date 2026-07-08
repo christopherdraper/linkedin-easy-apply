@@ -121,13 +121,20 @@ def ai_client():
         mock_response.usage.output_tokens = output_tokens
         mock_client = MagicMock()
         mock_client.return_value.messages.create.return_value = mock_response
-        # Patch both namespaces: facade-resident readers (ai_score_job, ...) resolve
-        # through job_search_apply; _ai_answer_question resolves through jobapply.forms.
+        # Patch every namespace with an AI-calling reader: facade-resident readers
+        # resolve through job_search_apply; _ai_answer_question resolves through
+        # jobapply.forms; ai_score_job/ai_generate_cover_letter/ai_build_notes
+        # resolve through jobapply.content; _ai_draft_hiring_message resolves
+        # through jobapply.outreach.
         with (
             patch("job_search_apply._AI_AVAILABLE", True),
             patch("jobapply.forms._AI_AVAILABLE", True),
+            patch("jobapply.content._AI_AVAILABLE", True),
+            patch("jobapply.outreach._AI_AVAILABLE", True),
             patch("job_search_apply._get_ai_client", mock_client),
             patch("jobapply.forms._get_ai_client", mock_client),
+            patch("jobapply.content._get_ai_client", mock_client),
+            patch("jobapply.outreach._get_ai_client", mock_client),
         ):
             yield mock_client
 
@@ -202,10 +209,20 @@ def data_dir(tmp_path, monkeypatch):
     ~/.local/share/job-apply. Returns the tmp_path."""
     import dashboard
     import job_search_apply
+    import jobapply.applog
     import jobapply.browser
+    import jobapply.content
+    import jobapply.queue
 
     monkeypatch.setattr(jobapply.browser, "SESSION_FILE", tmp_path / "session.json")
     monkeypatch.setattr(jobapply.browser, "CREDENTIALS_FILE", tmp_path / "credentials.json")
+    monkeypatch.setattr(jobapply.applog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(jobapply.applog, "LOG_FILE", tmp_path / "applications.json")
+    monkeypatch.setattr(jobapply.applog, "SEARCH_LOG_FILE", tmp_path / "search_log.json")
+    monkeypatch.setattr(jobapply.content, "COVER_LETTER_DIR", tmp_path / "cover-letters")
+    monkeypatch.setattr(jobapply.queue, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(jobapply.queue, "LOG_FILE", tmp_path / "applications.json")
+    monkeypatch.setattr(jobapply.queue, "DEEP_APPLY_QUEUE_FILE", tmp_path / "deep_apply_queue.json")
     monkeypatch.setattr(job_search_apply, "DATA_DIR", tmp_path)
     monkeypatch.setattr(job_search_apply, "LOG_FILE", tmp_path / "applications.json")
     monkeypatch.setattr(job_search_apply, "SEARCH_LOG_FILE", tmp_path / "search_log.json")
