@@ -408,23 +408,57 @@ def _best_option_match(answer: str, opt_texts: list[str]) -> int:
         if len(answer_lower) >= 6 and ol.startswith(answer_lower[:6]):
             score = max(score, 40)
         len_diff = abs(len(ol) - len(answer_lower))
-        if score > best_score or (score == best_score and len_diff < best_len_diff):
+        # score must be positive: without this guard the tie-break fired at
+        # score 0, so a totally unrelated answer "matched" whichever option
+        # had the closest text length, silently selecting an arbitrary value.
+        if score > 0 and (score > best_score or (score == best_score and len_diff < best_len_diff)):
             best_score, best_idx, best_len_diff = score, idx, len_diff
     return best_idx
 
 
+# Generic field names that appear incidentally inside question text
+# ("state" in "United States", "travel" in "willing to travel?"): when the
+# label is a question, these short keys must not substring-claim it.
+_GENERIC_SHORT_KEYS = (
+    "state",
+    "city",
+    "country",
+    "language",
+    "english",
+    "travel",
+    "race",
+    "gender",
+    "sex",
+)
+
+
 def _match_screening_answer(label_text: str, screening_answers: Dict[str, str]) -> Optional[str]:
-    """Find the best matching screening answer for a form field label."""
+    """Find the best matching screening answer for a form field label.
+
+    Ports the Q2 guards (assisted_apply_mcp._match_field_to_profile) to Q1:
+    word-boundary matching for short keys (< 10 chars) so "state" cannot
+    match "United States", plus the generic-key skip list when the label is
+    a question. The label is lowercased here so capitalized form labels
+    ("Desired Salary") match lowercase profile keys.
+    """
     if not label_text:
         return None
-    # Exact substring match first
+    label_lower = label_text.lower()
+    is_question = "?" in label_lower
+    # Exact substring match first (word-boundary for short keys)
     for question, answer in screening_answers.items():
-        if question.lower() in label_text:
+        q_lower = question.lower()
+        if len(q_lower) < 10:
+            if re.search(r"\b" + re.escape(q_lower) + r"\b", label_lower):
+                if is_question and q_lower in _GENERIC_SHORT_KEYS:
+                    continue
+                return answer
+        elif q_lower in label_lower:
             return answer
     # Fuzzy: check if all words in a question key appear in the label
     for question, answer in screening_answers.items():
         q_words = question.lower().split()
-        if len(q_words) >= 2 and all(w in label_text for w in q_words):
+        if len(q_words) >= 2 and all(w in label_lower for w in q_words):
             return answer
     return None
 
@@ -827,6 +861,16 @@ def _ai_answer_question(
         if _looks_like_injection(answer):
             log.warning(f"   🛡️  AI answer looks injected, skipping: {answer[:80]!r}")
             return None
+
+        # Strip em/double dashes from long-form answers, matching the cover
+        # letter and hiring-message generators (they read as AI-written).
+        if is_textarea:
+            answer = (
+                answer.replace(" — ", ", ")
+                .replace(" -- ", ", ")
+                .replace("—", ", ")
+                .replace("--", ", ")
+            )
 
         log.info(f"   🤖 AI answered '{question[:60]}' → '{answer}'")
         return answer

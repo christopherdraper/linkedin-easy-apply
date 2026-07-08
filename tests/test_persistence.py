@@ -105,15 +105,16 @@ class TestApplicationLog:
         assert entries[0]["job_id"] == "li_1"
         assert entries[1]["job_id"] == "li_2"
 
-    def test_save_log_silently_discards_corrupt_existing(self, data_dir):
-        """Corrupt existing log is read as [] by load_log, so save_log replaces
-        the whole file with only the new entries. Pins current behavior:
-        previously logged applications are lost rather than the write failing.
+    def test_save_log_preserves_corrupt_existing(self, data_dir):
+        """Fixed 2026-07-08: a corrupt applications.json is renamed aside
+        (.corrupt) before the fresh write, so history bytes survive for
+        manual recovery instead of being silently overwritten.
         """
         (data_dir / "applications.json").write_text("{broken json")
         save_log([{"job_id": "li_new", "status": "submitted"}])
         entries = load_log()
         assert entries == [{"job_id": "li_new", "status": "submitted"}]
+        assert (data_dir / "applications.json.corrupt").read_text() == "{broken json"
 
 
 class TestSearchLog:
@@ -136,14 +137,16 @@ class TestSearchLog:
         saved = json.loads((data_dir / "search_log.json").read_text())
         assert saved == [{"title": "SRE", "results_count": 1}]
 
-    def test_corrupt_existing_raises(self, data_dir):
-        """Unlike load_log, save_search_log does not guard json.loads. Pins
-        current behavior: a corrupt search log crashes the write instead of
-        being discarded.
+    def test_corrupt_existing_preserved_and_write_continues(self, data_dir):
+        """Fixed 2026-07-08: a corrupt search log is renamed aside
+        (.corrupt) and the write proceeds fresh, instead of crashing every
+        snapshot run.
         """
         (data_dir / "search_log.json").write_text("{broken json")
-        with pytest.raises(json.JSONDecodeError):
-            save_search_log({"title": "SRE", "results_count": 1})
+        save_search_log({"title": "SRE", "results_count": 1})
+        saved = json.loads((data_dir / "search_log.json").read_text())
+        assert saved == [{"title": "SRE", "results_count": 1}]
+        assert (data_dir / "search_log.json.corrupt").read_text() == "{broken json"
 
 
 class TestAlreadyAppliedEdgeCases:

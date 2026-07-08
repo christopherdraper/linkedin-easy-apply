@@ -153,7 +153,11 @@ class AshbyHandler(BaseATSHandler):
         similar Ashby combobox with placeholder "Start typing..."). Skips
         if already selected.
         """
-        city = getattr(profile, "city", None) or "Indianapolis"
+        # No hardcoded fallback: without a profile city, skip rather than
+        # type someone else's location into a live application.
+        city = getattr(profile, "city", None)
+        if not city:
+            return
         try:
             comboboxes = page.query_selector_all(
                 "input[role='combobox'][placeholder*='Start typing']"

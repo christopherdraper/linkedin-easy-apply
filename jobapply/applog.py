@@ -19,9 +19,32 @@ def load_log() -> List[Dict]:
     return []
 
 
+def _preserve_corrupt_log(path) -> None:
+    """Rename an unreadable log aside instead of silently overwriting it.
+
+    applications.json is the full application history and feeds the
+    already_applied dedup; losing it silently means re-applying to
+    everything. A timestamped .corrupt sibling keeps the bytes around
+    for manual recovery.
+    """
+    backup = path.with_name(path.name + ".corrupt")
+    try:
+        path.rename(backup)
+        log.warning(f"⚠️  {path.name} was unreadable; preserved as {backup.name}")
+    except OSError as e:
+        log.warning(f"⚠️  {path.name} unreadable and backup failed ({e}); overwriting")
+
+
 def save_log(entries: List[Dict]):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     existing = load_log()
+    if not existing and LOG_FILE.exists():
+        raw = LOG_FILE.read_text().strip()
+        if raw:
+            try:
+                json.loads(raw)
+            except Exception:
+                _preserve_corrupt_log(LOG_FILE)
     existing.extend(entries)
     LOG_FILE.write_text(json.dumps(existing, indent=2))
     log.info(f"\n💾 Log updated: {LOG_FILE}")
@@ -37,7 +60,17 @@ def save_search_log(entry: Dict):
         fcntl.flock(fd, fcntl.LOCK_EX)
         fd.seek(0)
         raw = fd.read()
-        existing: List[Dict] = json.loads(raw) if raw.strip() else []
+        try:
+            existing: List[Dict] = json.loads(raw) if raw.strip() else []
+        except Exception:
+            # Same protection as save_log: preserve the corrupt file and
+            # start fresh instead of crashing every snapshot run.
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+            _preserve_corrupt_log(SEARCH_LOG_FILE)
+            fd = open(SEARCH_LOG_FILE, "a+")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            existing = []
         existing.append(entry)
         fd.seek(0)
         fd.truncate()

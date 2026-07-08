@@ -1123,18 +1123,17 @@ class TestAshbyLocationCombobox:
         assert cb.fill.call_count == 2
         assert cb.fill.call_args_list[-1].args == ("",)
 
-    def test_profile_without_city_falls_back_to_default(self):
-        """Pins current behavior: a missing city falls back to the hardcoded
-        'Indianapolis' default (suspicious for non-Indianapolis users, but
-        that is what the code does today)."""
+    def test_profile_without_city_skips(self):
+        """Fixed 2026-07-08: without a profile city the combobox is skipped
+        entirely instead of typing a hardcoded default location."""
         from types import SimpleNamespace  # noqa: PLC0415
 
         page = MagicMock()
         cb = self._make_combobox()
         page.query_selector_all.return_value = [cb]
-        page.evaluate.return_value = "Indianapolis, Indiana, United States"
         AshbyHandler._fill_location_combobox(page, SimpleNamespace(city=None))
-        cb.type.assert_called_once_with("Indianapolis", delay=60)
+        cb.type.assert_not_called()
+        page.query_selector_all.assert_not_called()
 
 
 from datetime import datetime, timedelta  # noqa: E402

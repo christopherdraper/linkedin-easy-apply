@@ -703,6 +703,13 @@ def _answer_div_custom_selects(page, profile: ApplicantProfile) -> int:
                                 f"   🤖 Custom select '{label[:40]}' → '{opt_texts[best_idx]}'"
                             )
                             filled += 1
+                            stats._field_fills.append(
+                                {
+                                    "field": label,
+                                    "value": opt_texts[best_idx][:200],
+                                    "source": "ai_custom_select",
+                                }
+                            )
                         else:
                             page.keyboard.press("Escape")
                             page.wait_for_timeout(200)
@@ -827,17 +834,15 @@ def _answer_bamboohr_dropdowns(page, profile: ApplicantProfile) -> int:  # noqa:
                     filled += 1
                     clicked = True
                 if not clicked:
-                    # Fall back: click first option if exact match failed
-                    if opt_elements:
-                        _safe_click(opt_elements[0], page)
-                        log.info(
-                            "   🤖 BambooHR dropdown '%s' → '%s' (fallback)",
-                            label[:40],
-                            opt_texts[0],
-                        )
-                        filled += 1
-                    else:
-                        page.keyboard.press("Escape")
+                    # No confident match: close the menu and leave the field
+                    # empty rather than blindly clicking the first option
+                    # (which used to submit arbitrary wrong answers).
+                    log.info(
+                        "   ⏭  BambooHR dropdown '%s': no option matched '%s', skipping",
+                        label[:40],
+                        (answer or "")[:40],
+                    )
+                    page.keyboard.press("Escape")
                 page.wait_for_timeout(300)
             except ApplicationAbortError:
                 raise

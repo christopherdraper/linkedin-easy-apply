@@ -34,12 +34,28 @@ class TestMatchScreeningAnswer:
         assert _match_screening_answer("salary", {}) is None
 
     def test_single_word_key_substring(self):
-        # "go" is a substring of "golang" so it matches via exact substring
+        # Short keys (< 10 chars) require word-boundary matches, so "go"
+        # matches "go experience" but no longer subword-matches "golang"
+        # (profiles should carry an explicit "golang" key for that).
         answers = {"go": "2"}
-        assert _match_screening_answer("how many years of golang", answers) == "2"
+        assert _match_screening_answer("how many years of golang", answers) is None
         assert _match_screening_answer("go experience", answers) == "2"
-        # But "go" is NOT a substring of "years of experience"
+        # And "go" is not a word in "years of experience"
         assert _match_screening_answer("years of experience", answers) is None
+
+    def test_short_key_no_false_match_on_question(self):
+        # The 2026-04-11 guard, now ported from Q2: "state" must not claim
+        # a work-authorization question containing "United States".
+        answers = {"state": "Indiana"}
+        label = "are you authorized to work in the united states?"
+        assert _match_screening_answer(label, answers) is None
+        # Non-question labels can still match the key as a word
+        assert _match_screening_answer("state", answers) == "Indiana"
+
+    def test_capitalized_label_matches(self):
+        # Labels are lowercased internally, so capitalized form labels match
+        answers = {"salary": "150000"}
+        assert _match_screening_answer("Desired Salary", answers) == "150000"
 
     def test_case_insensitive_matching(self):
         answers = {"Kubernetes": "5"}

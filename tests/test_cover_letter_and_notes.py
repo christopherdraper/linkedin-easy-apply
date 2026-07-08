@@ -123,10 +123,11 @@ class TestEnsureCoverLetterDocx:
         assert result == str(docx_path)
         assert docx_path.read_bytes() == b"sentinel"
 
-    def test_txt_outside_cover_letter_dir_writes_to_configured_dir(self, tmp_path, monkeypatch):
-        # Pins current behavior: the converted .docx is always written to
-        # COVER_LETTER_DIR, but the returned path is the .txt's sibling.
-        # When the .txt lives elsewhere, the returned path does not exist.
+    def test_txt_outside_cover_letter_dir_returns_real_path(self, tmp_path, monkeypatch):
+        # Fixed 2026-07-08: the converted .docx is written to
+        # COVER_LETTER_DIR and the function now returns that real path
+        # (it used to return the .txt's nonexistent sibling, breaking the
+        # subsequent upload).
         cl_dir = tmp_path / "cover-letters"
         cl_dir.mkdir()
         monkeypatch.setattr(jobapply.content, "COVER_LETTER_DIR", cl_dir)
@@ -135,6 +136,5 @@ class TestEnsureCoverLetterDocx:
         txt_path = elsewhere / "li_stray.txt"
         txt_path.write_text("stray letter")
         result = _ensure_cover_letter_docx(str(txt_path))
-        assert result == str(elsewhere / "li_stray.docx")
-        assert not (elsewhere / "li_stray.docx").exists()
+        assert result == str(cl_dir / "li_stray.docx")
         assert (cl_dir / "li_stray.docx").exists()

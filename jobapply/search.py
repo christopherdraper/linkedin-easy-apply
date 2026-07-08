@@ -378,8 +378,12 @@ _BIOTECH_WORKDAY_SITES = [
 ]
 
 
-def _workday_search(tenant: str, wd: str, site: str, query: str, limit: int = 20) -> List[Dict]:
-    """Hit a Workday career site's public JSON API."""
+def _workday_search(tenant: str, wd: str, site: str, query: str, limit: int = 20) -> Dict:
+    """Hit a Workday career site's public JSON API.
+
+    Returns the parsed CXS response dict ({} on error); callers read
+    data.get("jobPostings", []).
+    """
     import urllib.request
 
     url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"

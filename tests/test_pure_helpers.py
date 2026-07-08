@@ -107,12 +107,12 @@ class TestBestOptionMatch:
         options = ["Senior Software Engineer II", "Senior Engineer"]
         assert _best_option_match("Senior", options) == 1
 
-    def test_no_match_returns_closest_length_not_minus_one(self):
-        # Suspicion: the docstring says -1 when nothing matches, but the
-        # tie-break branch updates best_idx even at score 0, so the index
-        # of the closest-length option is returned instead. Pinning
-        # current behavior.
-        assert _best_option_match("xyz", ["abc", "defghi"]) == 0
+    def test_no_match_returns_minus_one(self):
+        # Fixed 2026-07-08: the tie-break used to fire at score 0 and return
+        # the closest-length option for a totally unrelated answer. Now the
+        # docstring's promised -1 actually happens, and callers skip the
+        # field instead of selecting an arbitrary option.
+        assert _best_option_match("xyz", ["abc", "defghi"]) == -1
 
     def test_empty_options_returns_minus_one(self):
         assert _best_option_match("anything", []) == -1

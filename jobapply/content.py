@@ -111,9 +111,11 @@ def _ensure_cover_letter_docx(cl_path: str) -> str:
     if docx_path.exists():
         return str(docx_path)
     text = p.read_text()
-    job_id = p.stem
-    _save_cover_letter_docx(text, job_id)
-    return str(docx_path)
+    # Return the path _save_cover_letter_docx actually writes
+    # (COVER_LETTER_DIR/<stem>.docx). For a .txt outside COVER_LETTER_DIR
+    # the sibling path would not exist and the upload would fail.
+    out = _save_cover_letter_docx(text, p.stem)
+    return str(out)
 
 
 def ai_generate_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
