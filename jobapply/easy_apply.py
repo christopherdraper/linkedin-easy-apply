@@ -179,12 +179,10 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
     Submit a LinkedIn Easy Apply application.
     Returns 'submitted' on success, 'failed: <reason>' on failure.
     """
+    # Only timing is set here. Per-application counters are reset by the
+    # caller (auto_apply_workflow / cli) BEFORE scoring, so scoring and
+    # cover-letter tokens land in this application's log entry.
     stats._apply_start_time = time.time()
-    stats._field_fills.clear()
-    stats._ai_answer_failures.clear()
-    stats._ai_tokens_in = 0
-    stats._ai_tokens_out = 0
-    stats._final_ats_url = ""
     try:
         import playwright  # noqa: F401
     except ImportError:

@@ -6,14 +6,16 @@ Developer reference for Claude Code (claude.ai/code) and human contributors work
 
 ```
 ~/.openclaw/skills/job-apply/          # Code lives here
-  job_search_apply.py                  # Q1: search, score, Easy Apply + external ATS (~7400 lines)
+  job_search_apply.py                  # Q1 CLI entry point; thin re-export facade over jobapply/
+  jobapply/                            # Q1 implementation package (see module map below)
   assisted_apply_mcp.py                # Q2: MCP Playwright autonomous retry agent (~2000 lines)
   batch_analysis.py                    # Post-batch failure analysis -> GitHub issues for recurring patterns
   dashboard.py                         # Flask dashboard + per-application report pages
   templates/                           # dashboard.html, report.html, decision_log.html
   ats_handlers/                        # Per-ATS handler modules (Workday, Greenhouse, SmartRecruiters, etc.)
   tests/                               # pytest suite (scoring, screening, injection defense, handlers)
-  pyproject.toml                       # ruff, pytest, bandit config
+  pyproject.toml                       # ruff, pytest, bandit, coverage config
+  requirements.txt / dev-requirements.txt  # pinned runtime and dev dependencies
 
 ~/.local/share/job-apply/              # Runtime data (not in repo)
   profile.json                         # Applicant profile -- source of truth for all form fills
@@ -129,14 +131,34 @@ ats_handlers/
 
 ### Modules at a glance
 
-| Module | Lines | Purpose |
-|--------|------:|---------|
-| `job_search_apply.py` | ~7400 | Core: search, score, Easy Apply + external ATS form filling, cover letters, hiring manager messaging |
-| `assisted_apply_mcp.py` | ~2000 | Q2 agent: retries failed applications using Playwright + Claude AI |
-| `batch_analysis.py` | ~400 | Post-batch failure analysis -> creates GitHub issues for recurring patterns |
-| `dashboard.py` | ~400 | Flask dashboard (port 5050): market pulse, application table, per-app report pages |
+| Module | Purpose |
+|--------|---------|
+| `job_search_apply.py` | CLI entry point; re-export facade over `jobapply/` (all `from job_search_apply import X` keeps working) |
+| `jobapply/config.py` | Runtime path constants (DATA_DIR, LOG_FILE, queue file, ...) |
+| `jobapply/stats.py` | Per-application run state (field fills, token counters, timing) + `_categorize_failure`, `_detect_ats_platform`, `_compute_cost_usd` |
+| `jobapply/ai.py` | Anthropic client singleton + availability guard |
+| `jobapply/safety.py` | Prompt-injection and sensitive-field defense |
+| `jobapply/profile.py` | `ApplicantProfile`, `JobSearchParams` dataclasses |
+| `jobapply/browser.py` | Playwright context, stealth, session, LinkedIn login, proxy |
+| `jobapply/applog.py` | Application + search log persistence, dedup |
+| `jobapply/search.py` | LinkedIn/RemoteOK/HN/biotech search + market snapshot |
+| `jobapply/content.py` | Job scoring, cover letters (.docx), notes |
+| `jobapply/outreach.py` | Hiring-manager extraction + DM flow |
+| `jobapply/forms.py` | Shared field-filling primitives + AI form answering |
+| `jobapply/easy_apply.py` | Easy Apply modal state machine (`_navigate_form`) |
+| `jobapply/accounts.py` | Gmail IMAP verification codes + ATS account creation/login |
+| `jobapply/pages.py` | Page classification, login walls, captcha suite |
+| `jobapply/queue.py` | Q2/Q3 deep-apply queue |
+| `jobapply/external.py` | External-ATS navigation state machine + screening-question engine |
+| `jobapply/workflow.py` | `auto_apply_workflow` orchestration |
+| `jobapply/cli.py` | argparse `main`, setup, LinkedIn profile sync |
+| `assisted_apply_mcp.py` | Q2 agent: retries failed applications using Playwright + Claude AI (~2000 lines) |
+| `batch_analysis.py` | Post-batch failure analysis -> creates GitHub issues for recurring patterns |
+| `dashboard.py` | Flask dashboard (port 5050): market pulse, application table, per-app report pages |
 
-### Q1 (`job_search_apply.py`)
+**Import compatibility rule:** external consumers (ats_handlers/, assisted_apply_mcp.py, dashboard.py, tests) import through the `job_search_apply` facade. When moving a function between jobapply modules, keep the facade re-export and check test patch targets: `patch("job_search_apply.X")` only affects callers that still resolve X through the facade; callers inside jobapply resolve their own module's import, so patches must target the module where the CALLER lives.
+
+### Q1 (`jobapply/` package, entry via `job_search_apply.py`)
 - Profile loading / dataclass (`ApplicantProfile`)
 - Job scoring via Claude AI (`_score_job`, `ai_score_job`)
 - Easy Apply form navigation (`_navigate_form`, `submit_easy_apply`)

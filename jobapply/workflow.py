@@ -37,6 +37,132 @@ from jobapply.stats import _categorize_failure, _compute_cost_usd, _detect_ats_p
 log = logging.getLogger(__name__)
 
 
+def _search_source(source: str, params: JobSearchParams, proxy: Optional[str]) -> list:
+    """Dispatch to the search function for the given job source."""
+    if source == "remoteok":
+        jobs = search_remoteok(params)
+    elif source == "hn":
+        jobs = search_hn_whos_hiring(params)
+    elif source == "biotech":
+        jobs = search_biotech(params)
+    else:
+        jobs = search_linkedin(params, proxy=proxy)
+    return jobs
+
+
+def _submit_one(
+    job: Dict,
+    profile: ApplicantProfile,
+    cl_file,
+    dry_run: bool,
+    proxy: Optional[str],
+) -> str:
+    """Submit one job via Easy Apply or external ATS and return the status string."""
+    apply_type = job.get("apply_type", "easy_apply")
+
+    if dry_run:
+        log.info(f"   ⚠️  Dry run — not submitted ({apply_type})")
+        status = "dry_run"
+    elif apply_type == "easy_apply":
+        log.info("   Submitting via Easy Apply...")
+        status = submit_easy_apply(job, profile, proxy=proxy)
+        icon = (
+            "✅"
+            if status == "submitted"
+            else "🛡️ "
+            if status.startswith("aborted")
+            else "⚠️ "
+            if "unconfirmed" in status
+            else "❌"
+        )
+        log.info(f"   {icon} {status}")
+    else:
+        log.info("   Submitting via external apply...")
+        status = submit_external_apply(
+            job,
+            profile,
+            cover_letter_path=str(cl_file),
+            proxy=proxy,
+            dry_run=dry_run,
+        )
+        icon = (
+            "✅"
+            if status == "submitted"
+            else "🔒"
+            if "requires account" in status
+            else "🛡️ "
+            if status.startswith("aborted")
+            else "⚠️ "
+            if "unconfirmed" in status
+            else "❌"
+        )
+        log.info(f"   {icon} {status}")
+    return status
+
+
+def _build_application_entry(
+    job: Dict,
+    compat: Dict,
+    status: str,
+    cl_file,
+    notes,
+    msg_status,
+    msg_text,
+    msg_poster,
+) -> Dict:
+    """Construct the application log entry for one job (reads stats.*)."""
+    return {
+        "job_id": job["id"],
+        "title": job["title"],
+        "company": job["company"],
+        "url": job["url"],
+        "ats_url": stats._final_ats_url or "",
+        "location": job.get("location", ""),
+        "status": status,
+        "apply_type": job.get("apply_type", "easy_apply"),
+        "posted_ago": job.get("posted_ago", ""),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "match_score": compat["match_score"],
+        "reasoning": compat.get("reasoning", ""),
+        "deal_breakers": compat.get("deal_breakers", []),
+        "cover_letter_path": str(cl_file),
+        "notes": notes,
+        "hiring_manager_messaged": msg_status,
+        "hiring_manager_message_text": msg_text,
+        "hiring_manager_name": msg_poster,
+        "fields_filled": list(stats._field_fills),
+        "ai_answer_failures": list(stats._ai_answer_failures),
+        "ai_tokens": {"input": stats._ai_tokens_in, "output": stats._ai_tokens_out},
+        "cost_usd": _compute_cost_usd(stats._ai_tokens_in, stats._ai_tokens_out),
+        "duration_seconds": round(time.time() - stats._apply_start_time, 1)
+        if stats._apply_start_time
+        else None,
+        "ats_platform": _detect_ats_platform(stats._final_ats_url or job.get("url", "")),
+        "failure_category": _categorize_failure(status) if status.startswith("failed") else None,
+    }
+
+
+def _log_run_summary(jobs: list, applications: list) -> int:
+    """Log the end-of-run summary and return the submitted count."""
+    log.info("\n" + "=" * 50)
+    log.info("📊 SUMMARY")
+    log.info(f"   Jobs found:    {len(jobs)}")
+    submitted = sum(1 for a in applications if a["status"].startswith("submitted"))
+    log.info(f"   Submitted:     {submitted}")
+    skipped_account = sum(1 for a in applications if a["status"] == "skipped: requires account")
+    if skipped_account:
+        log.info(f"   Skipped (login): {skipped_account}")
+    aborted = sum(1 for a in applications if a["status"].startswith("aborted"))
+    if aborted:
+        log.info(f"   Aborted:       {aborted} (injection/suspicious fields detected)")
+    failed = sum(1 for a in applications if a["status"].startswith("failed"))
+    if failed:
+        log.info(f"   Failed:        {failed}")
+    log.info(f"   Log:           {LOG_FILE}")
+    log.info("=" * 50)
+    return submitted
+
+
 def auto_apply_workflow(  # noqa: C901
     params: JobSearchParams,
     profile: ApplicantProfile,
@@ -63,14 +189,7 @@ def auto_apply_workflow(  # noqa: C901
 
     log.info(f"🔍 Searching {label} for '{params.title}'...")
     try:
-        if source == "remoteok":
-            jobs = search_remoteok(params)
-        elif source == "hn":
-            jobs = search_hn_whos_hiring(params)
-        elif source == "biotech":
-            jobs = search_biotech(params)
-        else:
-            jobs = search_linkedin(params, proxy=proxy)
+        jobs = _search_source(source, params, proxy)
     except RuntimeError as e:
         log.error(f"❌ Search failed: {e}")
         return {"applications": [], "total": 0, "jobs_found": 0}
@@ -98,6 +217,11 @@ def auto_apply_workflow(  # noqa: C901
             log.info(f"⏭  Already applied: {job['title']} at {job['company']}")
             continue
 
+        # Reset per-application counters BEFORE scoring so scoring and
+        # cover-letter tokens attribute to THIS application's log entry
+        # (previously the submit functions reset them after scoring ran).
+        stats.reset_run_stats()
+
         compat = ai_score_job(job, profile)
 
         if compat["match_score"] < min_match_score:
@@ -124,45 +248,7 @@ def auto_apply_workflow(  # noqa: C901
         cover_letter = ai_generate_cover_letter(job, profile)
         cl_file = _save_cover_letter_docx(cover_letter, job["id"])
 
-        apply_type = job.get("apply_type", "easy_apply")
-
-        if dry_run:
-            log.info(f"   ⚠️  Dry run — not submitted ({apply_type})")
-            status = "dry_run"
-        elif apply_type == "easy_apply":
-            log.info("   Submitting via Easy Apply...")
-            status = submit_easy_apply(job, profile, proxy=proxy)
-            icon = (
-                "✅"
-                if status == "submitted"
-                else "🛡️ "
-                if status.startswith("aborted")
-                else "⚠️ "
-                if "unconfirmed" in status
-                else "❌"
-            )
-            log.info(f"   {icon} {status}")
-        else:
-            log.info("   Submitting via external apply...")
-            status = submit_external_apply(
-                job,
-                profile,
-                cover_letter_path=str(cl_file),
-                proxy=proxy,
-                dry_run=dry_run,
-            )
-            icon = (
-                "✅"
-                if status == "submitted"
-                else "🔒"
-                if "requires account" in status
-                else "🛡️ "
-                if status.startswith("aborted")
-                else "⚠️ "
-                if "unconfirmed" in status
-                else "❌"
-            )
-            log.info(f"   {icon} {status}")
+        status = _submit_one(job, profile, cl_file, dry_run, proxy)
 
         # AI-generated notes for the log
         notes = ai_build_notes(job, compat)
@@ -182,37 +268,9 @@ def auto_apply_workflow(  # noqa: C901
                 log.info("   ⚠️  Hiring manager message failed: %s", exc)
 
         applications.append(
-            {
-                "job_id": job["id"],
-                "title": job["title"],
-                "company": job["company"],
-                "url": job["url"],
-                "ats_url": stats._final_ats_url or "",
-                "location": job.get("location", ""),
-                "status": status,
-                "apply_type": job.get("apply_type", "easy_apply"),
-                "posted_ago": job.get("posted_ago", ""),
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "match_score": compat["match_score"],
-                "reasoning": compat.get("reasoning", ""),
-                "deal_breakers": compat.get("deal_breakers", []),
-                "cover_letter_path": str(cl_file),
-                "notes": notes,
-                "hiring_manager_messaged": msg_status,
-                "hiring_manager_message_text": msg_text,
-                "hiring_manager_name": msg_poster,
-                "fields_filled": list(stats._field_fills),
-                "ai_answer_failures": list(stats._ai_answer_failures),
-                "ai_tokens": {"input": stats._ai_tokens_in, "output": stats._ai_tokens_out},
-                "cost_usd": _compute_cost_usd(stats._ai_tokens_in, stats._ai_tokens_out),
-                "duration_seconds": round(time.time() - stats._apply_start_time, 1)
-                if stats._apply_start_time
-                else None,
-                "ats_platform": _detect_ats_platform(stats._final_ats_url or job.get("url", "")),
-                "failure_category": _categorize_failure(status)
-                if status.startswith("failed")
-                else None,
-            }
+            _build_application_entry(
+                job, compat, status, cl_file, notes, msg_status, msg_text, msg_poster
+            )
         )
         # Deep-apply queue: check if failed high-match app should be re-queued
         if status.startswith("failed"):
@@ -229,21 +287,6 @@ def auto_apply_workflow(  # noqa: C901
 
     save_log(applications)
 
-    log.info("\n" + "=" * 50)
-    log.info("📊 SUMMARY")
-    log.info(f"   Jobs found:    {len(jobs)}")
-    submitted = sum(1 for a in applications if a["status"].startswith("submitted"))
-    log.info(f"   Submitted:     {submitted}")
-    skipped_account = sum(1 for a in applications if a["status"] == "skipped: requires account")
-    if skipped_account:
-        log.info(f"   Skipped (login): {skipped_account}")
-    aborted = sum(1 for a in applications if a["status"].startswith("aborted"))
-    if aborted:
-        log.info(f"   Aborted:       {aborted} (injection/suspicious fields detected)")
-    failed = sum(1 for a in applications if a["status"].startswith("failed"))
-    if failed:
-        log.info(f"   Failed:        {failed}")
-    log.info(f"   Log:           {LOG_FILE}")
-    log.info("=" * 50)
+    submitted = _log_run_summary(jobs, applications)
 
     return {"applications": applications, "total": submitted, "jobs_found": len(jobs)}

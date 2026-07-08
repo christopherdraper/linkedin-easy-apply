@@ -43,9 +43,9 @@ jobs:
       - name: Radon complexity gate
         run: |
           # Fail if F-count (unmaintainable functions) grows across ALL source modules.
-          # RATCHET: 6 F-grade functions as of 2026-07:
+          # RATCHET: 4 F-grade functions as of 2026-07:
           #   _answer_external_screening_questions (191), _navigate_external_form (134),
-          #   auto_apply_workflow (55), _find_navigation_button (48), main (44),
+          #   _find_navigation_button (48) in jobapply/external.py,
           #   batch_analysis._fingerprint_failure (41)
           # Lower this limit as refactors land. NEVER raise it.
           F_COUNT=$(radon cc jobapply/ assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ job_search_apply.py -s -n F --json | python3 -c "
@@ -55,8 +55,8 @@ jobs:
           print(total)
           ")
           echo "Functions with F complexity: $F_COUNT"
-          if [ "$F_COUNT" -gt 6 ]; then
-            echo "::error::Too many F-complexity functions ($F_COUNT > 6). Refactor before merging."
+          if [ "$F_COUNT" -gt 4 ]; then
+            echo "::error::Too many F-complexity functions ($F_COUNT > 4). Refactor before merging."
             exit 1
           fi
 

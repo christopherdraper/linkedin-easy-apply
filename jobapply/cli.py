@@ -345,7 +345,185 @@ def _maybe_sync_profile(profile_path: str) -> None:
         log.warning(f"⚠️  Auto profile sync failed (non-critical): {exc}")
 
 
-def main():  # noqa: C901
+def _handle_deep_apply_cli(args, parser) -> None:
+    """Handle the --deep-apply subcommands: list, prompt, prompt-all, done."""
+    cmds = args.deep_apply
+    cmd = cmds[0] if cmds else "list"
+
+    if cmd == "list":
+        queue = _load_deep_apply_queue()
+        pending = [q for q in queue if q["status"] == "pending"]
+        if not pending:
+            print("No pending deep-apply entries.")
+            return
+        print(f"\n{'ID':<20} {'Company':<25} {'Title':<30} {'Score':>5}  {'Failure'}")
+        print("-" * 110)
+        for q in pending:
+            print(
+                f"{q['job_id']:<20} {q['company'][:24]:<25} "
+                f"{q['title'][:29]:<30} {q['match_score']:>5.0%}  {q['failure_reason']}"
+            )
+        print(f"\n{len(pending)} pending entries.")
+        return
+
+    if cmd == "prompt" and len(cmds) >= 2:
+        job_id = cmds[1]
+        queue = _load_deep_apply_queue()
+        entry = next((q for q in queue if q["job_id"] == job_id), None)
+        if not entry:
+            print(f"Job ID '{job_id}' not found in deep-apply queue.")
+            return
+        _raw = json.loads(Path(args.profile).expanduser().read_text())
+        profile = ApplicantProfile.from_dict(_raw)
+        print(_generate_deep_apply_prompt(entry, profile))
+        return
+
+    if cmd == "prompt-all":
+        queue = _load_deep_apply_queue()
+        pending = [q for q in queue if q["status"] == "pending"]
+        if not pending:
+            print("No pending deep-apply entries.")
+            return
+        _raw = json.loads(Path(args.profile).expanduser().read_text())
+        profile = ApplicantProfile.from_dict(_raw)
+        for q in pending:
+            print(f"\n{'=' * 80}")
+            print(f"# {q['company']} — {q['title']} (ID: {q['job_id']})")
+            print(f"{'=' * 80}\n")
+            print(_generate_deep_apply_prompt(q, profile))
+        return
+
+    if cmd == "done" and len(cmds) >= 2:
+        job_id = cmds[1]
+        done_status = cmds[2] if len(cmds) >= 3 else "submitted"
+        done_reason = cmds[3] if len(cmds) >= 4 else None
+        ok = _mark_deep_apply_done(job_id, done_status, done_reason)
+        if ok:
+            print(f"Marked {job_id} as deep-apply {done_status}.")
+        else:
+            print(f"Job ID '{job_id}' not found in deep-apply queue.")
+        return
+
+    parser.error(
+        f"Unknown deep-apply command: {cmd}. Use: list, prompt <id>, prompt-all, done <id>"
+    )
+
+
+def _run_market_snapshot(args, parser) -> None:
+    """Handle the --market-snapshot branch: count job postings per title."""
+    _raw = json.loads(Path(args.profile).expanduser().read_text())
+    _criteria = _raw.get("search_criteria", {})
+    _prefs = _raw.get("profile", _raw).get("preferences", {})
+    titles = args.title if args.title else _criteria.get("job_titles", [])
+    if not titles:
+        parser.error("No job titles — pass --title or set search_criteria.job_titles in profile")
+    if args.remote is None:
+        work_arrangement = _prefs.get("work_arrangement", ["remote"])
+        remote = "remote" in work_arrangement
+    else:
+        remote = args.remote
+    market_snapshot(titles, location=args.location, remote=remote, proxy=args.proxy)
+
+
+def _run_external_url(args) -> None:
+    """Handle the --external-url branch: apply to a single external job URL."""
+    _raw = json.loads(Path(args.profile).expanduser().read_text())
+    profile = ApplicantProfile.from_dict(_raw)
+    job = {
+        "id": f"ext_{hashlib.sha256(args.external_url.encode()).hexdigest()[:12]}",
+        "url": args.external_url,
+        "title": args.job_title or "Unknown",
+        "company": args.company or "Unknown",
+        "description": "",
+        "apply_type": "external",
+    }
+    log.info(f"🌐 Applying to external URL: {args.external_url}")
+    stats.reset_run_stats()
+    status = submit_external_apply(
+        job,
+        profile,
+        proxy=args.proxy,
+        dry_run=args.dry_run,
+    )
+    log.info(f"Result: {status}")
+
+
+def _resolve_batch_settings(args, parser):
+    """Resolve batch-run settings from CLI args and the profile file."""
+    _raw = json.loads(Path(args.profile).expanduser().read_text())
+    profile = ApplicantProfile.from_dict(_raw)
+    _settings = _raw.get("profile", _raw).get("application_settings", {})
+    _criteria = _raw.get("search_criteria", {})
+    _prefs = _raw.get("profile", _raw).get("preferences", {})
+
+    max_applications = args.max_applications or _settings.get("max_applications_per_day", 10)
+    min_score = (
+        args.min_score if args.min_score is not None else _settings.get("min_match_score", 0.30)
+    )
+
+    # Titles: CLI args override, otherwise read from profile
+    titles = args.title if args.title else _criteria.get("job_titles", [])
+    if not titles:
+        parser.error(
+            "No job titles specified — pass --title or set search_criteria.job_titles in profile"
+        )
+
+    # Remote: CLI flag overrides, otherwise check profile preferences
+    if args.remote is None:
+        work_arrangement = _prefs.get("work_arrangement", ["remote"])
+        remote = "remote" in work_arrangement
+    else:
+        remote = args.remote
+
+    return profile, _criteria, max_applications, min_score, titles, remote
+
+
+def _run_batch(args, profile, _criteria, max_applications, min_score, titles, remote) -> None:
+    """Run the default batch loop over sources and titles."""
+    sources = ["linkedin", "remoteok", "hn", "biotech"] if args.source == "all" else [args.source]
+
+    for source in sources:
+        if len(sources) > 1:
+            log.info(f"\n{'=' * 50}")
+            log.info(f"📡 Source: {source.upper()}")
+            log.info(f"{'=' * 50}\n")
+
+        for i, title in enumerate(titles):
+            if i > 0:
+                delay = random.randint(15, 30) + (i * random.randint(3, 8))
+                log.info(f"⏳ Waiting {delay}s before next search...")
+                time.sleep(delay)
+
+            params = JobSearchParams(
+                title=title,
+                location=args.location,
+                remote=remote,
+                max_age_days=_criteria.get("max_age_days", 14),
+                keywords_excluded=_criteria.get("keywords_excluded", []),
+                company_blacklist=_criteria.get("company_blacklist", []),
+            )
+
+            try:
+                auto_apply_workflow(
+                    params=params,
+                    profile=profile,
+                    max_applications=max_applications,
+                    min_match_score=min_score,
+                    dry_run=args.dry_run,
+                    proxy=args.proxy,
+                    source=source,
+                )
+            except RuntimeError as exc:
+                if "session expired" in str(exc).lower():
+                    log.error(
+                        f"❌ Session expired during '{title}' — stopping. Re-authenticate and retry."
+                    )
+                    break
+                log.error(f"❌ Error during '{title}': {exc}")
+            continue
+
+
+def main():
     parser = argparse.ArgumentParser(
         description="LinkedIn job apply automation (Easy Apply + External)"
     )
@@ -410,66 +588,8 @@ def main():  # noqa: C901
     args = parser.parse_args()
 
     if args.deep_apply is not None:
-        cmds = args.deep_apply
-        cmd = cmds[0] if cmds else "list"
-
-        if cmd == "list":
-            queue = _load_deep_apply_queue()
-            pending = [q for q in queue if q["status"] == "pending"]
-            if not pending:
-                print("No pending deep-apply entries.")
-                return
-            print(f"\n{'ID':<20} {'Company':<25} {'Title':<30} {'Score':>5}  {'Failure'}")
-            print("-" * 110)
-            for q in pending:
-                print(
-                    f"{q['job_id']:<20} {q['company'][:24]:<25} "
-                    f"{q['title'][:29]:<30} {q['match_score']:>5.0%}  {q['failure_reason']}"
-                )
-            print(f"\n{len(pending)} pending entries.")
-            return
-
-        if cmd == "prompt" and len(cmds) >= 2:
-            job_id = cmds[1]
-            queue = _load_deep_apply_queue()
-            entry = next((q for q in queue if q["job_id"] == job_id), None)
-            if not entry:
-                print(f"Job ID '{job_id}' not found in deep-apply queue.")
-                return
-            _raw = json.loads(Path(args.profile).expanduser().read_text())
-            profile = ApplicantProfile.from_dict(_raw)
-            print(_generate_deep_apply_prompt(entry, profile))
-            return
-
-        if cmd == "prompt-all":
-            queue = _load_deep_apply_queue()
-            pending = [q for q in queue if q["status"] == "pending"]
-            if not pending:
-                print("No pending deep-apply entries.")
-                return
-            _raw = json.loads(Path(args.profile).expanduser().read_text())
-            profile = ApplicantProfile.from_dict(_raw)
-            for q in pending:
-                print(f"\n{'=' * 80}")
-                print(f"# {q['company']} — {q['title']} (ID: {q['job_id']})")
-                print(f"{'=' * 80}\n")
-                print(_generate_deep_apply_prompt(q, profile))
-            return
-
-        if cmd == "done" and len(cmds) >= 2:
-            job_id = cmds[1]
-            done_status = cmds[2] if len(cmds) >= 3 else "submitted"
-            done_reason = cmds[3] if len(cmds) >= 4 else None
-            ok = _mark_deep_apply_done(job_id, done_status, done_reason)
-            if ok:
-                print(f"Marked {job_id} as deep-apply {done_status}.")
-            else:
-                print(f"Job ID '{job_id}' not found in deep-apply queue.")
-            return
-
-        parser.error(
-            f"Unknown deep-apply command: {cmd}. Use: list, prompt <id>, prompt-all, done <id>"
-        )
+        _handle_deep_apply_cli(args, parser)
+        return
 
     if args.setup:
         _run_setup()
@@ -480,109 +600,17 @@ def main():  # noqa: C901
         return
 
     if args.market_snapshot:
-        _raw = json.loads(Path(args.profile).expanduser().read_text())
-        _criteria = _raw.get("search_criteria", {})
-        _prefs = _raw.get("profile", _raw).get("preferences", {})
-        titles = args.title if args.title else _criteria.get("job_titles", [])
-        if not titles:
-            parser.error(
-                "No job titles — pass --title or set search_criteria.job_titles in profile"
-            )
-        if args.remote is None:
-            work_arrangement = _prefs.get("work_arrangement", ["remote"])
-            remote = "remote" in work_arrangement
-        else:
-            remote = args.remote
-        market_snapshot(titles, location=args.location, remote=remote, proxy=args.proxy)
+        _run_market_snapshot(args, parser)
         return
 
     if args.external_url:
-        _raw = json.loads(Path(args.profile).expanduser().read_text())
-        profile = ApplicantProfile.from_dict(_raw)
-        job = {
-            "id": f"ext_{hashlib.sha256(args.external_url.encode()).hexdigest()[:12]}",
-            "url": args.external_url,
-            "title": args.job_title or "Unknown",
-            "company": args.company or "Unknown",
-            "description": "",
-            "apply_type": "external",
-        }
-        log.info(f"🌐 Applying to external URL: {args.external_url}")
-        status = submit_external_apply(
-            job,
-            profile,
-            proxy=args.proxy,
-            dry_run=args.dry_run,
-        )
-        log.info(f"Result: {status}")
+        _run_external_url(args)
         return
 
     # Auto-sync profile if stale (>7 days since last sync)
     _maybe_sync_profile(args.profile)
 
-    _raw = json.loads(Path(args.profile).expanduser().read_text())
-    profile = ApplicantProfile.from_dict(_raw)
-    _settings = _raw.get("profile", _raw).get("application_settings", {})
-    _criteria = _raw.get("search_criteria", {})
-    _prefs = _raw.get("profile", _raw).get("preferences", {})
-
-    max_applications = args.max_applications or _settings.get("max_applications_per_day", 10)
-    min_score = (
-        args.min_score if args.min_score is not None else _settings.get("min_match_score", 0.30)
+    profile, _criteria, max_applications, min_score, titles, remote = _resolve_batch_settings(
+        args, parser
     )
-
-    # Titles: CLI args override, otherwise read from profile
-    titles = args.title if args.title else _criteria.get("job_titles", [])
-    if not titles:
-        parser.error(
-            "No job titles specified — pass --title or set search_criteria.job_titles in profile"
-        )
-
-    # Remote: CLI flag overrides, otherwise check profile preferences
-    if args.remote is None:
-        work_arrangement = _prefs.get("work_arrangement", ["remote"])
-        remote = "remote" in work_arrangement
-    else:
-        remote = args.remote
-
-    sources = ["linkedin", "remoteok", "hn", "biotech"] if args.source == "all" else [args.source]
-
-    for source in sources:
-        if len(sources) > 1:
-            log.info(f"\n{'=' * 50}")
-            log.info(f"📡 Source: {source.upper()}")
-            log.info(f"{'=' * 50}\n")
-
-        for i, title in enumerate(titles):
-            if i > 0:
-                delay = random.randint(15, 30) + (i * random.randint(3, 8))
-                log.info(f"⏳ Waiting {delay}s before next search...")
-                time.sleep(delay)
-
-            params = JobSearchParams(
-                title=title,
-                location=args.location,
-                remote=remote,
-                max_age_days=_criteria.get("max_age_days", 14),
-                keywords_excluded=_criteria.get("keywords_excluded", []),
-                company_blacklist=_criteria.get("company_blacklist", []),
-            )
-
-            try:
-                auto_apply_workflow(
-                    params=params,
-                    profile=profile,
-                    max_applications=max_applications,
-                    min_match_score=min_score,
-                    dry_run=args.dry_run,
-                    proxy=args.proxy,
-                    source=source,
-                )
-            except RuntimeError as exc:
-                if "session expired" in str(exc).lower():
-                    log.error(
-                        f"❌ Session expired during '{title}' — stopping. Re-authenticate and retry."
-                    )
-                    break
-                log.error(f"❌ Error during '{title}': {exc}")
-            continue
+    _run_batch(args, profile, _criteria, max_applications, min_score, titles, remote)
