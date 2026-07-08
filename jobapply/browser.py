@@ -67,6 +67,20 @@ def _save_credentials(email: str, password: str) -> None:
     os.chmod(CREDENTIALS_FILE, 0o600)
 
 
+def _first_visible(page, selector: str):
+    """Return the first visible element matching *selector*, or None."""
+    try:
+        for el in page.query_selector_all(selector):
+            try:
+                if el.is_visible():
+                    return el
+            except Exception:  # noqa: S112
+                continue
+    except Exception:  # noqa: S110
+        pass
+    return None
+
+
 def _login_linkedin(page) -> bool:
     """
     Automate LinkedIn login using stored credentials.
@@ -86,9 +100,19 @@ def _login_linkedin(page) -> bool:
         page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=15000)
         page.wait_for_timeout(2000)
 
-    # Fill login form
-    email_field = page.query_selector("input#username, input[name='session_key']")
-    pass_field = page.query_selector("input#password, input[name='session_password']")
+    # Fill login form. LinkedIn's 2026 login page uses React-generated ids
+    # and no name attributes; autocomplete/type are the stable hooks. The
+    # page renders duplicate (desktop/mobile) copies, so pick the visible one.
+    email_field = _first_visible(
+        page,
+        "input#username, input[name='session_key'], "
+        "input[autocomplete='username'], input[type='email']",
+    )
+    pass_field = _first_visible(
+        page,
+        "input#password, input[name='session_password'], "
+        "input[autocomplete='current-password'], input[type='password']",
+    )
     if not email_field or not pass_field:
         log.error("❌ Could not find login form fields")
         return False
@@ -98,8 +122,11 @@ def _login_linkedin(page) -> bool:
     pass_field.fill(creds["password"])
     page.wait_for_timeout(500)
 
-    submit = page.query_selector(
-        "button[type='submit'], button[aria-label='Sign in'], button:has-text('Sign in')"
+    # :text-is (exact) not :has-text (substring): the SSO buttons
+    # ("Sign in with Microsoft/Apple") would substring-match first.
+    submit = _first_visible(
+        page,
+        "button[type='submit'], button[aria-label='Sign in'], button:text-is('Sign in')",
     )
     if submit:
         submit.click()
