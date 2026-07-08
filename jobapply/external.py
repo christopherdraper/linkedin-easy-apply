@@ -298,24 +298,9 @@ def _fill_custom_dropdown(
     return False
 
 
-def _answer_external_screening_questions(  # noqa: C901
-    page,
-    profile: ApplicantProfile,
-    job_title: Optional[str] = None,
-    company: Optional[str] = None,
-) -> int:
-    """
-    Fill all form fields on an external ATS page using generic selectors.
-    Reuses the existing field-filling pipeline. Returns count of fields filled.
-    """
+def _answer_yesno_button_groups(page, profile: ApplicantProfile) -> int:
+    """Answer Ashby-style Yes/No button groups. Returns count of fields filled."""
     filled = 0
-
-    # Radio buttons — reuse existing handler (selectors are generic enough)
-    try:
-        _answer_radio_buttons(page, profile)
-    except Exception as exc:
-        log.debug("External radio buttons failed: %s", exc)
-
     # Ashby-style Yes/No button groups — these use <button> elements inside a
     # container with class containing "yesno", paired with a label via hidden checkbox
     try:
@@ -373,7 +358,12 @@ def _answer_external_screening_questions(  # noqa: C901
                 log.debug("Ashby Yes/No button failed: %s", exc)
     except Exception as exc:
         log.debug("Ashby Yes/No scan failed: %s", exc)
+    return filled
 
+
+def _answer_button_group_radios(page, profile: ApplicantProfile) -> int:
+    """Answer generic button-group radio alternatives. Returns count of fields filled."""
+    filled = 0
     # Generic button-group radio alternatives (Yes/No, True/False)
     # Catches ATS systems that use button elements instead of radio inputs
     try:
@@ -421,13 +411,14 @@ def _answer_external_screening_questions(  # noqa: C901
                 log.debug("Button-group radio failed: %s", exc)
     except Exception as exc:
         log.debug("Button-group radio scan failed: %s", exc)
+    return filled
 
-    # Native select dropdowns — reuse existing handler
-    try:
-        _answer_select_dropdowns(page, profile)
-    except Exception as exc:
-        log.debug("External select dropdowns failed: %s", exc)
 
+def _answer_textareas(
+    page, profile: ApplicantProfile, job_title: Optional[str], company: Optional[str]
+) -> int:
+    """Fill textareas with AI answers. Returns count of fields filled."""
+    filled = 0
     # Textareas — fill with AI (the built-in handler only matches exact screening_answers)
     try:
         for textarea in page.query_selector_all("textarea"):
@@ -459,13 +450,12 @@ def _answer_external_screening_questions(  # noqa: C901
         raise
     except Exception as exc:
         log.debug("External textareas failed: %s", exc)
+    return filled
 
-    # Checkboxes — reuse existing handler
-    try:
-        _check_mandatory_checkboxes(page)
-    except Exception as exc:
-        log.debug("External checkboxes failed: %s", exc)
 
+def _answer_extjs_boxselects(page, profile: ApplicantProfile) -> int:
+    """Fill ExtJS boxselect widgets. Returns count of fields filled."""
+    filled = 0
     # ExtJS boxselect widgets (GR8People and similar ATS platforms)
     # These render as <input class="x-form-field"> inside a .x-boxselect wrapper.
     # Standard .fill() doesn't trigger the ExtJS selection — must type + click option.
@@ -549,7 +539,12 @@ def _answer_external_screening_questions(  # noqa: C901
                     pass
     except Exception as exc:
         log.debug("ExtJS boxselect scan failed: %s", exc)
+    return filled
 
+
+def _answer_custom_comboboxes(page, profile: ApplicantProfile) -> int:  # noqa: C901
+    """Fill custom (ARIA combobox) dropdowns. Returns count of fields filled."""
+    filled = 0
     # Custom dropdowns (non-native, ARIA-based)
     # Skip phone country-code widgets (intl-tel-input); handle location autocompletes specially
     _SKIP_COMBOBOX_IDS = {"iti-0__search-input", "iti-1__search-input"}
@@ -655,7 +650,12 @@ def _answer_external_screening_questions(  # noqa: C901
                     filled += 1
     except Exception as exc:
         log.debug("External custom dropdowns failed: %s", exc)
+    return filled
 
+
+def _answer_div_custom_selects(page, profile: ApplicantProfile) -> int:
+    """Fill div-based custom selects. Returns count of fields filled."""
+    filled = 0
     # Div-based custom selects (Greenhouse, Lever, etc.) — these are clickable divs
     # that open a listbox but don't have role='combobox' on an input element.
     # Common patterns: [aria-haspopup='listbox'], [class*='select'][class*='control']
@@ -722,7 +722,34 @@ def _answer_external_screening_questions(  # noqa: C901
                     pass
     except Exception as exc:
         log.debug("Div-based custom selects failed: %s", exc)
+    return filled
 
+
+def _collect_bamboo_menu_options(page, vessel, require_visible: bool):
+    """Collect BambooHR fab-MenuOption texts and elements from the open menu vessel."""
+    menu_opts = (
+        vessel.query_selector_all(".fab-MenuOption[role='menuitem']")
+        if vessel
+        else page.query_selector_all(".fab-MenuOption[role='menuitem']")
+    )
+    opt_texts = []
+    opt_elements = []
+    for mo in menu_opts:
+        try:
+            if require_visible and not mo.is_visible():
+                continue
+            t = mo.inner_text().strip()
+            if t and len(t) < 80:
+                opt_texts.append(t)
+                opt_elements.append(mo)
+        except Exception:
+            continue
+    return opt_texts, opt_elements
+
+
+def _answer_bamboohr_dropdowns(page, profile: ApplicantProfile) -> int:  # noqa: C901
+    """Fill BambooHR Fabric UI dropdowns. Returns count of fields filled."""
+    filled = 0
     # BambooHR Fabric UI dropdowns — fab-SelectToggle buttons with aria-haspopup
     # These use a custom component: button.fab-SelectToggle opens a fab-MenuVessel
     # with fab-MenuOption[role="menuitem"] children.  Label is in aria-label attr
@@ -758,21 +785,9 @@ def _answer_external_screening_questions(  # noqa: C901
                         if v.is_visible():
                             vessel = v
                             break
-                menu_opts = (
-                    vessel.query_selector_all(".fab-MenuOption[role='menuitem']")
-                    if vessel
-                    else page.query_selector_all(".fab-MenuOption[role='menuitem']")
+                opt_texts, opt_elements = _collect_bamboo_menu_options(
+                    page, vessel, require_visible=False
                 )
-                opt_texts = []
-                opt_elements = []
-                for mo in menu_opts:
-                    try:
-                        t = mo.inner_text().strip()
-                        if t and len(t) < 80:
-                            opt_texts.append(t)
-                            opt_elements.append(mo)
-                    except Exception:
-                        continue
                 if not opt_texts:
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(200)
@@ -796,23 +811,9 @@ def _answer_external_screening_questions(  # noqa: C901
                     search_input.fill(answer[:20])
                     page.wait_for_timeout(400)
                     # Re-collect filtered options within same vessel
-                    menu_opts = (
-                        vessel.query_selector_all(".fab-MenuOption[role='menuitem']")
-                        if vessel
-                        else page.query_selector_all(".fab-MenuOption[role='menuitem']")
+                    opt_texts, opt_elements = _collect_bamboo_menu_options(
+                        page, vessel, require_visible=True
                     )
-                    opt_texts = []
-                    opt_elements = []
-                    for mo in menu_opts:
-                        try:
-                            if not mo.is_visible():
-                                continue
-                            t = mo.inner_text().strip()
-                            if t and len(t) < 80:
-                                opt_texts.append(t)
-                                opt_elements.append(mo)
-                        except Exception:
-                            continue
                 # Click best match
                 clicked = False
                 best_idx = _best_option_match(answer, opt_texts)
@@ -850,7 +851,12 @@ def _answer_external_screening_questions(  # noqa: C901
         raise
     except Exception as exc:
         log.debug("BambooHR fab-SelectToggle handler failed: %s", exc)
+    return filled
 
+
+def _answer_generic_popup_dropdowns(page, profile: ApplicantProfile) -> int:
+    """Fill generic aria-haspopup dropdowns. Returns count of fields filled."""
+    filled = 0
     # Catch-all: generic aria-haspopup dropdowns still showing placeholder text
     try:
         generic_popups = page.evaluate("""() => {
@@ -944,7 +950,12 @@ def _answer_external_screening_questions(  # noqa: C901
         raise
     except Exception as exc:
         log.debug("Generic popup dropdowns failed: %s", exc)
+    return filled
 
+
+def _answer_text_inputs(page, profile: ApplicantProfile) -> int:  # noqa: C901
+    """Fill text/number/email/tel/url inputs. Returns count of fields filled."""
+    filled = 0
     # Text/number/email/tel/url inputs
     for inp in page.query_selector_all(
         "input[type='text'], input[type='number'], input[type='email'], "
@@ -1052,7 +1063,12 @@ def _answer_external_screening_questions(  # noqa: C901
             raise
         except Exception as exc:
             log.debug("Failed to fill input '%s': %s", label_text[:40], exc)
+    return filled
 
+
+def _answer_date_inputs(page, profile: ApplicantProfile) -> int:
+    """Fill date inputs with AI answers. Returns count of fields filled."""
+    filled = 0
     # Date inputs
     for inp in page.query_selector_all("input[type='date']"):
         label_text = ""
@@ -1074,7 +1090,14 @@ def _answer_external_screening_questions(  # noqa: C901
             raise
         except Exception as exc:
             log.debug("Date field failed for '%s': %s", label_text, exc)
+    return filled
 
+
+def _answer_contenteditables(
+    page, profile: ApplicantProfile, job_title: Optional[str], company: Optional[str]
+) -> int:
+    """Fill contenteditable rich text fields. Returns count of fields filled."""
+    filled = 0
     # Contenteditable fields (rich text editors)
     for el in page.query_selector_all("[contenteditable='true']"):
         label_text = ""
@@ -1099,6 +1122,52 @@ def _answer_external_screening_questions(  # noqa: C901
             raise
         except Exception as exc:
             log.debug("Contenteditable failed for '%s': %s", label_text, exc)
+    return filled
+
+
+def _answer_external_screening_questions(
+    page,
+    profile: ApplicantProfile,
+    job_title: Optional[str] = None,
+    company: Optional[str] = None,
+) -> int:
+    """
+    Fill all form fields on an external ATS page using generic selectors.
+    Reuses the existing field-filling pipeline. Returns count of fields filled.
+    """
+    filled = 0
+
+    # Radio buttons — reuse existing handler (selectors are generic enough)
+    try:
+        _answer_radio_buttons(page, profile)
+    except Exception as exc:
+        log.debug("External radio buttons failed: %s", exc)
+
+    filled += _answer_yesno_button_groups(page, profile)
+    filled += _answer_button_group_radios(page, profile)
+
+    # Native select dropdowns — reuse existing handler
+    try:
+        _answer_select_dropdowns(page, profile)
+    except Exception as exc:
+        log.debug("External select dropdowns failed: %s", exc)
+
+    filled += _answer_textareas(page, profile, job_title, company)
+
+    # Checkboxes — reuse existing handler
+    try:
+        _check_mandatory_checkboxes(page)
+    except Exception as exc:
+        log.debug("External checkboxes failed: %s", exc)
+
+    filled += _answer_extjs_boxselects(page, profile)
+    filled += _answer_custom_comboboxes(page, profile)
+    filled += _answer_div_custom_selects(page, profile)
+    filled += _answer_bamboohr_dropdowns(page, profile)
+    filled += _answer_generic_popup_dropdowns(page, profile)
+    filled += _answer_text_inputs(page, profile)
+    filled += _answer_date_inputs(page, profile)
+    filled += _answer_contenteditables(page, profile, job_title, company)
 
     return filled
 
