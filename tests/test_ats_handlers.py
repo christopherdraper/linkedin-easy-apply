@@ -513,20 +513,22 @@ from ats_handlers.lever import LeverHandler  # noqa: E402
 
 
 class TestLeverHandler:
+    """Registry + default-hook checks. Behavioral tests are in
+    TestLeverHandlerBehavior at the end of this file (added 2026-07-08 when
+    the handler stopped being a passthrough)."""
+
     def test_platform_name(self):
         assert LeverHandler().platform_name == "Lever"
 
-    def test_all_hooks_are_noop(self):
-        """Lever is a pure passthrough -- all hooks return defaults."""
+    def test_unused_hooks_keep_defaults(self):
+        """Hooks Lever doesn't implement still return base defaults."""
         handler = LeverHandler()
         page = MagicMock()
+        page.url = "https://example.com/careers"
         ctx = {}
-        assert handler.pre_flight(page, ctx) is None
-        assert handler.on_step_start(page, ctx) is None
         assert handler.resolve_login_wall(page, ctx) is False
         assert handler.handle_verification_code(page, ctx) is None
-        assert handler.on_submit_clicked(page, ctx) is None
-        assert handler.detect_success(page, ctx) is False
+        assert handler.q2_resolve_login_wall(page, ctx) is False
 
 
 class TestAshbyHandler:
@@ -1192,3 +1194,126 @@ class TestAshbyDatePickers:
         page.query_selector_all.return_value = [wrapper]
         AshbyHandler._fill_required_date_pickers(page)
         inp.click.assert_not_called()
+
+
+class TestLeverHandlerBehavior:
+    """Behavioral tests for the Lever handler (added 2026-07-08 when it
+    stopped being a passthrough). Fake-page style; the handler methods are
+    pure DOM manipulation over query_selector(_all)."""
+
+    def test_goto_apply_page_jumps_from_posting(self):
+        """A bare posting URL navigates to the /apply form page."""
+        page = MagicMock()
+        page.url = "https://jobs.lever.co/smarsh/7a3a22dd-09be-4a95-b8e4-45a3f4d534fe"
+        LeverHandler._goto_apply_page(page)
+        page.goto.assert_called_once()
+        assert page.goto.call_args.args[0] == (
+            "https://jobs.lever.co/smarsh/7a3a22dd-09be-4a95-b8e4-45a3f4d534fe/apply"
+        )
+
+    def test_goto_apply_page_preserves_query(self):
+        page = MagicMock()
+        page.url = "https://jobs.lever.co/smarsh/7a3a22dd-09be-4a95-b8e4-45a3f4d534fe?src=LinkedIn"
+        LeverHandler._goto_apply_page(page)
+        assert page.goto.call_args.args[0].endswith("/apply?src=LinkedIn")
+
+    def test_goto_apply_page_handles_eu_domain(self):
+        page = MagicMock()
+        page.url = "https://jobs.eu.lever.co/company/da18148f-35d7-4d0f-83f8-1acfc8550325"
+        LeverHandler._goto_apply_page(page)
+        page.goto.assert_called_once()
+
+    def test_goto_apply_page_ignores_non_posting_url(self):
+        """A non-posting URL (already on /apply, or unrelated) does not jump."""
+        page = MagicMock()
+        page.url = "https://jobs.lever.co/smarsh/7a3a22dd-09be-4a95-b8e4-45a3f4d534fe/apply"
+        LeverHandler._goto_apply_page(page)
+        page.goto.assert_not_called()
+
+    def test_pre_flight_calls_goto(self):
+        handler = LeverHandler()
+        page = MagicMock()
+        page.url = "https://jobs.lever.co/smarsh/7a3a22dd-09be-4a95-b8e4-45a3f4d534fe"
+        assert handler.pre_flight(page, {}) is None
+        page.goto.assert_called_once()
+
+    def test_detect_success_on_thanks_url(self):
+        handler = LeverHandler()
+        page = MagicMock()
+        page.url = "https://jobs.lever.co/smarsh/abc/thanks"
+        assert handler.detect_success(page, {}) is True
+
+    def test_detect_success_false_on_apply_url(self):
+        handler = LeverHandler()
+        page = MagicMock()
+        page.url = "https://jobs.lever.co/smarsh/abc/apply"
+        page.evaluate.return_value = "submit application"
+        assert handler.detect_success(page, {}) is False
+
+    def test_on_step_start_noop_without_form(self):
+        """No #application-form means the fill helpers never run."""
+        handler = LeverHandler()
+        page = MagicMock()
+        page.query_selector.return_value = None  # no form
+        handler._relay_hcaptcha_token = MagicMock(return_value=False)
+        result = handler.on_step_start(page, {"profile": MagicMock()})
+        assert result is None
+
+    def test_strip_required_from_unchecked(self):
+        """Unchecked toggles in an answered group lose their required attr."""
+        checked = MagicMock()
+        checked.is_checked.return_value = True
+        unchecked = MagicMock()
+        unchecked.is_checked.return_value = False
+        LeverHandler._strip_required_from_unchecked([checked, unchecked])
+        unchecked.evaluate.assert_called_once()
+        checked.evaluate.assert_not_called()
+
+    def test_fill_contact_fields_uses_name_attributes(self):
+        """Contact fields fill from stable name selectors, skipping empties."""
+        handler = LeverHandler()
+        profile = MagicMock()
+        profile.full_name = "Christopher Draper"
+        profile.email = "chris@example.com"
+        profile.phone = "317-555-0100"
+        profile.current_employer = ""
+        profile.linkedin_url = None
+        profile.github_url = None
+
+        filled_inputs = {}
+
+        def qs(selector):
+            if "name='name'" in selector:
+                m = MagicMock()
+                m.is_visible.return_value = True
+                m.input_value.return_value = ""
+                filled_inputs["name"] = m
+                return m
+            if "name='email'" in selector:
+                m = MagicMock()
+                m.is_visible.return_value = True
+                m.input_value.return_value = ""
+                filled_inputs["email"] = m
+                return m
+            return None
+
+        page = MagicMock()
+        page.query_selector.side_effect = qs
+        count = handler._fill_contact_fields(page, profile)
+        assert count == 2
+        filled_inputs["name"].fill.assert_called_once_with("Christopher Draper")
+        filled_inputs["email"].fill.assert_called_once_with("chris@example.com")
+
+    def test_fill_contact_fields_skips_prefilled(self):
+        handler = LeverHandler()
+        profile = MagicMock()
+        profile.full_name = "Christopher Draper"
+        profile.email = profile.phone = profile.current_employer = ""
+        profile.linkedin_url = profile.github_url = None
+        prefilled = MagicMock()
+        prefilled.is_visible.return_value = True
+        prefilled.input_value.return_value = "Already Here"
+        page = MagicMock()
+        page.query_selector.side_effect = lambda s: prefilled if "name='name'" in s else None
+        assert handler._fill_contact_fields(page, profile) == 0
+        prefilled.fill.assert_not_called()
