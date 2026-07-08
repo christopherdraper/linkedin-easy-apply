@@ -8,7 +8,8 @@ Developer reference for Claude Code (claude.ai/code) and human contributors work
 ~/.openclaw/skills/job-apply/          # Code lives here
   job_search_apply.py                  # Q1 CLI entry point; thin re-export facade over jobapply/
   jobapply/                            # Q1 implementation package (see module map below)
-  assisted_apply_mcp.py                # Q2: MCP Playwright autonomous retry agent (~2000 lines)
+  assisted_apply_mcp.py                # Q2 CLI entry point; thin re-export facade over q2apply/
+  q2apply/                             # Q2 implementation package (see module map below)
   batch_analysis.py                    # Post-batch failure analysis -> GitHub issues for recurring patterns
   dashboard.py                         # Flask dashboard + per-application report pages
   templates/                           # dashboard.html, report.html, decision_log.html
@@ -89,7 +90,7 @@ Before modifying any function that serves multiple code paths, use `feature-dev:
 Prefer a handler registry pattern (detect platform, dispatch to handler) over growing if/else chains in monolithic functions. Each ATS platform has fundamentally different quirks (Workday: React SPA + account creation + cookie banners; Greenhouse: verification codes + IMAP; Ashby: spam filter). These don't belong in the same function behind conditionals.
 
 ### Test against the platform you're changing, not just unit tests
-Unit tests verify code correctness, not platform behavior. After changing ATS-specific code, test with a real URL from that platform using `--external-url`. The 258-test suite doesn't catch Workday cookie banners or Greenhouse verification flow regressions.
+Unit tests verify code correctness, not platform behavior. After changing ATS-specific code, test with a real URL from that platform using `--external-url`. The 618-test suite doesn't catch Workday cookie banners or Greenhouse verification flow regressions.
 
 ### Nothing is "fixed" without a real-world test
 A fix is not fixed until it has been exercised against the actual site that was failing. Unit tests and code-path reasoning are necessary but not sufficient. Every handler change must be confirmed with `python job_search_apply.py --external-url <url> --dry-run` (or equivalent Q2 run) against a URL representative of the failure. If the fix applies to several handlers or sites, each one needs its own live run. Do not extrapolate from one success. Report status as "verified on <url>" or "untested against <url>", never as just "fixed." If you cannot run the live test (no URL available, auth wall, rate limit), say so explicitly and mark the fix pending verification.
@@ -109,7 +110,7 @@ ats_handlers/
   workday.py        # Cookie banners, autofill popup, login wall override
   greenhouse.py     # Email verification codes, OneTrust dismissal, ?gh_jid= iframe jump
   smartrecruiters.py # /oneclick-ui/ navigation, DataDome anti-bot
-  lever.py          # Passthrough (0% success, no special handling yet)
+  lever.py          # Ancestor-<label> fills, required-checkbox-pair fix, EEO selects, hidden hCaptcha token relay, /apply jump
   ashby.py          # Spam filter detection on page load + after submit
   paylocity.py      # Resume force-upload modal
   workable.py       # Cookie banner backdrop
@@ -152,9 +153,27 @@ ats_handlers/
 | `jobapply/external.py` | External-ATS navigation state machine + screening-question engine |
 | `jobapply/workflow.py` | `auto_apply_workflow` orchestration |
 | `jobapply/cli.py` | argparse `main`, setup, LinkedIn profile sync |
-| `assisted_apply_mcp.py` | Q2 agent: retries failed applications using Playwright + Claude AI (~2000 lines) |
+| `assisted_apply_mcp.py` | Q2 CLI entry point; re-export facade over `q2apply/` (all `from assisted_apply_mcp import X` keeps working) |
 | `batch_analysis.py` | Post-batch failure analysis -> creates GitHub issues for recurring patterns |
 | `dashboard.py` | Flask dashboard (port 5050): market pulse, application table, per-app report pages |
+
+**Q2 package (`q2apply/`, entry via `assisted_apply_mcp.py`):**
+
+| Module | Purpose |
+|--------|---------|
+| `q2apply/config.py` | Q2 path constants + limits (DATA_DIR, DEBUG_DIR, MODEL, MAX_PAGE_ATTEMPTS, MAX_TOTAL_STEPS) |
+| `q2apply/logger.py` | `DecisionLogger` — structured per-application decision log |
+| `q2apply/fields.py` | Deterministic field matching (`_match_field_to_profile`, `_FIELD_MAP`, `_US_STATES`), fills, react-select/PageUp comboboxes, resume upload |
+| `q2apply/analysis.py` | `_ai_analyze_page`, `_ai_answer_field`, profile context + page-text snapshot |
+| `q2apply/detection.py` | Submission-success / rejection / email-verification detectors |
+| `q2apply/verification.py` | Email + identity (PageUp OTP) verification flows |
+| `q2apply/recovery.py` | Corrupted-field repair, cookie-banner dismiss, empty/no-action recovery, debug snapshots |
+| `q2apply/navigation.py` | LinkedIn->ATS handoff, start-application button, captcha, login wall, auto-upload |
+| `q2apply/loop.py` | `_run_page_loop` (core form loop), `_execute_action_plan`, `process_application` |
+| `q2apply/queue_runner.py` | `_get_q2_pending`, `process_by_id`, `process_next_pending` |
+| `q2apply/cli.py` | argparse `main` (--job-id, --list, --max) |
+
+Same import-compatibility rule as `jobapply/`: external consumers import through the `assisted_apply_mcp` facade; when moving a function between q2apply modules, keep the facade re-export and retarget test patches to the module where the CALLER now resolves the name (e.g. `patch("q2apply.loop._detect_submission_success")`).
 
 **Import compatibility rule:** external consumers (ats_handlers/, assisted_apply_mcp.py, dashboard.py, tests) import through the `job_search_apply` facade. When moving a function between jobapply modules, keep the facade re-export and check test patch targets: `patch("job_search_apply.X")` only affects callers that still resolve X through the facade; callers inside jobapply resolve their own module's import, so patches must target the module where the CALLER lives.
 
@@ -173,7 +192,7 @@ ats_handlers/
 - Gmail IMAP verification code fetching (`_fetch_verification_code_from_gmail`)
 - ATS URL capture: `_final_ats_url` global is set during external apply and stored in both application record and queue entry
 
-### Q2 (`assisted_apply_mcp.py`)
+### Q2 (`q2apply/` package, entry via `assisted_apply_mcp.py`)
 - `_match_field_to_profile`: deterministic profile lookup (name, email, phone, etc.)
 - `_ai_analyze_page`: sends page snapshot + profile to Claude, returns fill/click/select actions
 - `_ai_answer_field`: single-field AI fallback for fields deterministic matching missed
@@ -191,6 +210,8 @@ ats_handlers/
 - `/` — main dashboard with market pulse + application table
 - `/report/<job_id>` — per-application audit page (fields filled, cover letter, match reasoning)
 - Q2/Q3 sections with decision log viewer
+- **Snapshot staleness banner**: `_check_snapshot_staleness` warns on the dashboard when the newest `search_log.json` entry is older than `STALE_SNAPSHOT_HOURS` (36h) — surfaces a silently-dead market-snapshot cron.
+- Interview-tracking endpoints only persist when a value actually changes (no-op writes are skipped).
 
 ### Data flow
 
@@ -198,11 +219,15 @@ Profile (`~/.local/share/job-apply/profile.json`) -> screening answer lookup (fu
 
 ## CI Pipeline (GitHub Actions)
 
-Three workflows run on push/PR to `main`:
+Five workflows run on push/PR to `main` (SHA-pinned actions, least-privilege `permissions`, per-job timeouts, concurrency cancel, pip cache):
 
-1. **Tests** (`test.yml`): `pytest` with coverage. Fails below 15% coverage.
-2. **Lint** (`lint.yml`): `ruff check` + `ruff format --check` + `bandit` security scan + `vulture` dead code
-3. **Quality** (`quality.yml`): `radon` complexity (fails if >3 F-grade functions) + `pylint` (fails below 5.0/10)
+1. **Tests** (`test.yml`): `pytest` with coverage across a Python 3.10/3.14 matrix. Coverage config in `pyproject.toml` (`fail_under=50`).
+2. **Lint** (`lint.yml`): runs the pre-commit stack in CI (`SKIP=pytest pre-commit run --all-files`) — gitleaks, ruff lint+format, bandit, vulture.
+3. **Code Quality** (`quality.yml`): `radon` complexity gate (fails if F-count > 1; only `batch_analysis._fingerprint_failure` remains) + `pylint` (fails below 9.0/10). Scans `jobapply/ q2apply/ ats_handlers/` + top-level modules.
+4. **Security** (`secrets.yml`): gitleaks-action + `pip-audit` (dependency CVEs), plus a weekly cron.
+5. **Type Check** (`typecheck.yml`): `mypy --config-file mypy.ini`. Scopes `jobapply/`, `ats_handlers/`, `dashboard.py`, `batch_analysis.py`; `job_search_apply` and (for now) `q2apply/` are `ignore_errors`. Must exit 0.
+
+Dependency bumps are automated via `.github/dependabot.yml` (pip + github-actions).
 
 ## Linting, Pre-commit Hooks, Code Style
 
@@ -213,7 +238,7 @@ pytest                 # run test suite
 ```
 
 - Pre-commit hooks (`.pre-commit-config.yaml`): ruff lint+format, bandit, vulture, pytest. If ruff auto-fixes files, re-stage them before committing.
-- ruff config in `pyproject.toml`: line-length 100, Python 3.9 target, double quotes.
+- ruff config in `pyproject.toml`: line-length 100, `target-version="py310"`, double quotes.
 - Max cyclomatic complexity 15 (`C901`). Existing `# noqa: C901` exemptions: `_navigate_form`, `_send_hiring_manager_message`, `_run_page_loop`. All complex state machines. Add new exemptions sparingly.
 - Bandit skips: `B110/B112` (intentional try/except/pass), `B310` (urlopen on API URLs), `B311` (random for timing jitter), `B404/B603/B607` (Xvfb subprocess with hardcoded args)
 
@@ -221,6 +246,7 @@ pytest                 # run test suite
 
 - All AI calls go through the Anthropic API (`anthropic` SDK). Key: `ANTHROPIC_API_KEY` env var.
 - Haiku for job scoring (cost optimization), Sonnet for form fills and cover letters.
+- **Structured outputs**: `ai_score_job` requests schema-enforced JSON via `output_config={"format": {"type": "json_schema", "schema": _SCORE_SCHEMA}}`, so the model can't return prose or malformed JSON. The score is still clamped to [0,1] in Python (the schema can't express numeric bounds). A malformed body now means an API-level failure, not a parse miss.
 - `_ai_answer_question` (Q1): form field answers, `max_tokens=25`, retries once at 15 if >100 chars
 - `_ai_analyze_page` (Q2): full page analysis, `max_tokens=2048`, returns JSON array of actions
 - `_ai_answer_field` (Q2): single-field fallback
@@ -245,6 +271,16 @@ The generic Apply-button lookup in `_navigate_external_form` used `button:has-te
 
 ### Greenhouse iframe embeds (fixed 2026-04-24)
 Sites that embed Greenhouse via `?gh_jid=` on a company careers page (Coalition, Nintex, etc.) render the Greenhouse form inside an iframe. The outer page has no form fields, so the generic loop only sees an Apply button, clicking it does not navigate, and the loop stalls. `GreenhouseHandler.pre_flight` now detects the embed and navigates directly to the iframe's src URL (`job-boards.greenhouse.io/embed/job_app?for=...&token=...`), so the form loop runs against the real Greenhouse form. Verified on Coalition (40 visible inputs after jump).
+
+### Lever handler (rewritten 2026-07-08)
+Lever's long-standing 0% was **not** hCaptcha — 2captcha solves Lever's hCaptcha in ~45s. The real blockers, all now handled in `ats_handlers/lever.py`:
+- **Ancestor-`<label>` wrapping**: Lever wraps each text input in an ancestor `<label>`, so the generic `_get_field_label` found no label and skipped every contact/location field. The handler fills them by `name` attribute in `on_step_start` instead.
+- **Required checkbox pairs**: Yes/No question cards are `required` checkbox pairs. The generic mandatory-checkbox pass ticked "Yes" for *every* card — including visa sponsorship. `_strip_required_from_unchecked` + `_answer_question_cards` answer them from the profile deterministically.
+- **EEO/demographic selects**: these got AI free-text garbage. `_fill_eeo_selects` / `_resolve_demographic_surveys` handle them with decline patterns, no AI.
+- **Hidden token gate**: the submit gate is a hidden `#hcaptchaResponseInput`, not a visible widget. `on_submit_clicked` relays the solved token and re-clicks.
+- **Posting vs apply URL**: `pre_flight`/`q2_pre_flight` jump a `/postings/...` URL to its `/apply` page (`_goto_apply_page`); `detect_success` looks for `/thanks`.
+
+Verified once (Smarsh, `--dry-run`): valid ready-to-submit form, resume attached, token injected, correct answers. A second live company was captcha-loop inconclusive and killed to conserve 2captcha credits. No real submission has been made.
 
 ### Greenhouse Verification Codes
 - Codes are fetched via Gmail IMAP (`_fetch_verification_code_from_gmail`)
@@ -297,7 +333,7 @@ Q2 processes entries sequentially. If it hits a known-bad platform (Alignerr OAu
 - **Easy Apply**: ~67% success
 - **Greenhouse**: ~57% success (verification codes are the main challenge)
 - **Ashby**: ~3% success (application-level spam filter, proxy doesn't help)
-- **Lever**: 0% success (all 7 attempts failed; hCaptcha the usual blocker)
+- **Lever**: was 0% (misattributed to hCaptcha). Root causes fixed 2026-07-08 in `lever.py`; dry-run reaches a valid ready-to-submit form (Smarsh verified: `form.checkValidity()==true`). See the Lever handler note below. No real submit confirmed yet.
 - **Workday**: ~29% success (requires account, dropdown loops)
 - **Eightfold**: low success (CAPTCHA loops)
 - **Comeet**: works with .docx fix (only 1 application seen)
