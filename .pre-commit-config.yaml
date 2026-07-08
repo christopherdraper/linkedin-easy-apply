@@ -27,6 +27,7 @@ repos:
             "job_search_apply.py",
             "jobapply",
             "assisted_apply_mcp.py",
+            "q2apply",
             "batch_analysis.py",
             "dashboard.py",
             "ats_handlers",

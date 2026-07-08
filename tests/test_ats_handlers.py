@@ -430,17 +430,17 @@ class TestQ2HandlerHooks:
         handler_ctx = {"profile": MagicMock(), "job_id": "test_id"}
 
         with (
-            patch("assisted_apply_mcp._detect_submission_success", return_value=False),
-            patch("assisted_apply_mcp._detect_email_verification", return_value=False),
-            patch("assisted_apply_mcp._detect_rejection", return_value=None),
-            patch("assisted_apply_mcp._handle_captcha", return_value=False),
-            patch("assisted_apply_mcp._handle_login_wall", return_value=False),
-            patch("assisted_apply_mcp._get_page_text_snapshot", return_value="snapshot"),
-            patch("assisted_apply_mcp._fix_corrupted_fields"),
-            patch("assisted_apply_mcp._ai_analyze_page", return_value=None),
-            patch("assisted_apply_mcp._handle_no_actions", return_value="failed: no actions"),
-            patch("assisted_apply_mcp._dismiss_cookie_banner"),
-            patch("assisted_apply_mcp._clear_errored_uploads"),
+            patch("q2apply.loop._detect_submission_success", return_value=False),
+            patch("q2apply.loop._detect_email_verification", return_value=False),
+            patch("q2apply.loop._detect_rejection", return_value=None),
+            patch("q2apply.loop._handle_captcha", return_value=False),
+            patch("q2apply.loop._handle_login_wall", return_value=False),
+            patch("q2apply.loop._get_page_text_snapshot", return_value="snapshot"),
+            patch("q2apply.loop._fix_corrupted_fields"),
+            patch("q2apply.loop._ai_analyze_page", return_value=None),
+            patch("q2apply.loop._handle_no_actions", return_value="failed: no actions"),
+            patch("q2apply.loop._dismiss_cookie_banner"),
+            patch("q2apply.loop._clear_errored_uploads"),
         ):
             _run_page_loop(
                 page,

@@ -237,7 +237,7 @@ class TestExecuteActionPlan:
         profile = _make_profile()
         logger = DecisionLogger()
 
-        with patch("assisted_apply_mcp.Path") as mock_path:
+        with patch("q2apply.loop.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
             result = _execute_action_plan(
                 self._make_action(action="upload", target="Resume"),

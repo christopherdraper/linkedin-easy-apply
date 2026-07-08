@@ -193,7 +193,7 @@ def page_loop_patches():
         }
         defaults.update(overrides)
         patchers = {
-            name: patch(f"assisted_apply_mcp.{name}", return_value=value)
+            name: patch(f"q2apply.loop.{name}", return_value=value)
             for name, value in defaults.items()
         }
         mocks = {}
