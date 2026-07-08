@@ -689,6 +689,21 @@ def _extract_results_count(page) -> Optional[int]:
     return None
 
 
+def _count_failed_snapshots(snapshots: List[Dict]) -> int:
+    """Count snapshots where every result count is None (extraction failed).
+
+    A title with all three counts missing means LinkedIn returned no readable
+    results page for it, the usual signature of an expired session.
+    """
+    return sum(
+        1
+        for s in snapshots
+        if s.get("total_results") is None
+        and s.get("past_week_results") is None
+        and s.get("past_day_results") is None
+    )
+
+
 def market_snapshot(
     titles: List[str],
     location: Optional[str] = None,
@@ -700,7 +715,8 @@ def market_snapshot(
     (all results, past week, past 24 hours) and record the result
     counts — no job cards parsed, no descriptions fetched.
 
-    Returns list of snapshot entries saved to search_log.json.
+    Returns list of snapshot entries saved to search_log.json, or an empty
+    list when every title failed (so callers can exit non-zero).
     """
     try:
         import playwright  # noqa: F401
@@ -804,4 +820,15 @@ def market_snapshot(
         save_search_log(snap)
 
     log.info(f"\n💾 Market data saved: {SEARCH_LOG_FILE}")
+
+    failed = _count_failed_snapshots(snapshots)
+    if snapshots and failed == len(snapshots):
+        log.error(
+            "All %d market snapshot titles returned no counts. "
+            "LinkedIn session likely expired; re-authenticate and retry.",
+            failed,
+        )
+        return []
+    if failed:
+        log.warning("%d of %d market snapshot titles returned no counts", failed, len(snapshots))
     return snapshots

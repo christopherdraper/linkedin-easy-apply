@@ -18,7 +18,7 @@ import json
 import sys
 import webbrowser
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Timer
 
@@ -59,6 +59,29 @@ def _parse_ts(ts_str):
         return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
+
+
+STALE_SNAPSHOT_HOURS = 36
+
+
+def _check_snapshot_staleness(search_entries):
+    """Return staleness info for the market snapshot data.
+
+    Returns None when the newest snapshot is fresh (within
+    STALE_SNAPSHOT_HOURS). Otherwise returns a dict with the last snapshot
+    timestamp string (or None when the log is empty/unparseable) so the
+    template can render a warning banner.
+    """
+    latest_ts = None
+    for entry in search_entries:
+        ts = _parse_ts(entry.get("timestamp", ""))
+        if ts and (latest_ts is None or ts > latest_ts):
+            latest_ts = ts
+    if latest_ts is None:
+        return {"last_snapshot": None}
+    if datetime.now() - latest_ts > timedelta(hours=STALE_SNAPSHOT_HOURS):
+        return {"last_snapshot": latest_ts.strftime("%Y-%m-%d %H:%M:%S")}
+    return None
 
 
 def _build_market_stats(search_entries):
@@ -209,6 +232,7 @@ def index():
         "dashboard.html",
         entries=entries,
         market_stats=market_stats,
+        stale_snapshot=_check_snapshot_staleness(search_entries),
         status_counts=status_counts,
         failure_categories=dict(failure_categories),
         platform_stats=dict(platform_stats),
@@ -309,8 +333,11 @@ def interview_add(job_id):
 def interview_remove(job_id):
     """Remove an application from interview pending."""
     interviews = _load_json(INTERVIEWS_FILE)
-    interviews = [i for i in interviews if i["job_id"] != job_id]
-    INTERVIEWS_FILE.write_text(json.dumps(interviews, indent=2))
+    remaining = [i for i in interviews if i["job_id"] != job_id]
+    # Only rewrite the file when something was actually removed; otherwise a
+    # no-match request would create an empty interviews.json.
+    if len(remaining) != len(interviews):
+        INTERVIEWS_FILE.write_text(json.dumps(remaining, indent=2))
     return redirect(url_for("index"))
 
 
@@ -318,11 +345,16 @@ def interview_remove(job_id):
 def interview_update(job_id):
     """Update notes on an interview entry."""
     interviews = _load_json(INTERVIEWS_FILE)
+    matched = False
     for i in interviews:
         if i["job_id"] == job_id:
             i["notes"] = request.form.get("notes", "")
+            matched = True
             break
-    INTERVIEWS_FILE.write_text(json.dumps(interviews, indent=2))
+    # Only rewrite the file when an entry matched; otherwise a bogus job_id
+    # would create an empty interviews.json.
+    if matched:
+        INTERVIEWS_FILE.write_text(json.dumps(interviews, indent=2))
     return redirect(url_for("index"))
 
 

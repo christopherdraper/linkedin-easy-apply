@@ -1,8 +1,10 @@
 """Tests for jobapply/search.py parsing: LinkedIn job cards (public layout,
 malformed cards, dedup ids), RemoteOK JSON mapping, HackerNews Who's Hiring
-comment parsing, and the Workday CXS endpoints."""
+comment parsing, the Workday CXS endpoints, and market snapshot failure
+signaling."""
 
 import json
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,9 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from jobapply.profile import JobSearchParams  # noqa: E402
 from jobapply.search import (  # noqa: E402
+    _count_failed_snapshots,
     _parse_job_cards,
     _workday_job_detail,
     _workday_search,
+    market_snapshot,
     search_hn_whos_hiring,
     search_remoteok,
 )
@@ -345,3 +349,81 @@ class TestWorkdayEndpoints:
         # Error path returns {}
         with patch("urllib.request.urlopen", side_effect=OSError("boom")):
             assert _workday_job_detail("lilly", "wd5", "LLY", "/job/US/sre_R-100") == {}
+
+
+# ---------------------------------------------------------------------------
+# Market snapshot failure signaling
+# ---------------------------------------------------------------------------
+
+
+def _snap(total, week, day):
+    return {"total_results": total, "past_week_results": week, "past_day_results": day}
+
+
+class TestCountFailedSnapshots:
+    def test_empty_list_counts_zero(self):
+        assert _count_failed_snapshots([]) == 0
+
+    def test_all_counts_none_is_failed(self):
+        assert _count_failed_snapshots([_snap(None, None, None)]) == 1
+
+    def test_partial_counts_are_not_failed(self):
+        snaps = [_snap(100, None, None), _snap(None, 5, None), _snap(None, None, 1)]
+        assert _count_failed_snapshots(snaps) == 0
+
+    def test_mixed_snapshots_counted_individually(self):
+        snaps = [_snap(None, None, None), _snap(100, 50, 10), _snap(None, None, None)]
+        assert _count_failed_snapshots(snaps) == 2
+
+    def test_zero_counts_are_real_data_not_failures(self):
+        assert _count_failed_snapshots([_snap(0, 0, 0)]) == 0
+
+
+class TestMarketSnapshotFailureSignaling:
+    def _run(self, titles, counts):
+        """Run market_snapshot with all playwright collaborators mocked.
+
+        `counts` feeds _extract_results_count: three values per title
+        (all-time, past week, past day)."""
+        page = MagicMock()
+        with (
+            patch("jobapply.search._stealth_playwright"),
+            patch(
+                "jobapply.search._playwright_context",
+                return_value=(MagicMock(), MagicMock(), page, True),
+            ),
+            patch("jobapply.search._ensure_logged_in"),
+            patch("jobapply.search._save_session"),
+            patch("jobapply.search._extract_results_count", side_effect=counts),
+            patch("jobapply.search.save_search_log") as save_log,
+            patch("jobapply.search.time.sleep"),
+        ):
+            return market_snapshot(titles), save_log
+
+    def test_all_titles_failed_returns_falsy_and_logs_error(self, caplog):
+        with caplog.at_level(logging.ERROR, logger="jobapply.search"):
+            result, save_log = self._run(["SRE", "DevOps"], [None] * 6)
+        assert result == []
+        assert not result  # the CLI maps falsy to exit(1)
+        assert "session" in caplog.text.lower()
+        # Snapshots are still persisted (gaps in the graph, not lost runs)
+        assert save_log.call_count == 2
+
+    def test_partial_failure_returns_snapshots_and_warns(self, caplog):
+        counts = [100, 50, 10, None, None, None]
+        with caplog.at_level(logging.WARNING, logger="jobapply.search"):
+            result, _ = self._run(["SRE", "DevOps"], counts)
+        assert len(result) == 2
+        assert result[0]["total_results"] == 100
+        assert result[1]["total_results"] is None
+        assert "1 of 2" in caplog.text
+
+    def test_all_titles_succeed_returns_snapshots_without_warnings(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="jobapply.search"):
+            result, save_log = self._run(["SRE"], [100, 50, 10])
+        assert len(result) == 1
+        assert result[0]["total_results"] == 100
+        assert result[0]["past_week_results"] == 50
+        assert result[0]["past_day_results"] == 10
+        assert "returned no counts" not in caplog.text
+        assert save_log.call_count == 1

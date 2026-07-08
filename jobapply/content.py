@@ -34,6 +34,21 @@ def score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     return {"match_score": score, "matched_skills": matched, "reasoning": "", "deal_breakers": []}
 
 
+# Structured-output schema for ai_score_job. Numeric bounds (minimum/maximum)
+# are not supported by the API schema validator, so the 0-1 clamp stays in Python.
+_SCORE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "number"},
+        "reasoning": {"type": "string"},
+        "matched_skills": {"type": "array", "items": {"type": "string"}},
+        "deal_breakers": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["score", "reasoning", "matched_skills", "deal_breakers"],
+    "additionalProperties": False,
+}
+
+
 def ai_score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     """
     Score a job against the applicant profile using Claude.
@@ -71,15 +86,13 @@ STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or tale
             model="claude-haiku-4-5",
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
+            output_config={"format": {"type": "json_schema", "schema": _SCORE_SCHEMA}},
         )
         stats.add_ai_tokens(response.usage)
-        raw = response.content[0].text.strip()
-        # Extract JSON even if Claude wraps it in markdown code fences
-        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not json_match:
-            raise ValueError(f"No JSON in response: {raw[:100]}")
-        result = json.loads(json_match.group())
-        result["match_score"] = round(float(result.get("score", 0.0)), 2)
+        # Structured output guarantees the first content block is valid JSON
+        result = json.loads(response.content[0].text)
+        # Schema can't enforce numeric bounds, so clamp to 0-1 here
+        result["match_score"] = round(min(1.0, max(0.0, float(result.get("score", 0.0)))), 2)
         return result
     except Exception as e:
         log.warning(f"   AI scoring failed, using keyword fallback: {e}")

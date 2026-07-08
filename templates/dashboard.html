@@ -269,12 +269,34 @@
         }
 
         .refresh-btn:hover { border-color: var(--accent); color: var(--text); }
+
+        /* -- Stale snapshot warning banner -------------------------------- */
+        .stale-banner {
+            background: rgba(251, 191, 36, 0.12);
+            border: 1px solid var(--amber);
+            color: var(--amber);
+            border-radius: 10px;
+            padding: 0.75rem 1.25rem;
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+        }
     </style>
 </head>
 <body>
 
 <h1>LinkedIn Easy Apply Dashboard</h1>
 <p class="subtitle">{{ log_file }} &middot; <button class="refresh-btn" onclick="location.reload()">Refresh</button></p>
+
+{% if stale_snapshot %}
+<div class="stale-banner">
+    ⚠️
+    {% if stale_snapshot.last_snapshot %}
+    Market snapshot data is stale since {{ stale_snapshot.last_snapshot }}; LinkedIn session may have expired, see README.
+    {% else %}
+    No market snapshot data recorded; LinkedIn session may have expired, see README.
+    {% endif %}
+</div>
+{% endif %}
 
 <!-- Stat cards -->
 <div class="stats-row">

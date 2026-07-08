@@ -7,6 +7,7 @@ import json
 import logging
 import random
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -423,7 +424,11 @@ def _run_market_snapshot(args, parser) -> None:
         remote = "remote" in work_arrangement
     else:
         remote = args.remote
-    market_snapshot(titles, location=args.location, remote=remote, proxy=args.proxy)
+    snapshots = market_snapshot(titles, location=args.location, remote=remote, proxy=args.proxy)
+    if not snapshots:
+        # Every title failed (or nothing was scanned): exit non-zero so cron
+        # surfaces the failure instead of silently recording junk.
+        sys.exit(1)
 
 
 def _run_external_url(args) -> None:

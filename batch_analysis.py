@@ -13,10 +13,13 @@ Usage:
 
 import argparse
 import json
+import logging
 import re
 import subprocess  # nosec B404
 from collections import defaultdict
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
@@ -28,7 +31,9 @@ def _load_applications(since: str | None = None) -> list[dict]:
         return []
     apps = json.loads(LOG_FILE.read_text())
     if since:
-        apps = [a for a in apps if a.get("timestamp", "") >= since]
+        # Keep entries with no timestamp: they cannot be proven older than
+        # `since`, and silently dropping them would hide failures from analysis.
+        apps = [a for a in apps if not a.get("timestamp") or a["timestamp"] >= since]
     return apps
 
 
@@ -176,8 +181,12 @@ def _fingerprint_failure(app: dict) -> str:  # noqa: C901
     return f"{ats}:{cat or 'uncategorized'}"
 
 
-def _get_existing_issues() -> dict[str, dict]:
-    """Get existing open issues from GitHub, keyed by fingerprint in title."""
+def _get_existing_issues() -> dict[str, dict] | None:
+    """Get existing open issues from GitHub, keyed by fingerprint in title.
+
+    Returns None when the lookup fails: callers must treat that as "dedup
+    unavailable" and skip issue creation (duplicates are worse than a skip).
+    """
     try:
         result = subprocess.run(  # nosec B603 B607
             [
@@ -207,8 +216,9 @@ def _get_existing_issues() -> dict[str, dict]:
             if match:
                 existing[match.group(1)] = issue
         return existing
-    except Exception:
-        return {}
+    except Exception as e:
+        log.warning("Could not fetch existing GitHub issues (dedup unavailable): %s", e)
+        return None
 
 
 def _create_issue(fingerprint: str, apps: list[dict], dry_run: bool = False) -> str | None:
@@ -354,28 +364,39 @@ def analyze(since: str | None = None, dry_run: bool = False, min_count: int = 2)
         example = group[0].get("company", "?")[:20]
         print(f"{fp:<45} {len(group):>5}  {avg_score:>8.2f}  {example}")
 
-    # Get existing GitHub issues
+    # Get existing GitHub issues. None means the lookup failed: without the
+    # dedup list we would file duplicates, so skip issue creation this run.
     existing = _get_existing_issues()
 
-    # Create issues for patterns with enough occurrences
-    actionable = [
-        (fp, group) for fp, group in sorted_groups if len(group) >= min_count and fp not in existing
-    ]
-
-    if actionable:
-        print(f"\n📝 {len(actionable)} new patterns to file (min {min_count} occurrences):\n")
-        for fp, group in actionable:
-            print(f"  [{len(group)}x] {fp}")
-            _create_issue(fp, group, dry_run=dry_run)
+    if existing is None:
+        print(
+            "\n⚠️  Could not fetch existing GitHub issues (dedup unavailable). "
+            "Skipping issue creation for this run."
+        )
     else:
-        already = sum(1 for fp, _ in sorted_groups if fp in existing)
-        print(f"\n✅ No new patterns to file ({already} already tracked)")
+        # Create issues for patterns with enough occurrences
+        actionable = [
+            (fp, group)
+            for fp, group in sorted_groups
+            if len(group) >= min_count and fp not in existing
+        ]
 
-    # Flag high-value single failures (score >= 0.90)
+        if actionable:
+            print(f"\n📝 {len(actionable)} new patterns to file (min {min_count} occurrences):\n")
+            for fp, group in actionable:
+                print(f"  [{len(group)}x] {fp}")
+                _create_issue(fp, group, dry_run=dry_run)
+        else:
+            already = sum(1 for fp, _ in sorted_groups if fp in existing)
+            print(f"\n✅ No new patterns to file ({already} already tracked)")
+
+    # Flag high-value single failures (score >= 0.90). This section only
+    # prints (no issue creation), so with dedup unavailable list them all.
+    known = existing or {}
     high_value_singles = [
         (fp, group)
         for fp, group in sorted_groups
-        if len(group) == 1 and group[0].get("match_score", 0) >= 0.90 and fp not in existing
+        if len(group) == 1 and group[0].get("match_score", 0) >= 0.90 and fp not in known
     ]
     if high_value_singles:
         print(f"\n⚠️  {len(high_value_singles)} single high-value failures (score >= 0.90):")

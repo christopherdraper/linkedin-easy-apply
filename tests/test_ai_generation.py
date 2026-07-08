@@ -53,10 +53,25 @@ class TestAiScoreJob:
             result = ai_score_job(job, profile)
         assert result["match_score"] == 0.88
 
-    def test_json_extracted_from_markdown_fences(self, ai_client, profile, job):
-        with ai_client(f"```json\n{VALID_SCORE_JSON}\n```"):
-            result = ai_score_job(job, profile)
-        assert result["match_score"] == 0.9
+    def test_request_carries_output_config_schema(self, ai_client, profile, job):
+        from jobapply.content import _SCORE_SCHEMA
+
+        with ai_client(VALID_SCORE_JSON) as mock_client:
+            ai_score_job(job, profile)
+        kwargs = mock_client.return_value.messages.create.call_args.kwargs
+        assert kwargs["output_config"] == {
+            "format": {"type": "json_schema", "schema": _SCORE_SCHEMA}
+        }
+        schema = kwargs["output_config"]["format"]["schema"]
+        assert set(schema["required"]) == {"score", "reasoning", "matched_skills", "deal_breakers"}
+        assert schema["additionalProperties"] is False
+
+    def test_score_clamped_to_zero_one_range(self, ai_client, profile, job):
+        # The schema cannot enforce numeric bounds, so clamping happens in Python
+        with ai_client('{"score": 1.7, "reasoning": "overshoot"}'):
+            assert ai_score_job(job, profile)["match_score"] == 1.0
+        with ai_client('{"score": -0.4, "reasoning": "undershoot"}'):
+            assert ai_score_job(job, profile)["match_score"] == 0.0
 
     def test_deal_breakers_pass_through(self, ai_client, profile, job):
         raw = '{"score": 0.8, "reasoning": "agency", "deal_breakers": ["staffing_agency"]}'
@@ -71,11 +86,9 @@ class TestAiScoreJob:
             result = ai_score_job(job, profile)
         assert result["match_score"] == 0.0
 
-    def test_malformed_json_falls_back_to_keyword_score(self, ai_client, profile, job):
-        with ai_client("Sorry, I can't produce JSON right now."):
-            result = ai_score_job(job, profile)
-        assert result == score_job(job, profile)
-
+    # With structured outputs the response text is schema-enforced JSON, so a
+    # malformed body can only mean an API-level failure. The fallback is
+    # therefore pinned via an exception from messages.create (below).
     def test_api_exception_falls_back_to_keyword_score(self, ai_client, profile, job):
         with ai_client("ignored") as mock_client:
             mock_client.return_value.messages.create.side_effect = Exception("API down")

@@ -2,7 +2,7 @@
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -150,6 +150,19 @@ class TestBuildMarketStats:
         # But it is still kept in the history timeline
         assert len(stats["history"]["SRE"]) == 2
 
+    def test_unparseable_timestamp_first_is_replaced_by_parseable(self):
+        # A broken-timestamp entry sorts as oldest: even when it arrives
+        # first, any parseable entry takes over as latest, without crashing.
+        broken = {"search_title": "SRE", "total_results": 999, "timestamp": "yesterday-ish"}
+        parseable = {
+            "search_title": "SRE",
+            "total_results": 100,
+            "timestamp": "2026-06-01 08:00:00",
+        }
+        stats = dashboard._build_market_stats([broken, parseable])
+        assert stats["latest"]["SRE"] is parseable
+        assert len(stats["history"]["SRE"]) == 2
+
     def test_roles_sorted_by_total_results_desc(self):
         entries = [
             {"search_title": "SRE", "total_results": 120, "timestamp": "2026-06-01 08:00:00"},
@@ -178,6 +191,60 @@ class TestBuildMarketStats:
             [{"total_results": 5, "timestamp": "2026-06-01 08:00:00"}]
         )
         assert stats["roles"] == ["Unknown"]
+
+
+class TestSnapshotStaleness:
+    STALE_TEXT = b"Market snapshot data is stale since"
+    EMPTY_TEXT = b"No market snapshot data recorded"
+
+    def _snapshot(self, ts):
+        return {"search_title": "SRE", "total_results": 100, "timestamp": ts}
+
+    def test_check_fresh_returns_none(self):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        assert dashboard._check_snapshot_staleness([self._snapshot(now)]) is None
+
+    def test_check_stale_returns_last_timestamp(self):
+        old = (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")
+        info = dashboard._check_snapshot_staleness([self._snapshot(old)])
+        assert info == {"last_snapshot": old}
+
+    def test_check_empty_log_is_stale_without_timestamp(self):
+        assert dashboard._check_snapshot_staleness([]) == {"last_snapshot": None}
+
+    def test_check_uses_newest_entry(self):
+        old = (datetime.now() - timedelta(hours=100)).strftime("%Y-%m-%d %H:%M:%S")
+        fresh = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        assert (
+            dashboard._check_snapshot_staleness([self._snapshot(old), self._snapshot(fresh)])
+            is None
+        )
+
+    def test_check_unparseable_timestamps_treated_as_empty(self):
+        info = dashboard._check_snapshot_staleness([self._snapshot("garbage")])
+        assert info == {"last_snapshot": None}
+
+    def test_index_fresh_data_no_banner(self, client, data_dir):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _write_json(data_dir / "search_log.json", [self._snapshot(now)])
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert self.STALE_TEXT not in resp.data
+        assert self.EMPTY_TEXT not in resp.data
+
+    def test_index_stale_data_renders_banner(self, client, data_dir):
+        old = (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")
+        _write_json(data_dir / "search_log.json", [self._snapshot(old)])
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert self.STALE_TEXT in resp.data
+        assert old.encode() in resp.data
+        assert b"LinkedIn session may have expired" in resp.data
+
+    def test_index_empty_log_renders_banner(self, client, data_dir):
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert self.EMPTY_TEXT in resp.data
 
 
 class TestBuildStatusCounts:
@@ -417,12 +484,20 @@ class TestInterviewRoutes:
         interviews = json.loads((data_dir / "interviews.json").read_text())
         assert [i["job_id"] for i in interviews] == ["li_a2"]
 
-    def test_remove_without_file_writes_empty_list(self, client, data_dir):
-        # Suspicion: remove always rewrites interviews.json, creating an
-        # empty file even when nothing existed and nothing matched.
+    def test_remove_without_file_does_not_create_file(self, client, data_dir):
+        # Nothing matched and nothing existed: no empty interviews.json
         resp = client.post("/interview/remove/li_nope")
         assert resp.status_code == 302
-        assert json.loads((data_dir / "interviews.json").read_text()) == []
+        assert not (data_dir / "interviews.json").exists()
+
+    def test_remove_unknown_job_leaves_file_untouched(self, client, data_dir):
+        existing = [{"job_id": "li_a1", "added": "2026-06-01 09:00:00", "notes": ""}]
+        _write_json(data_dir / "interviews.json", existing)
+        before = (data_dir / "interviews.json").read_text()
+        resp = client.post("/interview/remove/li_nope")
+        assert resp.status_code == 302
+        # The file bytes are unchanged: no rewrite happened
+        assert (data_dir / "interviews.json").read_text() == before
 
     def test_update_changes_notes(self, client, data_dir):
         _write_json(
@@ -437,9 +512,16 @@ class TestInterviewRoutes:
     def test_update_unknown_job_leaves_entries_unchanged(self, client, data_dir):
         existing = [{"job_id": "li_a1", "added": "2026-06-01 09:00:00", "notes": "old"}]
         _write_json(data_dir / "interviews.json", existing)
+        before = (data_dir / "interviews.json").read_text()
         resp = client.post("/interview/update/li_nope", data={"notes": "new"})
         assert resp.status_code == 302
-        assert json.loads((data_dir / "interviews.json").read_text()) == existing
+        # The file bytes are unchanged: no rewrite happened
+        assert (data_dir / "interviews.json").read_text() == before
+
+    def test_update_without_file_does_not_create_file(self, client, data_dir):
+        resp = client.post("/interview/update/li_nope", data={"notes": "new"})
+        assert resp.status_code == 302
+        assert not (data_dir / "interviews.json").exists()
 
 
 class TestApiData:

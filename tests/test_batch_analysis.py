@@ -1,6 +1,7 @@
 """Tests for post-batch failure analysis (batch_analysis.py)."""
 
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -59,13 +60,14 @@ class TestLoadApplications:
         result = _load_applications(since="2026-06-01")
         assert [a["job_id"] for a in result] == ["new"]
 
-    def test_since_drops_entries_without_timestamp(self, ba_data_dir):
-        # Suspicion: entries missing a timestamp default to "" which never
-        # passes the >= since comparison, so they silently vanish.
+    def test_since_keeps_entries_without_timestamp(self, ba_data_dir):
+        # Entries missing a timestamp cannot be proven older than `since`,
+        # so they are kept in the analysis window rather than silently dropped.
         app = _failed_app(job_id="no_ts")
         del app["timestamp"]
         (ba_data_dir / "applications.json").write_text(json.dumps([app]))
-        assert _load_applications(since="2026-01-01") == []
+        result = _load_applications(since="2026-01-01")
+        assert [a["job_id"] for a in result] == ["no_ts"]
         assert len(_load_applications()) == 1
 
 
@@ -233,10 +235,13 @@ class TestGetExistingIssues:
         with patch("batch_analysis.subprocess.run", return_value=result_mock):
             assert _get_existing_issues() == {}
 
-    def test_subprocess_failure_returns_empty(self):
+    def test_subprocess_failure_returns_none_and_warns(self, caplog):
+        # None signals "dedup unavailable" so callers skip issue creation
         err = subprocess.CalledProcessError(1, ["gh"])
         with patch("batch_analysis.subprocess.run", side_effect=err):
-            assert _get_existing_issues() == {}
+            with caplog.at_level(logging.WARNING, logger="batch_analysis"):
+                assert _get_existing_issues() is None
+        assert "dedup unavailable" in caplog.text
 
 
 class TestCreateIssue:
@@ -311,3 +316,29 @@ class TestAnalyze:
         assert "WOULD CREATE: [greenhouse:captcha]" in out
         assert "1 single high-value failures" in out
         assert "lever:timeout" in out
+
+    def test_dedup_unavailable_skips_issue_creation(self, ba_data_dir, capsys):
+        # When the GitHub issue lookup fails, creating issues would duplicate
+        # already-tracked patterns, so the run must skip creation entirely.
+        apps = [_failed_app(job_id="f1"), _failed_app(job_id="f2")]
+        (ba_data_dir / "applications.json").write_text(json.dumps(apps))
+        with (
+            patch("batch_analysis._get_existing_issues", return_value=None),
+            patch("batch_analysis._create_issue") as create,
+        ):
+            analyze(dry_run=False, min_count=2)
+        create.assert_not_called()
+        out = capsys.readouterr().out
+        assert "Skipping issue creation" in out
+
+    def test_dedup_unavailable_still_prints_high_value_singles(self, ba_data_dir, capsys):
+        apps = [_failed_app(job_id="f1", match_score=0.95)]
+        (ba_data_dir / "applications.json").write_text(json.dumps(apps))
+        with (
+            patch("batch_analysis._get_existing_issues", return_value=None),
+            patch("batch_analysis._create_issue") as create,
+        ):
+            analyze(dry_run=False, min_count=2)
+        create.assert_not_called()
+        out = capsys.readouterr().out
+        assert "1 single high-value failures" in out
