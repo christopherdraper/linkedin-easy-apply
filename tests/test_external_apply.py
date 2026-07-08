@@ -111,7 +111,7 @@ class TestLoginWallDetection:
         profile = MagicMock(spec=ApplicantProfile)
         profile.resume_path = "/tmp/fake_resume.pdf"
 
-        with patch("job_search_apply.Path") as mock_path:
+        with patch("jobapply.pages.Path") as mock_path:
             mock_path.return_value.expanduser.return_value.exists.return_value = True
             mock_path.return_value.expanduser.return_value.name = "fake_resume.pdf"
             mock_path.return_value.expanduser.return_value.__str__ = lambda s: (
@@ -135,7 +135,7 @@ class TestLoginWallDetection:
         profile = MagicMock()
         profile.auto_create_accounts = True
 
-        with patch("job_search_apply._attempt_ats_login", return_value=True):
+        with patch("jobapply.pages._attempt_ats_login", return_value=True):
             assert _detect_login_page(page) is True
             assert _resolve_login_wall(page, profile) is True
 
@@ -170,14 +170,14 @@ class TestGetDomain:
 class TestAtsAccountStorage:
     def test_save_and_load(self, tmp_path):
         acct_file = tmp_path / "ats_accounts.json"
-        with patch("job_search_apply.ATS_ACCOUNTS_FILE", acct_file):
+        with patch("jobapply.accounts.ATS_ACCOUNTS_FILE", acct_file):
             _save_ats_account("jobs.bmc.com", "test@example.com", "SecretPass1!")
             accounts = _load_ats_accounts()
             assert "jobs.bmc.com" in accounts
             assert accounts["jobs.bmc.com"]["email"] == "test@example.com"
 
     def test_load_missing_file(self, tmp_path):
-        with patch("job_search_apply.ATS_ACCOUNTS_FILE", tmp_path / "missing.json"):
+        with patch("jobapply.accounts.ATS_ACCOUNTS_FILE", tmp_path / "missing.json"):
             assert _load_ats_accounts() == {}
 
 
@@ -221,7 +221,7 @@ class TestFillRegistrationForm:
 class TestAttemptAtsLogin:
     def test_no_stored_account(self):
         page = MagicMock()
-        with patch("job_search_apply._load_ats_accounts", return_value={}):
+        with patch("jobapply.accounts._load_ats_accounts", return_value={}):
             assert _attempt_ats_login(page, "unknown.com") is False
 
     def test_login_with_stored_creds(self):
@@ -251,7 +251,7 @@ class TestAttemptAtsLogin:
         page.query_selector.side_effect = qs
 
         accounts = {"jobs.example.com": {"email": "me@test.com", "password": "pw123"}}
-        with patch("job_search_apply._load_ats_accounts", return_value=accounts):
+        with patch("jobapply.accounts._load_ats_accounts", return_value=accounts):
             result = _attempt_ats_login(page, "jobs.example.com")
             assert result is True
             email_f.fill.assert_called_with("me@test.com")
@@ -305,7 +305,7 @@ class TestDetectSuccessOrConfirmation:
 
 class TestClassifyPage:
     def test_fallback_when_ai_unavailable(self):
-        with patch("job_search_apply._AI_AVAILABLE", False):
+        with patch("jobapply.pages._AI_AVAILABLE", False):
             result = _classify_page("some snapshot", "https://example.com")
             assert result["page_type"] == "form"
             assert result["has_form_fields"] is True
@@ -314,8 +314,8 @@ class TestClassifyPage:
         result = _classify_page("", "https://example.com")
         assert result["page_type"] == "form"
 
-    @patch("job_search_apply._get_ai_client")
-    @patch("job_search_apply._AI_AVAILABLE", True)
+    @patch("jobapply.pages._get_ai_client")
+    @patch("jobapply.pages._AI_AVAILABLE", True)
     def test_classifies_login_page(self, mock_client):
         mock_response = MagicMock()
         mock_response.content = [
@@ -329,8 +329,8 @@ class TestClassifyPage:
         assert result["page_type"] == "login"
         assert result["has_required_login"] is True
 
-    @patch("job_search_apply._get_ai_client")
-    @patch("job_search_apply._AI_AVAILABLE", True)
+    @patch("jobapply.pages._get_ai_client")
+    @patch("jobapply.pages._AI_AVAILABLE", True)
     def test_classifies_form_page(self, mock_client):
         mock_response = MagicMock()
         mock_response.content = [
@@ -344,8 +344,8 @@ class TestClassifyPage:
         assert result["page_type"] == "form"
         assert result["has_file_upload"] is True
 
-    @patch("job_search_apply._get_ai_client")
-    @patch("job_search_apply._AI_AVAILABLE", True)
+    @patch("jobapply.pages._get_ai_client")
+    @patch("jobapply.pages._AI_AVAILABLE", True)
     def test_handles_ai_exception(self, mock_client):
         mock_client.return_value.messages.create.side_effect = Exception("API error")
         result = _classify_page("some snapshot", "https://example.com")
@@ -554,8 +554,8 @@ class TestSolveCaptcha:
         info = {"type": "unknown", "sitekey": ""}
         assert _solve_captcha(page, info, "api-key") is False
 
-    @patch("job_search_apply._inject_captcha_token", return_value=True)
-    @patch("job_search_apply._2captcha_solve", return_value="solved-token-123")
+    @patch("jobapply.pages._inject_captcha_token", return_value=True)
+    @patch("jobapply.pages._2captcha_solve", return_value="solved-token-123")
     def test_2captcha_success(self, mock_solve, mock_inject):
         page = MagicMock()
         info = {"type": "recaptchav2", "sitekey": "site-key-abc"}
@@ -570,8 +570,8 @@ class TestSolveCaptcha:
         )
         mock_inject.assert_called_once_with(page, "recaptchav2", "solved-token-123")
 
-    @patch("job_search_apply._inject_captcha_token")
-    @patch("job_search_apply._capsolver_solve", return_value="cs-token")
+    @patch("jobapply.pages._inject_captcha_token")
+    @patch("jobapply.pages._capsolver_solve", return_value="cs-token")
     def test_capsolver_success(self, mock_solve, mock_inject):
         mock_inject.return_value = True
         page = MagicMock()
@@ -580,13 +580,13 @@ class TestSolveCaptcha:
         assert result is True
         mock_solve.assert_called_once_with("api-key", "hcaptcha", "hc-key", page.url)
 
-    @patch("job_search_apply._2captcha_solve", return_value=None)
+    @patch("jobapply.pages._2captcha_solve", return_value=None)
     def test_solve_failure_returns_false(self, mock_solve):
         page = MagicMock()
         info = {"type": "recaptchav2", "sitekey": "key"}
         assert _solve_captcha(page, info, "api-key") is False
 
-    @patch("job_search_apply._2captcha_solve", side_effect=Exception("network error"))
+    @patch("jobapply.pages._2captcha_solve", side_effect=Exception("network error"))
     def test_solve_exception_returns_false(self, mock_solve):
         page = MagicMock()
         info = {"type": "recaptchav2", "sitekey": "key"}

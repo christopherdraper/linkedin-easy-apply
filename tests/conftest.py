@@ -119,11 +119,16 @@ def ai_client():
         mock_response.content = [MagicMock(text=response_text)]
         mock_response.usage.input_tokens = input_tokens
         mock_response.usage.output_tokens = output_tokens
+        mock_client = MagicMock()
+        mock_client.return_value.messages.create.return_value = mock_response
+        # Patch both namespaces: facade-resident readers (ai_score_job, ...) resolve
+        # through job_search_apply; _ai_answer_question resolves through jobapply.forms.
         with (
             patch("job_search_apply._AI_AVAILABLE", True),
-            patch("job_search_apply._get_ai_client") as mock_client,
+            patch("jobapply.forms._AI_AVAILABLE", True),
+            patch("job_search_apply._get_ai_client", mock_client),
+            patch("jobapply.forms._get_ai_client", mock_client),
         ):
-            mock_client.return_value.messages.create.return_value = mock_response
             yield mock_client
 
     return _patched

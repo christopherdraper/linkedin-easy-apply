@@ -291,5 +291,5 @@ class TestAiAnswerQuestion:
         assert result is None
 
     def test_ai_unavailable_returns_none(self, profile):
-        with patch("job_search_apply._AI_AVAILABLE", False):
+        with patch("jobapply.forms._AI_AVAILABLE", False):
             assert _ai_answer_question("Desired salary?", profile) is None
