@@ -197,7 +197,10 @@ def data_dir(tmp_path, monkeypatch):
     ~/.local/share/job-apply. Returns the tmp_path."""
     import dashboard
     import job_search_apply
+    import jobapply.browser
 
+    monkeypatch.setattr(jobapply.browser, "SESSION_FILE", tmp_path / "session.json")
+    monkeypatch.setattr(jobapply.browser, "CREDENTIALS_FILE", tmp_path / "credentials.json")
     monkeypatch.setattr(job_search_apply, "DATA_DIR", tmp_path)
     monkeypatch.setattr(job_search_apply, "LOG_FILE", tmp_path / "applications.json")
     monkeypatch.setattr(job_search_apply, "SEARCH_LOG_FILE", tmp_path / "search_log.json")

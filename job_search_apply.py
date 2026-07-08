@@ -13,648 +13,109 @@ import os
 import random
 import re
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ats_handlers import get_handler
+from jobapply import stats
+from jobapply.ai import _AI_AVAILABLE, _get_ai_client
+from jobapply.browser import (
+    _STEALTH,
+    _USER_AGENTS,
+    _dismiss_linkedin_overlays,
+    _ensure_logged_in,
+    _human_delay,
+    _inject_session_cookies_if_needed,
+    _load_credentials,
+    _login_linkedin,
+    _playwright_context,
+    _resolve_proxy,
+    _save_credentials,
+    _save_session,
+    _stealth_playwright,
+)
+from jobapply.config import (
+    ATS_ACCOUNTS_FILE,
+    CDP_URL,
+    COVER_LETTER_DIR,
+    CREDENTIALS_FILE,
+    DATA_DIR,
+    DEBUG_DIR,
+    DEEP_APPLY_QUEUE_FILE,
+    LOG_FILE,
+    SEARCH_LOG_FILE,
+    SESSION_FILE,
+)
+from jobapply.profile import (
+    _STATE_NAMES,
+    ApplicantProfile,
+    JobSearchParams,
+    _format_previous_employers,
+    _profile_summary,
+)
+from jobapply.safety import (
+    _ABORT_FIELD_PATTERNS,
+    _INJECTION_PATTERNS,
+    ApplicationAbortError,
+    _check_field_label,
+    _looks_like_injection,
+    _sanitize_description,
+)
+from jobapply.stats import (
+    _ATS_PATTERNS,
+    _categorize_failure,
+    _compute_cost_usd,
+    _detect_ats_platform,
+)
 
-try:
-    import anthropic as _anthropic
-
-    _AI_AVAILABLE = True
-except ImportError:
-    _AI_AVAILABLE = False
-
-try:
-    from playwright_stealth import Stealth
-
-    _STEALTH = Stealth()
-except ImportError:
-    _STEALTH = None
-
-_ai_client = None
-
-
-def _get_ai_client():
-    """Return a shared Anthropic client instance (created once, reused across calls)."""
-    global _ai_client  # noqa: PLW0603
-    if _ai_client is None:
-        _ai_client = _anthropic.Anthropic()
-    return _ai_client
-
-
-DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
-LOG_FILE = DATA_DIR / "applications.json"
-SEARCH_LOG_FILE = DATA_DIR / "search_log.json"
-
-# Per-application field fill tracker — cleared at start of each application
-_field_fills: List[Dict[str, str]] = []
-# Per-application AI answer failure tracker — cleared alongside _field_fills
-_ai_answer_failures: List[Dict[str, str]] = []
-# Per-application timing — set at start of submit, read at log time
-_apply_start_time: float = 0.0
-# Per-application AI token usage — cleared at start of each submit
-_ai_tokens_in: int = 0
-_ai_tokens_out: int = 0
-_final_ats_url: str = ""
-COVER_LETTER_DIR = DATA_DIR / "cover-letters"
-SESSION_FILE = DATA_DIR / "sessions" / "linkedin.json"
-CREDENTIALS_FILE = DATA_DIR / "credentials.json"
-ATS_ACCOUNTS_FILE = DATA_DIR / "ats_accounts.json"
-CDP_URL = "http://localhost:9222"
+# Facade re-exports: external consumers (ats_handlers/, assisted_apply_mcp.py,
+# dashboard.py, tests/) import these names from job_search_apply. Listing them
+# in __all__ marks them as intentionally exported for vulture and readers.
+__all__ = [
+    "ApplicantProfile",
+    "ApplicationAbortError",
+    "JobSearchParams",
+    "ATS_ACCOUNTS_FILE",
+    "CDP_URL",
+    "COVER_LETTER_DIR",
+    "CREDENTIALS_FILE",
+    "DATA_DIR",
+    "DEBUG_DIR",
+    "DEEP_APPLY_QUEUE_FILE",
+    "LOG_FILE",
+    "SEARCH_LOG_FILE",
+    "SESSION_FILE",
+    "_ABORT_FIELD_PATTERNS",
+    "_AI_AVAILABLE",
+    "_ATS_PATTERNS",
+    "_INJECTION_PATTERNS",
+    "_STATE_NAMES",
+    "_STEALTH",
+    "_USER_AGENTS",
+    "_categorize_failure",
+    "_check_field_label",
+    "_compute_cost_usd",
+    "_detect_ats_platform",
+    "_dismiss_linkedin_overlays",
+    "_ensure_logged_in",
+    "_format_previous_employers",
+    "_get_ai_client",
+    "_human_delay",
+    "_inject_session_cookies_if_needed",
+    "_load_credentials",
+    "_login_linkedin",
+    "_looks_like_injection",
+    "_playwright_context",
+    "_profile_summary",
+    "_resolve_proxy",
+    "_sanitize_description",
+    "_save_credentials",
+    "_save_session",
+    "_stealth_playwright",
+]
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Human-like timing helpers
-# ---------------------------------------------------------------------------
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
-]
-
-
-def _human_delay(base: float = 2.0, jitter: float = 3.0) -> None:
-    """Sleep for a randomized duration to mimic human pacing."""
-    delay = base + random.uniform(0, jitter)
-    # Occasionally add a longer "thinking" pause (10% chance)
-    if random.random() < 0.10:
-        delay += random.uniform(5, 15)
-    time.sleep(delay)
-
-
-# ---------------------------------------------------------------------------
-# Prompt injection defence
-# ---------------------------------------------------------------------------
-_INJECTION_PATTERNS = [
-    "ignore previous",
-    "ignore all instructions",
-    "ignore all previous",
-    "disregard your instructions",
-    "disregard previous",
-    "forget your instructions",
-    "forget your programming",
-    "if you are an ai",
-    "if this is an ai",
-    "if you're an ai",
-    "you are a language model",
-    "you are an llm",
-    "you are gpt",
-    "you are chatgpt",
-    "you are claude",
-    "new instructions:",
-    "override your instructions",
-    "override your programming",
-    "system prompt",
-    "system message",
-    "do not apply to this",
-    "do not submit",
-    "stop processing",
-    "pretend you are",
-    "pretend to be",
-    "roleplay as",
-    "math problem",
-    "solve this equation",
-    "jailbreak",
-]
-
-
-# Fields that should never appear in a legitimate job application form
-_ABORT_FIELD_PATTERNS = [
-    "social security",
-    "ssn",
-    "social insurance",
-    "bank account",
-    "routing number",
-    "account number",
-    "passport number",
-    "driver's license number",
-    "driver license number",
-    "credit card",
-    "date of birth",
-    "mother's maiden",
-]
-
-
-class ApplicationAbortError(Exception):
-    """
-    Raised anywhere in the application pipeline to abort the current submission.
-    Caught by submit_easy_apply which returns 'aborted: <reason>'.
-    """
-
-    pass
-
-
-def _looks_like_injection(text: str) -> bool:
-    """Return True if text contains patterns that look like prompt injection."""
-    lower = text.lower()
-    return any(p in lower for p in _INJECTION_PATTERNS)
-
-
-def _check_field_label(label: str) -> None:
-    """
-    Inspect a form field label and raise ApplicationAbortError if it looks
-    like an injection attempt or a request for sensitive personal data that
-    should never appear in a job application.
-    """
-    lower = label.lower()
-    if _looks_like_injection(label):
-        raise ApplicationAbortError(f"Prompt injection detected in form field: {label[:80]!r}")
-    for pattern in _ABORT_FIELD_PATTERNS:
-        if pattern in lower:
-            raise ApplicationAbortError(
-                f"Form requested sensitive data — suspicious posting: field contains {pattern!r}"
-            )
-
-
-def _sanitize_description(text: str) -> str:
-    """
-    Strip lines from a job description that look like prompt injection attempts.
-    Logs a warning for each removed line so suspicious postings are visible.
-    """
-    clean = []
-    for line in text.splitlines():
-        if _looks_like_injection(line):
-            log.warning(
-                f"   ⚠️  Possible prompt injection removed from job description: {line[:80]!r}"
-            )
-            clean.append("[line removed]")
-        else:
-            clean.append(line)
-    return "\n".join(clean)
-
-
-@dataclass
-class JobSearchParams:
-    title: str
-    location: Optional[str] = None
-    remote: bool = True
-    max_age_days: Optional[int] = 3  # Only show jobs posted within this many days
-    keywords_excluded: List[str] = field(default_factory=list)
-    company_blacklist: List[str] = field(default_factory=list)
-
-
-@dataclass
-class ApplicantProfile:
-    full_name: str
-    email: str
-    phone: str
-    resume_path: str
-    cover_letter_template: Optional[str] = None
-    linkedin_url: Optional[str] = None
-    github_url: Optional[str] = None
-    years_experience: Optional[int] = None
-    current_title: Optional[str] = None
-    current_employer: Optional[str] = None
-    previous_employers: List[Dict] = field(default_factory=list)
-    city: Optional[str] = None
-    state: Optional[str] = None
-    zip_code: Optional[str] = None
-    country: Optional[str] = None
-    skills: List[str] = field(default_factory=list)
-    specializations: List[str] = field(default_factory=list)
-    authorized_to_work: bool = True
-    requires_sponsorship: bool = False
-    screening_answers: Dict[str, str] = field(default_factory=dict)
-    gmail_app_password: Optional[str] = None
-    message_hiring_manager: bool = False
-    education_degree: Optional[str] = None
-    education_university: Optional[str] = None
-    education_year: Optional[int] = None
-    auto_create_accounts: bool = False
-    captcha_api_key: Optional[str] = None
-    captcha_service: str = "2captcha"
-    proxy_rules: Dict[str, str] = field(default_factory=dict)  # ATS domain → proxy URL
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "ApplicantProfile":
-        p = data.get("profile", data)
-        personal = p.get("personal", p)
-        location = personal.get("location", {})
-        work_auth = p.get("work_authorization", {})
-        exp = p.get("experience", {})
-        docs = p.get("documents", {})
-        skills_data = p.get("skills", {})
-        all_skills = (
-            skills_data.get("programming_languages", [])
-            + skills_data.get("frameworks", [])
-            + skills_data.get("tools", [])
-        )
-        resume_path = docs.get("resume_path", "")
-        if resume_path:
-            resolved = Path(resume_path).expanduser()
-            if not resolved.exists():
-                log.warning(f"⚠️  Resume not found at {resolved} — file uploads will fail")
-
-        cover_letter_template = None
-        cl_path = docs.get("cover_letter_template_path")
-        if cl_path:
-            cl_file = Path(cl_path).expanduser()
-            if cl_file.exists():
-                cover_letter_template = cl_file.read_text()
-
-        edu = p.get("education", {})
-
-        return cls(
-            full_name=personal.get("full_name", ""),
-            email=personal.get("email", ""),
-            phone=personal.get("phone", ""),
-            resume_path=docs.get("resume_path", ""),
-            cover_letter_template=cover_letter_template,
-            linkedin_url=personal.get("linkedin_url"),
-            github_url=personal.get("github_url"),
-            years_experience=exp.get("years_total"),
-            current_title=exp.get("current_title"),
-            current_employer=exp.get("current_employer"),
-            previous_employers=exp.get("previous_employers", []),
-            city=location.get("city"),
-            state=location.get("state"),
-            zip_code=location.get("zip_code"),
-            country=location.get("country"),
-            skills=all_skills,
-            specializations=exp.get("specializations", []),
-            authorized_to_work=work_auth.get("authorized_to_work_us", True),
-            requires_sponsorship=work_auth.get("requires_visa_sponsorship", False),
-            screening_answers=p.get("screening_answers", {}),
-            gmail_app_password=(
-                p.get("application_settings", {}).get("gmail_app_password")
-                if p.get("application_settings", {}).get("auto_fetch_verification_codes")
-                else None
-            ),
-            message_hiring_manager=bool(
-                p.get("application_settings", {}).get("message_hiring_manager")
-            ),
-            education_degree=edu.get("highest_degree"),
-            education_university=edu.get("university"),
-            education_year=edu.get("graduation_year"),
-            auto_create_accounts=bool(
-                p.get("application_settings", {}).get("auto_create_accounts")
-            ),
-            captcha_api_key=p.get("application_settings", {}).get("captcha_api_key"),
-            captcha_service=p.get("application_settings", {}).get("captcha_service", "2captcha"),
-            proxy_rules=p.get("application_settings", {}).get("proxy_rules", {}),
-        )
-
-    @classmethod
-    def from_json(cls, path: str) -> "ApplicantProfile":
-        return cls.from_dict(json.loads(Path(path).expanduser().read_text()))
-
-
-def _format_previous_employers(profile: ApplicantProfile) -> str:
-    if not profile.previous_employers:
-        return "none listed"
-    parts = []
-    for pe in profile.previous_employers:
-        entry = f"{pe.get('title', 'Unknown')} at {pe.get('employer', 'Unknown')}"
-        if pe.get("industry"):
-            entry += f" ({pe['industry']})"
-        parts.append(entry)
-    return "; ".join(parts)
-
-
-def _profile_summary(profile: ApplicantProfile) -> str:
-    """Build a text summary of the applicant for use in AI prompts."""
-    location_parts = [p for p in [profile.city, profile.state] if p]
-    loc_suffix = f" {profile.zip_code}" if profile.zip_code else ""
-    country_line = f"\nCountry: {profile.country}" if profile.country else ""
-
-    # Education
-    edu_parts = []
-    if profile.education_degree:
-        edu_parts.append(profile.education_degree)
-    if profile.education_university:
-        edu_parts.append(profile.education_university)
-    if profile.education_year:
-        edu_parts.append(str(profile.education_year))
-    edu_line = ", ".join(edu_parts) if edu_parts else "not provided"
-
-    # Clearance from screening_answers
-    clearance = "none"
-    for key, val in profile.screening_answers.items():
-        if "clearance" in key.lower() or "security" in key.lower():
-            clearance = val
-            break
-
-    return f"""Name: {profile.full_name}
-Email: {profile.email}
-Phone: {profile.phone}
-Location: {", ".join(location_parts) or "not provided"}{loc_suffix}{country_line}
-LinkedIn: {profile.linkedin_url or "not provided"}
-GitHub: {profile.github_url or "not provided"}
-Current title: {profile.current_title or "not provided"}
-Current employer: {profile.current_employer or "not provided"}
-Previous roles: {_format_previous_employers(profile)}
-Total years of experience: {profile.years_experience}
-Specializations: {", ".join(profile.specializations)}
-Skills & tools: {", ".join(profile.skills)}
-Education: {edu_line}
-Security clearance: {clearance}
-Authorized to work in US: {profile.authorized_to_work}
-Requires sponsorship: {profile.requires_sponsorship}"""
-
-
-_STATE_NAMES = {
-    "AL": "Alabama",
-    "AK": "Alaska",
-    "AZ": "Arizona",
-    "AR": "Arkansas",
-    "CA": "California",
-    "CO": "Colorado",
-    "CT": "Connecticut",
-    "DE": "Delaware",
-    "FL": "Florida",
-    "GA": "Georgia",
-    "HI": "Hawaii",
-    "ID": "Idaho",
-    "IL": "Illinois",
-    "IN": "Indiana",
-    "IA": "Iowa",
-    "KS": "Kansas",
-    "KY": "Kentucky",
-    "LA": "Louisiana",
-    "ME": "Maine",
-    "MD": "Maryland",
-    "MA": "Massachusetts",
-    "MI": "Michigan",
-    "MN": "Minnesota",
-    "MS": "Mississippi",
-    "MO": "Missouri",
-    "MT": "Montana",
-    "NE": "Nebraska",
-    "NV": "Nevada",
-    "NH": "New Hampshire",
-    "NJ": "New Jersey",
-    "NM": "New Mexico",
-    "NY": "New York",
-    "NC": "North Carolina",
-    "ND": "North Dakota",
-    "OH": "Ohio",
-    "OK": "Oklahoma",
-    "OR": "Oregon",
-    "PA": "Pennsylvania",
-    "RI": "Rhode Island",
-    "SC": "South Carolina",
-    "SD": "South Dakota",
-    "TN": "Tennessee",
-    "TX": "Texas",
-    "UT": "Utah",
-    "VT": "Vermont",
-    "VA": "Virginia",
-    "WA": "Washington",
-    "WV": "West Virginia",
-    "WI": "Wisconsin",
-    "WY": "Wyoming",
-}
-
-
-def _save_session(context) -> None:
-    """Save Playwright session cookies with restricted file permissions (owner-only)."""
-    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    context.storage_state(path=str(SESSION_FILE))
-    os.chmod(SESSION_FILE, 0o600)
-
-
-def _load_credentials() -> Optional[Dict[str, str]]:
-    """Load LinkedIn credentials from the credentials file."""
-    if not CREDENTIALS_FILE.exists():
-        return None
-    try:
-        creds = json.loads(CREDENTIALS_FILE.read_text())
-        if creds.get("email") and creds.get("password"):
-            return creds
-    except (json.JSONDecodeError, KeyError):
-        pass
-    return None
-
-
-def _save_credentials(email: str, password: str) -> None:
-    """Save LinkedIn credentials with restricted file permissions (owner-only)."""
-    CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CREDENTIALS_FILE.write_text(json.dumps({"email": email, "password": password}))
-    os.chmod(CREDENTIALS_FILE, 0o600)
-
-
-def _login_linkedin(page) -> bool:
-    """
-    Automate LinkedIn login using stored credentials.
-    Handles email/password entry and verification challenges.
-    Returns True if login succeeded, False otherwise.
-    """
-    creds = _load_credentials()
-    if not creds:
-        log.warning("⚠️  No credentials stored. Run with --setup to save LinkedIn credentials.")
-        return False
-
-    log.info("🔑 Logging into LinkedIn...")
-
-    # Navigate to login page if not already there
-    current = page.url
-    if "login" not in current and "authwall" not in current:
-        page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(2000)
-
-    # Fill login form
-    email_field = page.query_selector("input#username, input[name='session_key']")
-    pass_field = page.query_selector("input#password, input[name='session_password']")
-    if not email_field or not pass_field:
-        log.error("❌ Could not find login form fields")
-        return False
-
-    email_field.fill(creds["email"])
-    page.wait_for_timeout(500)
-    pass_field.fill(creds["password"])
-    page.wait_for_timeout(500)
-
-    submit = page.query_selector(
-        "button[type='submit'], button[aria-label='Sign in'], button:has-text('Sign in')"
-    )
-    if submit:
-        submit.click()
-    else:
-        pass_field.press("Enter")
-
-    page.wait_for_timeout(4000)
-
-    # Check if we landed on the feed (success)
-    if "/feed" in page.url or "/jobs" in page.url:
-        log.info("✅ Login successful")
-        return True
-
-    # Check for verification challenge
-    if "checkpoint" in page.url or "challenge" in page.url:
-        log.info("🔐 LinkedIn requires verification — check your email/phone for a code")
-        for attempt in range(3):
-            code = input("   Enter verification code (or 'skip' to abort): ").strip()
-            if code.lower() == "skip":
-                return False
-            code_input = page.query_selector(
-                "input#input__email_verification_pin, "
-                "input[name='pin'], "
-                "input#input__phone_verification_pin"
-            )
-            if code_input:
-                code_input.fill(code)
-                verify_btn = page.query_selector(
-                    "button#email-pin-submit-button, "
-                    "button[type='submit'], "
-                    "button:has-text('Submit'), "
-                    "button:has-text('Verify')"
-                )
-                if verify_btn:
-                    verify_btn.click()
-                else:
-                    code_input.press("Enter")
-                page.wait_for_timeout(3000)
-
-                if "/feed" in page.url or "/jobs" in page.url:
-                    log.info("✅ Verification successful")
-                    return True
-                log.warning(f"   ❌ Verification failed (attempt {attempt + 1}/3)")
-            else:
-                log.error("   ❌ Could not find verification code input field")
-                return False
-        return False
-
-    # Check for wrong password
-    error_el = page.query_selector(
-        "[id*='error'], .alert-content, [role='alert'], p.form__label--error"
-    )
-    if error_el:
-        error_text = error_el.inner_text().strip()
-        log.error(f"❌ Login failed: {error_text}")
-        return False
-
-    log.warning(f"⚠️  Unexpected page after login: {page.url}")
-    return False
-
-
-def _stealth_playwright():
-    """Return a stealth-wrapped sync_playwright() context manager if available."""
-    from playwright.sync_api import sync_playwright
-
-    if _STEALTH is not None:
-        return _STEALTH.use_sync(sync_playwright())
-    return sync_playwright()
-
-
-def _resolve_proxy(
-    url: str,
-    proxy_rules: Dict[str, str],
-    cli_proxy: Optional[str] = None,
-    extra_urls: Optional[List[str]] = None,
-) -> Optional[str]:
-    """Pick a proxy for *url* based on per-ATS rules, falling back to CLI proxy.
-
-    Also checks *extra_urls* (e.g. listing_url, description URLs) so that
-    LinkedIn->SmartRecruiters redirects get the right proxy upfront.
-    """
-    if proxy_rules:
-        from urllib.parse import urlparse
-
-        all_urls = [url] + (extra_urls or [])
-        for check_url in all_urls:
-            host = urlparse(check_url).hostname or ""
-            for pattern, proxy_url in proxy_rules.items():
-                if pattern in host:
-                    log.debug("Proxy rule matched: %s -> %s", pattern, proxy_url)
-                    return proxy_url
-    return cli_proxy
-
-
-def _inject_session_cookies_if_needed(context) -> None:
-    """Inject stored LinkedIn session cookies into a CDP context if auth is missing.
-
-    When connecting to a shared Chromium via CDP, the context may lack the li_at
-    authentication cookie, causing pages to render in guest/public mode. This
-    loads cookies from the stored session file to restore authentication.
-    """
-    try:
-        existing = context.cookies("https://www.linkedin.com")
-        has_auth = any(c["name"] == "li_at" for c in existing)
-        if has_auth:
-            return
-        if not SESSION_FILE.exists():
-            log.debug("No session file to inject cookies from")
-            return
-        session_data = json.loads(SESSION_FILE.read_text())
-        cookies = session_data.get("cookies", [])
-        if not cookies:
-            return
-        # Filter to LinkedIn cookies only
-        li_cookies = [c for c in cookies if ".linkedin.com" in c.get("domain", "")]
-        if li_cookies:
-            context.add_cookies(li_cookies)
-            log.debug(
-                "Injected %d LinkedIn cookies from session file into CDP context", len(li_cookies)
-            )
-    except Exception as exc:
-        log.debug("Cookie injection failed (non-critical): %s", exc)
-
-
-def _playwright_context(p, proxy: Optional[str] = None, headed: bool = False):
-    """
-    Connect to an existing Chromium via CDP if available, otherwise launch a new one.
-
-    Returns (browser, context, page, owns_browser) where owns_browser is False
-    when connected via CDP (caller must NOT close the browser).
-
-    *headed* launches a visible browser (use with Xvfb on servers) which bypasses
-    advanced anti-bot fingerprinting (e.g. DataDome).
-    """
-    # Try connecting to an already-running Chromium (preserves live LinkedIn session)
-    # Skip CDP when a proxy is specified -- CDP browser doesn't route through it.
-    if not headed and not proxy:
-        try:
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            # Inject stored session cookies if CDP context is missing LinkedIn auth
-            _inject_session_cookies_if_needed(context)
-            page = context.new_page()
-            log.debug("Connected to existing Chromium via CDP (%s)", CDP_URL)
-            return browser, context, page, False
-        except Exception:  # noqa: S110
-            log.debug("CDP connection unavailable, falling back to standalone browser")
-
-    # Fallback: launch a standalone browser with stored cookies
-    opts = {}
-    if SESSION_FILE.exists():
-        opts["storage_state"] = str(SESSION_FILE)
-    if proxy:
-        opts["proxy"] = {"server": proxy}
-
-    launch_args = ["--disable-blink-features=AutomationControlled"]
-    if not headed:
-        launch_args.insert(0, "--headless=new")
-
-    browser = p.chromium.launch(
-        headless=not headed,
-        args=launch_args,
-    )
-    # Randomize viewport slightly so sessions aren't identical
-    vp_w = random.randint(1260, 1380)
-    vp_h = random.randint(780, 900)
-    context = browser.new_context(
-        **opts,
-        user_agent=random.choice(_USER_AGENTS),
-        viewport={"width": vp_w, "height": vp_h},
-        locale="en-US",
-        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-    )
-    # Stealth plugin handles webdriver override + fingerprint evasions automatically
-    # Only add manual fallback if stealth is not available
-    if _STEALTH is None:
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        """)
-    page = context.new_page()
-    mode = "headed (Xvfb)" if headed else "headless"
-    log.debug("Launched standalone %s Chromium (cookie file)", mode)
-    return browser, context, page, True
 
 
 def _fetch_description(context, url: str) -> tuple:
@@ -794,64 +255,6 @@ def _parse_job_cards(page) -> List[Dict]:
             log.debug("Skipping malformed job card: %s", exc)
             continue
     return jobs
-
-
-def _dismiss_linkedin_overlays(page) -> None:
-    """Dismiss cookie consent banners and sign-in modals on LinkedIn search pages.
-
-    When connecting via CDP to a shared browser, new tabs may render the public
-    (guest) view with cookie consent and 'Sign in to view more jobs' overlays
-    that block job card rendering.
-    """
-    page.wait_for_timeout(1500)
-
-    # 1. Dismiss cookie consent banner
-    try:
-        cookie_btn = page.query_selector(
-            "[data-tracking-control-name='ga-cookie.consent.accept.v4'], "
-            "button.artdeco-global-alert-action:has-text('Accept')"
-        )
-        if cookie_btn and cookie_btn.is_visible():
-            cookie_btn.click()
-            log.debug("Dismissed LinkedIn cookie consent banner")
-            page.wait_for_timeout(500)
-    except Exception:  # noqa: S110
-        pass
-
-    # 2. Dismiss 'Sign in to view more jobs' modal
-    try:
-        modal_close = page.query_selector(
-            "button.modal__dismiss[aria-label='Dismiss'], "
-            "[data-tracking-control-name='public_jobs_contextual-sign-in-modal_modal_dismiss']"
-        )
-        if modal_close and modal_close.is_visible():
-            modal_close.click()
-            log.debug("Dismissed LinkedIn sign-in modal")
-            page.wait_for_timeout(500)
-    except Exception:  # noqa: S110
-        pass
-
-    # 3. Fallback: press Escape for any remaining modal
-    try:
-        modal = page.query_selector("[role='dialog']")
-        if modal and modal.is_visible():
-            page.keyboard.press("Escape")
-            log.debug("Dismissed LinkedIn overlay via Escape key")
-            page.wait_for_timeout(500)
-    except Exception:  # noqa: S110
-        pass
-
-
-def _ensure_logged_in(page, target_url: str) -> None:
-    """Check if LinkedIn redirected to auth wall and attempt auto-login. Raises on failure."""
-    if "authwall" not in page.url and "uas/login" not in page.url:
-        return
-    if not _login_linkedin(page):
-        raise RuntimeError(f"LinkedIn session expired. Redirected to: {page.url}")
-    # Re-navigate to the intended page after login
-    page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-    if "authwall" in page.url or "uas/login" in page.url:
-        raise RuntimeError("Login succeeded but still redirected to auth wall")
 
 
 def search_remoteok(params: JobSearchParams) -> List[Dict]:
@@ -1518,7 +921,6 @@ def ai_score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     Returns score (0-1), reasoning, matched skills, and any deal-breakers.
     Falls back to keyword scoring if AI is unavailable.
     """
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE:
         return score_job(job, profile)
 
@@ -1551,8 +953,7 @@ STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or tale
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
         )
-        _ai_tokens_in += response.usage.input_tokens
-        _ai_tokens_out += response.usage.output_tokens
+        stats.add_ai_tokens(response.usage)
         raw = response.content[0].text.strip()
         # Extract JSON even if Claude wraps it in markdown code fences
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -1601,7 +1002,6 @@ def ai_generate_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
     Generate a personalized cover letter using Claude, guided by the template and its instructions.
     Falls back to basic template substitution if AI is unavailable.
     """
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE or not profile.cover_letter_template:
         return _basic_cover_letter(job, profile)
 
@@ -1645,8 +1045,7 @@ IMPORTANT: Never use em dashes (—) or double dashes (--). Use commas, periods,
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
-        _ai_tokens_in += response.usage.input_tokens
-        _ai_tokens_out += response.usage.output_tokens
+        stats.add_ai_tokens(response.usage)
         text = response.content[0].text.strip()
         # Strip em dashes — they scream "AI-written"
         text = (
@@ -1688,7 +1087,6 @@ def ai_build_notes(job: Dict, compat: Dict) -> str:
     what the role is, what they're looking for, and any flags.
     Falls back to raw field dump if AI is unavailable.
     """
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE:
         return _basic_notes(job, compat)
 
@@ -1713,8 +1111,7 @@ Cover: what the company does, what the role involves day-to-day, what stack/tool
             max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
         )
-        _ai_tokens_in += response.usage.input_tokens
-        _ai_tokens_out += response.usage.output_tokens
+        stats.add_ai_tokens(response.usage)
         notes = response.content[0].text.strip()
         # Append deal-breakers if any, so they're always visible
         if deal_breakers:
@@ -1803,7 +1200,6 @@ def _ai_draft_hiring_message(
     job: Dict, profile: "ApplicantProfile", poster_name: str
 ) -> Optional[str]:
     """Draft a short personalized message to the hiring manager using Claude."""
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE:
         return None
     try:
@@ -1835,8 +1231,7 @@ Guidelines:
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
-        _ai_tokens_in += response.usage.input_tokens
-        _ai_tokens_out += response.usage.output_tokens
+        stats.add_ai_tokens(response.usage)
         msg = response.content[0].text.strip()
         # Strip em dashes — they scream "AI-written"
         msg = msg.replace(" — ", ", ").replace(" -- ", ", ").replace("—", ", ").replace("--", ", ")
@@ -1967,9 +1362,6 @@ def _message_hiring_manager_after_apply(
             page.close()
             if owns_browser:
                 browser.close()
-
-
-DEBUG_DIR = DATA_DIR / "debug"
 
 
 def _dump_form_debug(page, job_id: str, reason: str) -> Optional[str]:
@@ -2356,13 +1748,12 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
     Submit a LinkedIn Easy Apply application.
     Returns 'submitted' on success, 'failed: <reason>' on failure.
     """
-    global _apply_start_time, _ai_tokens_in, _ai_tokens_out, _final_ats_url  # noqa: PLW0603
-    _apply_start_time = time.time()
-    _field_fills.clear()
-    _ai_answer_failures.clear()
-    _ai_tokens_in = 0
-    _ai_tokens_out = 0
-    _final_ats_url = ""
+    stats._apply_start_time = time.time()
+    stats._field_fills.clear()
+    stats._ai_answer_failures.clear()
+    stats._ai_tokens_in = 0
+    stats._ai_tokens_out = 0
+    stats._final_ats_url = ""
     try:
         import playwright  # noqa: F401
     except ImportError:
@@ -2459,7 +1850,7 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:  # noqa: C90
                 if lbl_text.startswith(answer):
                     labels[i].click()
                     log.info(f"   📻 Radio '{question_text[:50]}' → '{answer}'")
-                    _field_fills.append(
+                    stats._field_fills.append(
                         {"field": question_text[:100], "value": answer, "source": "radio"}
                     )
                     break
@@ -2495,7 +1886,7 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:  # noqa: C90
                 if picked is not None:
                     labels[picked].click()
                     log.info(f"   📻 Radio '{question_text[:50]}' → '{option_texts[picked][:60]}'")
-                    _field_fills.append(
+                    stats._field_fills.append(
                         {
                             "field": question_text[:100],
                             "value": option_texts[picked][:100],
@@ -2566,7 +1957,7 @@ def _answer_textareas(page, profile: ApplicantProfile) -> None:
                     label_text = label_el.inner_text().lower()
             if question.lower() in placeholder or question.lower() in label_text:
                 textarea.fill(answer)
-                _field_fills.append(
+                stats._field_fills.append(
                     {"field": question, "value": answer[:200], "source": "screening_answers"}
                 )
 
@@ -2737,7 +2128,9 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
         matched = _clamp_to_maxlength(inp, matched)
         inp.fill(matched)
         _dismiss_typeahead(page, inp)
-        _field_fills.append({"field": label_text, "value": matched, "source": "screening_answers"})
+        stats._field_fills.append(
+            {"field": label_text, "value": matched, "source": "screening_answers"}
+        )
         return
 
     # Direct contact fields — never send these to AI
@@ -2764,7 +2157,9 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
             else:
                 inp.fill(contact_value)
             _dismiss_typeahead(page, inp)
-            _field_fills.append({"field": label_text, "value": contact_value, "source": "contact"})
+            stats._field_fills.append(
+                {"field": label_text, "value": contact_value, "source": "contact"}
+            )
             return
 
     # AI fallback for anything unmatched
@@ -2790,7 +2185,7 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
             else:
                 inp.fill(answer)
             _dismiss_typeahead(page, inp)
-            _field_fills.append({"field": label_text, "value": answer, "source": "ai"})
+            stats._field_fills.append({"field": label_text, "value": answer, "source": "ai"})
 
 
 def _get_field_label(page, element) -> str:
@@ -2873,7 +2268,7 @@ def _answer_select_dropdowns(page, profile: ApplicantProfile) -> None:
                 if matched.lower() in text.lower() or text.lower() in matched.lower():
                     select.select_option(val)
                     log.debug("   Select '%s' → '%s' (from screening answers)", label_text, text)
-                    _field_fills.append(
+                    stats._field_fills.append(
                         {"field": label_text, "value": text, "source": "screening_answers"}
                     )
                     break
@@ -2889,7 +2284,7 @@ def _answer_select_dropdowns(page, profile: ApplicantProfile) -> None:
                     if answer.lower() in text.lower() or text.lower() in answer.lower():
                         select.select_option(val)
                         log.info(f"   🤖 AI selected '{label_text}' → '{text}'")
-                        _field_fills.append(
+                        stats._field_fills.append(
                             {"field": label_text, "value": text, "source": "ai_select"}
                         )
                         break
@@ -3052,7 +2447,6 @@ def _ai_answer_question(
     2-3 sentence answers with job context. Retries once with a stricter prompt
     if the first attempt exceeds the character limit (text fields only).
     """
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     if not _AI_AVAILABLE:
         return None
 
@@ -3074,8 +2468,7 @@ def _ai_answer_question(
             system=system_prompt,
             messages=[{"role": "user", "content": prompt}],
         )
-        _ai_tokens_in += response.usage.input_tokens
-        _ai_tokens_out += response.usage.output_tokens
+        stats.add_ai_tokens(response.usage)
         answer = response.content[0].text.strip()
 
         # Retry once with ultra-strict prompt if too long (text fields only)
@@ -3097,14 +2490,13 @@ def _ai_answer_question(
                     },
                 ],
             )
-            _ai_tokens_in += retry_response.usage.input_tokens
-            _ai_tokens_out += retry_response.usage.output_tokens
+            stats.add_ai_tokens(retry_response.usage)
             answer = retry_response.content[0].text.strip()
             if len(answer) > 100:
                 log.warning(
                     f"   🛡️  Answer still too long after retry ({len(answer)} chars), skipping"
                 )
-                _ai_answer_failures.append(
+                stats._ai_answer_failures.append(
                     {"field": question[:100], "answer": answer[:200], "reason": "too_long"}
                 )
                 return None
@@ -3496,127 +2888,11 @@ def _inject_captcha_token(page, ctype: str, token: str) -> bool:
 
 _MAX_EXTERNAL_STEPS = 20
 
-_ATS_PATTERNS = [
-    # Major ATS platforms
-    ("Workday", "myworkdayjobs.com"),
-    ("Workday", "myworkday.com"),
-    ("Workday", "wd1.myworkdaysite.com"),
-    ("Workday", "wd3.myworkdaysite.com"),
-    ("Workday", "wd5.myworkdaysite.com"),
-    ("Greenhouse", "greenhouse.io"),
-    ("Greenhouse", "boards.greenhouse.io"),
-    ("Greenhouse", "job-boards.greenhouse.io"),
-    # Embedded Greenhouse on a company's own careers page uses ?gh_jid=<id>
-    ("Greenhouse", "gh_jid="),
-    ("Greenhouse", "grnh.se"),
-    ("Lever", "jobs.lever.co"),
-    ("iCIMS", "icims.com"),
-    ("Ashby", "ashbyhq.com"),
-    # Embedded Ashby on a company's own careers page uses ?ashby_jid=<id>
-    ("Ashby", "ashby_jid="),
-    ("SmartRecruiters", "smartrecruiters.com"),
-    ("Jobvite", "jobvite.com"),
-    ("BambooHR", "bamboohr.com"),
-    ("JazzHR", "applytojob.com"),
-    ("JazzHR", "app.jazz.co"),
-    ("Rippling", "ats.rippling.com"),
-    ("Rippling", "rippling.com/company/"),
-    # Mid-tier / emerging ATS
-    ("Workable", "apply.workable.com"),
-    ("Workable", "jobs.workable.com"),
-    ("Taleo", "taleo.net"),
-    ("SuccessFactors", "successfactors.com"),
-    ("UltiPro", "ultipro.com"),
-    ("UltiPro", "recruiting.ultipro.com"),
-    ("Paylocity", "paylocity.com"),
-    ("Breezy", "breezy.hr"),
-    ("Recruitee", "recruitee.com"),
-    ("Pinpoint", "pinpointhq.com"),
-    ("Teamtailor", "teamtailor.com"),
-    ("Personio", "personio.de"),
-    ("Personio", "jobs.personio.com"),
-    ("Comeet", "comeet.co"),
-    ("Dover", "dover.com"),
-    ("Kula", "kula.ai"),
-    ("Kula", "careers.kula.ai"),
-    ("Avature", "avature.net"),
-    ("Phenom", "phenom.com"),
-    ("Eightfold", "eightfold.ai"),
-    ("Deel", "jobs.deel.com"),
-    # Marketplace / aggregator platforms
-    ("Wellfound", "wellfound.com"),
-    ("Wellfound", "angel.co"),
-    ("Mercor", "mercor.com"),
-    ("Mercor", "work.mercor.com"),
-    ("Micro1", "micro1.ai"),
-    ("Micro1", "jobs.micro1.ai"),
-    ("Underdog", "underdog.io"),
-    ("YC Work at a Startup", "workatastartup.com"),
-    ("CareerPuck", "careerpuck.com"),
-    ("Click2Apply", "click2apply.net"),
-    # Company-specific career portals (custom ATS)
-    ("BMC Helix", "jobs.bmc.com"),
-    ("Randstad", "randstaddigital.com"),
-    ("Randstad", "randstad.com"),
-    ("Cardinal Health", "jobs.cardinalhealth.com"),
-    ("ActBlue", "actblue.com"),
-    ("Oracle Recruiting", "oracle.com/careers"),
-    ("Oracle Recruiting", "eeho.fa.us2.oraclecloud.com"),
-]
-
-
-def _detect_ats_platform(url: str) -> str:
-    """Detect the ATS platform from a URL."""
-    lower = url.lower()
-    for name, pattern in _ATS_PATTERNS:
-        if pattern in lower:
-            return name
-    return "unknown"
-
-
-def _categorize_failure(status: str) -> str:
-    """Map a freeform failure status string to a structured category."""
-    s = status.lower()
-    # Check captcha/spam BEFORE validation_error — spam flags often arrive
-    # wrapped in a validation error message
-    if "spam" in s or "captcha" in s or "security check" in s or "recaptcha" in s:
-        return "captcha"
-    if "form stuck" in s or "form steps" in s or "lost track" in s or "not progressing" in s:
-        return "form_stuck"
-    if "validation error" in s:
-        return "validation_error"
-    if "no apply button" in s:
-        return "no_apply_button"
-    if "requires account" in s or "login" in s:
-        return "login_wall"
-    if "modal" in s:
-        return "modal_lost"
-    if "max steps" in s or "too many" in s:
-        return "max_steps"
-    if "timeout" in s or "timed out" in s:
-        return "timeout"
-    return "other"
-
-
-# Blended token-to-dollar rates (70% Sonnet 4.6 / 30% Haiku 4.5)
-_COST_INPUT_PER_M = 2.40  # $/M input tokens
-_COST_OUTPUT_PER_M = 12.00  # $/M output tokens
-
-
-def _compute_cost_usd(tokens_in: int, tokens_out: int) -> float:
-    """Compute estimated API cost from token counts using blended rates."""
-    return round(
-        (tokens_in * _COST_INPUT_PER_M / 1_000_000) + (tokens_out * _COST_OUTPUT_PER_M / 1_000_000),
-        4,
-    )
-
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Retry queue — re-queue failures for Q2 (MCP Playwright) or Q3 (dashboard)
 # ---------------------------------------------------------------------------
-
-DEEP_APPLY_QUEUE_FILE = DATA_DIR / "deep_apply_queue.json"
 
 # Failure categories eligible for retry via Q2/Q3
 _DEEP_APPLY_ELIGIBLE_CATEGORIES = frozenset(
@@ -3677,7 +2953,7 @@ def _queue_for_deep_apply(app_entry: Dict, queue_tier: str = "q2") -> None:
             "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "pre_computed": {
                 "cover_letter_path": app_entry.get("cover_letter_path", ""),
-                "field_answers": list(_field_fills),
+                "field_answers": list(stats._field_fills),
                 "scoring_reasoning": app_entry.get("reasoning", ""),
             },
             "status": "pending",
@@ -4518,7 +3794,6 @@ def _extract_page_snapshot(page, max_chars: int = 8000) -> str:
 
 def _classify_page(snapshot: str, url: str) -> dict:
     """Classify a page as login/form/confirmation/error using AI."""
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     default = {
         "page_type": "form",
         "has_required_login": False,
@@ -4562,8 +3837,7 @@ A page may have has_file_upload=true AND has_form_fields=true."""
             system=_PAGE_CLASSIFIER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
-        _ai_tokens_in += response.usage.input_tokens
-        _ai_tokens_out += response.usage.output_tokens
+        stats.add_ai_tokens(response.usage)
         raw = response.content[0].text.strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
@@ -4919,7 +4193,7 @@ def _answer_external_screening_questions(  # noqa: C901
                             _safe_click(btn, page)
                             log.info(f"   🤖 Yes/No '{label[:40]}' → '{btn_text}'")
                             filled += 1
-                            _field_fills.append(
+                            stats._field_fills.append(
                                 {"field": label, "value": btn_text, "source": "ai_yesno"}
                             )
                             break
@@ -4967,7 +4241,7 @@ def _answer_external_screening_questions(  # noqa: C901
                             _safe_click(btn, page)
                             log.info(f"   🤖 Button radio '{label[:40]}' → '{bt}'")
                             filled += 1
-                            _field_fills.append(
+                            stats._field_fills.append(
                                 {"field": label, "value": bt, "source": "ai_button_radio"}
                             )
                             break
@@ -5008,7 +4282,7 @@ def _answer_external_screening_questions(  # noqa: C901
             if answer:
                 textarea.fill(answer)
                 filled += 1
-                _field_fills.append(
+                stats._field_fills.append(
                     {"field": label_text, "value": answer[:200], "source": "ai_textarea"}
                 )
     except ApplicationAbortError:
@@ -5072,7 +4346,7 @@ def _answer_external_screening_questions(  # noqa: C901
                     page.wait_for_timeout(300)
                     log.info("   📋 ExtJS select '%s' → '%s'", label[:40], opt_text[:40])
                     filled += 1
-                    _field_fills.append(
+                    stats._field_fills.append(
                         {"field": label, "value": opt_text, "source": "extjs_boxselect"}
                     )
                 else:
@@ -5089,7 +4363,7 @@ def _answer_external_screening_questions(  # noqa: C901
                         page.wait_for_timeout(300)
                         log.info("   📋 ExtJS select '%s' → '%s'", label[:40], opt_text[:40])
                         filled += 1
-                        _field_fills.append(
+                        stats._field_fills.append(
                             {"field": label, "value": opt_text, "source": "extjs_boxselect"}
                         )
                     else:
@@ -5152,7 +4426,7 @@ def _answer_external_screening_questions(  # noqa: C901
                             f" → '{profile.city}'"
                         )
                         filled += 1
-                        _field_fills.append(
+                        stats._field_fills.append(
                             {
                                 "field": label or combo_id,
                                 "value": profile.city,
@@ -5585,7 +4859,7 @@ def _answer_external_screening_questions(  # noqa: C901
                     _safe_click(suggestion, page)
                     log.info(f"   📍 Location autocomplete '{label_text[:40]}' → '{profile.city}'")
                     filled += 1
-                    _field_fills.append(
+                    stats._field_fills.append(
                         {
                             "field": label_text,
                             "value": profile.city,
@@ -5623,7 +4897,9 @@ def _answer_external_screening_questions(  # noqa: C901
             if answer:
                 inp.fill(answer)
                 filled += 1
-                _field_fills.append({"field": label_text, "value": answer, "source": "ai_date"})
+                stats._field_fills.append(
+                    {"field": label_text, "value": answer, "source": "ai_date"}
+                )
         except ApplicationAbortError:
             raise
         except Exception as exc:
@@ -5806,7 +5082,6 @@ def _find_navigation_button(page):  # noqa: C901
 
 def _ai_find_navigation_button(page):
     """Use Claude vision to identify a submit/next button from a screenshot."""
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     import base64
 
     try:
@@ -5842,8 +5117,7 @@ def _ai_find_navigation_button(page):
                 }
             ],
         )
-        _ai_tokens_in += response.usage.input_tokens
-        _ai_tokens_out += response.usage.output_tokens
+        stats.add_ai_tokens(response.usage)
         button_text = response.content[0].text.strip().strip('"').strip("'")
         log.info(f"   👁️ AI vision found button: '{button_text}'")
 
@@ -5908,7 +5182,6 @@ def _navigate_external_form(  # noqa: C901
     handler_ctx: dict | None = None,
 ) -> str:
     """Navigate a multi-step external application form. Returns status string."""
-    global _final_ats_url  # noqa: PLW0603
     stalled = 0
     no_button_stalled = 0
     zero_fill_steps = 0
@@ -5940,7 +5213,7 @@ def _navigate_external_form(  # noqa: C901
         page.wait_for_timeout(1500)
 
         # Keep ATS URL updated as page may redirect during form flow
-        _final_ats_url = page.url
+        stats._final_ats_url = page.url
 
         # Handler: per-step hook
         if handler and handler_ctx:
@@ -6103,7 +5376,7 @@ def _navigate_external_form(  # noqa: C901
                     page.wait_for_load_state("domcontentloaded", timeout=10000)
                 except Exception:  # noqa: S110
                     pass
-                _final_ats_url = page.url
+                stats._final_ats_url = page.url
                 continue  # re-enter loop on the new page
 
         # Detect email verification code prompt and handle it before filling fields
@@ -6440,13 +5713,12 @@ def submit_external_apply(  # noqa: C901
     Works on any ATS (Workday, Greenhouse, Lever, iCIMS, etc.).
     Returns status string.
     """
-    global _apply_start_time, _ai_tokens_in, _ai_tokens_out, _final_ats_url  # noqa: PLW0603
-    _apply_start_time = time.time()
-    _field_fills.clear()
-    _ai_answer_failures.clear()
-    _ai_tokens_in = 0
-    _ai_tokens_out = 0
-    _final_ats_url = ""
+    stats._apply_start_time = time.time()
+    stats._field_fills.clear()
+    stats._ai_answer_failures.clear()
+    stats._ai_tokens_in = 0
+    stats._ai_tokens_out = 0
+    stats._final_ats_url = ""
     try:
         import playwright  # noqa: F401
     except ImportError:
@@ -6534,7 +5806,7 @@ def submit_external_apply(  # noqa: C901
             _wait_and_dismiss_cookies(page)
 
             # Capture the final ATS URL for platform detection
-            _final_ats_url = page.url
+            stats._final_ats_url = page.url
 
             # Platform-specific handler
             handler = get_handler(page.url)
@@ -6550,7 +5822,7 @@ def submit_external_apply(  # noqa: C901
                 return pre_flight_result
 
             # Update ATS URL after pre-flight may have navigated
-            _final_ats_url = page.url
+            stats._final_ats_url = page.url
 
             # Login wall check: handler gets first chance, then generic resolution
             if _detect_login_page(page):
@@ -6802,7 +6074,7 @@ def auto_apply_workflow(  # noqa: C901
                 "title": job["title"],
                 "company": job["company"],
                 "url": job["url"],
-                "ats_url": _final_ats_url or "",
+                "ats_url": stats._final_ats_url or "",
                 "location": job.get("location", ""),
                 "status": status,
                 "apply_type": job.get("apply_type", "easy_apply"),
@@ -6816,14 +6088,14 @@ def auto_apply_workflow(  # noqa: C901
                 "hiring_manager_messaged": msg_status,
                 "hiring_manager_message_text": msg_text,
                 "hiring_manager_name": msg_poster,
-                "fields_filled": list(_field_fills),
-                "ai_answer_failures": list(_ai_answer_failures),
-                "ai_tokens": {"input": _ai_tokens_in, "output": _ai_tokens_out},
-                "cost_usd": _compute_cost_usd(_ai_tokens_in, _ai_tokens_out),
-                "duration_seconds": round(time.time() - _apply_start_time, 1)
-                if _apply_start_time
+                "fields_filled": list(stats._field_fills),
+                "ai_answer_failures": list(stats._ai_answer_failures),
+                "ai_tokens": {"input": stats._ai_tokens_in, "output": stats._ai_tokens_out},
+                "cost_usd": _compute_cost_usd(stats._ai_tokens_in, stats._ai_tokens_out),
+                "duration_seconds": round(time.time() - stats._apply_start_time, 1)
+                if stats._apply_start_time
                 else None,
-                "ats_platform": _detect_ats_platform(_final_ats_url or job.get("url", "")),
+                "ats_platform": _detect_ats_platform(stats._final_ats_url or job.get("url", "")),
                 "failure_category": _categorize_failure(status)
                 if status.startswith("failed")
                 else None,
@@ -6896,7 +6168,6 @@ def _run_setup():
 
 def _sync_linkedin_profile(profile_path: str) -> None:
     """Scrape the user's LinkedIn profile and update profile.json with full work history."""
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
     try:
         import playwright  # noqa: F401
     except ImportError:
@@ -7076,8 +6347,7 @@ Rules:
                     max_tokens=3000,
                     messages=[{"role": "user", "content": parse_prompt}],
                 )
-                _ai_tokens_in += response.usage.input_tokens
-                _ai_tokens_out += response.usage.output_tokens
+                stats.add_ai_tokens(response.usage)
                 parsed_text = response.content[0].text.strip()
                 json_match = re.search(r"\{.*\}", parsed_text, re.DOTALL)
                 if json_match:

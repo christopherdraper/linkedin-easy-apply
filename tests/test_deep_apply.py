@@ -163,7 +163,7 @@ class TestQueueForDeepApply:
         with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
             with patch("job_search_apply.DATA_DIR", tmp_path):
                 with patch(
-                    "job_search_apply._field_fills",
+                    "jobapply.stats._field_fills",
                     [
                         {"field": "city*", "value": "Indianapolis", "source": "contact"},
                     ],
@@ -196,7 +196,7 @@ class TestQueueForDeepApply:
         }
         with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
             with patch("job_search_apply.DATA_DIR", tmp_path):
-                with patch("job_search_apply._field_fills", []):
+                with patch("jobapply.stats._field_fills", []):
                     _queue_for_deep_apply(app_entry)
 
         queue = json.loads(queue_file.read_text())
@@ -393,7 +393,7 @@ class TestDeepApplyIntegration:
         with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
             with patch("job_search_apply.DATA_DIR", tmp_path):
                 with patch(
-                    "job_search_apply._field_fills",
+                    "jobapply.stats._field_fills",
                     [
                         {"field": "city", "value": "Indy", "source": "contact"},
                     ],
@@ -447,7 +447,7 @@ class TestQueueSchemaExtensions:
         }
         with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
             with patch("job_search_apply.DATA_DIR", tmp_path):
-                with patch("job_search_apply._field_fills", []):
+                with patch("jobapply.stats._field_fills", []):
                     _queue_for_deep_apply(app_entry)
 
         queue = json.loads(queue_file.read_text())
@@ -471,7 +471,7 @@ class TestQueueSchemaExtensions:
         }
         with patch("job_search_apply.DEEP_APPLY_QUEUE_FILE", queue_file):
             with patch("job_search_apply.DATA_DIR", tmp_path):
-                with patch("job_search_apply._field_fills", []):
+                with patch("jobapply.stats._field_fills", []):
                     _queue_for_deep_apply(app_entry, queue_tier="q3")
 
         queue = json.loads(queue_file.read_text())
