@@ -820,7 +820,8 @@ def _ai_answer_question(
         max_tok = 200 if is_textarea else 25
 
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
+            thinking={"type": "disabled"},
             max_tokens=max_tok,
             system=system_prompt,
             messages=[{"role": "user", "content": prompt}],
@@ -832,7 +833,8 @@ def _ai_answer_question(
         if not is_textarea and len(answer) > 100:
             log.info(f"   🔄 Answer too long ({len(answer)} chars), retrying with strict prompt")
             retry_response = client.messages.create(
-                model="claude-sonnet-4-6",
+                model="claude-sonnet-5",
+                thinking={"type": "disabled"},
                 max_tokens=15,
                 system=(
                     "Output ONLY 1-3 words. A number, a name, or a short phrase. "

@@ -57,7 +57,7 @@ DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 DEBUG_DIR = DATA_DIR / "debug"
 PROFILE_PATH = DATA_DIR / "profile.json"
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 MAX_PAGE_ATTEMPTS = 4
 MAX_TOTAL_STEPS = 30
 
@@ -254,6 +254,7 @@ Analyze the form fields on this page and return a JSON array of actions to compl
 
     response = client.messages.create(
         model=MODEL,
+        thinking={"type": "disabled"},
         max_tokens=2048,
         system=_PAGE_ANALYSIS_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
@@ -336,6 +337,7 @@ Rules:
 
     response = client.messages.create(
         model=MODEL,
+        thinking={"type": "disabled"},
         max_tokens=50,
         system="You fill job application forms. Output ONLY the answer value, nothing else.",
         messages=[{"role": "user", "content": prompt}],

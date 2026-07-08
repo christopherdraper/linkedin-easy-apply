@@ -726,7 +726,8 @@ A page may have has_file_upload=true AND has_form_fields=true."""
     try:
         client = _get_ai_client()
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
+            thinking={"type": "disabled"},
             max_tokens=200,
             system=_PAGE_CLASSIFIER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],

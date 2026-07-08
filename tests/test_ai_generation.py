@@ -99,7 +99,7 @@ class TestAiScoreJob:
         with ai_client(VALID_SCORE_JSON) as mock_client:
             ai_score_job(job, profile)
         kwargs = mock_client.return_value.messages.create.call_args.kwargs
-        assert kwargs["model"] == "claude-haiku-4-5-20251001"
+        assert kwargs["model"] == "claude-haiku-4-5"
         prompt = kwargs["messages"][0]["content"]
         assert "Senior DevOps Engineer" in prompt
         assert "TechCo" in prompt
@@ -118,7 +118,7 @@ class TestAiGenerateCoverLetter:
         with ai_client("letter") as mock_client:
             ai_generate_cover_letter(job, profile)
         kwargs = mock_client.return_value.messages.create.call_args.kwargs
-        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["model"] == "claude-sonnet-5"
         prompt = kwargs["messages"][0]["content"]
         # Deterministic placeholders are pre-filled before the AI sees them
         assert "{COMPANY}" not in prompt
@@ -191,7 +191,7 @@ class TestAiDraftHiringMessage:
             result = _ai_draft_hiring_message(job, profile, "Jane Doe")
         assert result == msg
         kwargs = mock_client.return_value.messages.create.call_args.kwargs
-        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["model"] == "claude-sonnet-5"
         assert kwargs["max_tokens"] == 200
 
     def test_strips_em_dashes_and_self_corrections(self, ai_client, profile, job):
@@ -225,7 +225,7 @@ class TestAiAnswerQuestion:
             result = _ai_answer_question("Desired salary?", profile)
         assert result == "150000"
         kwargs = mock_client.return_value.messages.create.call_args.kwargs
-        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["model"] == "claude-sonnet-5"
         assert kwargs["max_tokens"] == 25
 
     def test_textarea_allows_long_answer_without_retry(self, ai_client, profile):

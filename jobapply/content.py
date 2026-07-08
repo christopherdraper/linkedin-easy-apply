@@ -68,7 +68,7 @@ BACKEND/SOFTWARE ENGINEERING: The candidate is open to backend software engineer
 STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or talent consultancy (not the actual employer), add "staffing_agency" to deal_breakers. Signs: company name includes words like Solutions, Staffing, Talent, Consulting, Search, Partners, Recruiting, Group; the description says "our client" or "on behalf of"; vague about the actual employer. Direct employers only — no middlemen."""
 
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -162,7 +162,8 @@ Fill in every {{PLACEHOLDER}} in the template using the job description and cand
 IMPORTANT: Never use em dashes (—) or double dashes (--). Use commas, periods, or rewrite the sentence instead."""
 
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
+            thinking={"type": "disabled"},
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -228,7 +229,7 @@ Job description:
 Cover: what the company does, what the role involves day-to-day, what stack/tools they use, any notable details (salary, team size, on-call, growth stage, etc.). Flag anything unusual. Be direct and factual — no fluff. Plain text only."""
 
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
         )

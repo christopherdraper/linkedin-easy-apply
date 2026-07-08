@@ -240,7 +240,8 @@ Rules:
 - Output ONLY the JSON, no markdown fences"""
 
                 response = client.messages.create(
-                    model="claude-sonnet-4-6",
+                    model="claude-sonnet-5",
+                    thinking={"type": "disabled"},
                     max_tokens=3000,
                     messages=[{"role": "user", "content": parse_prompt}],
                 )
