@@ -41,7 +41,8 @@
 
     "application_settings": {
       "max_applications_per_day": 10,
-      "min_match_score": 0.30
+      "min_match_score": 0.30,
+      "auto_create_accounts": false
     },
 
     "screening_answers": {

@@ -158,23 +158,32 @@ If the user is on a headless server (no display), stop and point them to the hea
 
 ---
 
-## Step 7. Optional credentials
+## Step 7. Optional credentials and account creation
 
 `ASK USER` (one at a time, with the explanation):
 
-1. **Gmail App Password** for ATS email verification codes (used by Greenhouse, PageUp, and others).
-   "Greenhouse and PageUp send email codes during application. To handle them automatically, I need a Gmail App Password. Go to Google Account, Security, 2-Step Verification, App Passwords, generate one for 'Mail'. Paste it here, or say 'skip' to handle codes manually."
+1. **Account creation** for ATS platforms that require an account before applying (Workday most of all).
+   "Some platforms (Workday especially, ~29% of external applications) won't let the bot apply without an account. I can have the bot create one automatically and store the credentials locally in `ats_accounts.json` (chmod 600). This is off by default. Turn it on? Note: it needs the Gmail App Password below to receive the confirmation code, and your profile email must be a Gmail address."
 
-2. **Captcha API key** for ATS captcha challenges.
-   "Some ATS platforms (Lever, Eightfold, some Workdays) use captchas. To solve them automatically, sign up at 2captcha.com or capsolver.com and add a few dollars of credit. Paste the API key here, or say 'skip' to fail on captcha challenges."
+   If the user says yes, set `application_settings.auto_create_accounts: true`. **Then the Gmail App Password in item 2 is required, not optional** — without it, account creation aborts at the email-verification step (`Email verification required but no gmail_app_password`) and every account-gated platform fails. Say so explicitly and do not let them skip item 2 if they enabled this.
+
+   If they say no, leave `auto_create_accounts: false`. Account-gated platforms (Workday, etc.) will simply be recorded as `login_wall` failures and skipped. That is a valid choice.
+
+2. **Gmail App Password** for ATS email verification codes (used by Greenhouse, PageUp, account creation, and others).
+   "Greenhouse and PageUp send email codes during application, and account creation needs one too. To handle them automatically, I need a Gmail App Password. Go to Google Account, Security, 2-Step Verification, App Passwords, generate one for 'Mail'. Paste it here, or say 'skip' to handle codes manually."
+   This only works if the profile `email` is a Gmail address with IMAP enabled, and the value is the 16-character App Password, **not** the user's normal Google password. If account creation (item 1) is on, do not accept 'skip' here.
+
+3. **Captcha API key** for ATS captcha challenges.
+   "Some ATS platforms (Lever, Eightfold, some Workdays) use captchas *when applying* (this does not affect account creation). To solve them automatically, sign up at 2captcha.com or capsolver.com and add a few dollars of credit. Paste the API key here, or say 'skip' to fail on captcha challenges."
 
 For each value the user provides, edit `~/.local/share/job-apply/profile.json` under `application_settings` to set:
+- `auto_create_accounts: true` (only if they opted in; otherwise leave the template's `false`)
 - `gmail_app_password: "<value>"`
 - `captcha_api_key: "<value>"` and `captcha_service: "2captcha"` (or `"capsolver"`)
 
-`VERIFY`: After editing, `python3 -c "import json; print(list(json.load(open('$HOME/.local/share/job-apply/profile.json'))['profile']['application_settings'].keys()))"` includes the keys you set.
+`VERIFY`: After editing, `python3 -c "import json; s=json.load(open('$HOME/.local/share/job-apply/profile.json'))['profile']['application_settings']; print('auto_create_accounts:', s.get('auto_create_accounts')); print('gmail set:', bool(s.get('gmail_app_password')))"`. If `auto_create_accounts` is `true`, confirm `gmail set` is also `True` — if not, the friend enabled account creation with no way to receive codes; go back to item 2.
 
-**Never echo these values back.**
+**Never echo the credential values back.**
 
 ---
 

@@ -166,8 +166,9 @@ Disable it by setting the flag to false. There is no per-run flag.
 |---------|-------------|-----|
 | `Session expired` log line | LinkedIn cookies aged out | Re-run the Step 4 capture script from the README. |
 | `0 jobs found` for every title | Saturation (already applied to everything matching) or LinkedIn UI change | Try `--market-snapshot` first. If it returns counts, dedup filter is doing its job. If it returns `None`, the LinkedIn selector broke. |
-| `CAPTCHA detected but no captcha_api_key configured` | `application_settings.captcha_api_key` is empty | Add a 2captcha or capsolver key. |
-| `Email verification required but no gmail_app_password` | Gmail IMAP not configured | Generate a Google App Password and add it to `application_settings.gmail_app_password`. |
+| `CAPTCHA detected but no captcha_api_key configured` | `application_settings.captcha_api_key` is empty | Add a 2captcha or capsolver key. (This does **not** affect account creation — that path never uses captcha.) |
+| Bot never creates accounts / Workday jobs all fail as `login_wall` (no `Found account creation option` log line) | `auto_create_accounts` is not enabled (defaults to `false`) | Set `application_settings.auto_create_accounts: true`, and make sure `gmail_app_password` is also set (accounts need an email confirmation code). |
+| `Email verification required but no gmail_app_password` | Gmail IMAP not configured (blocks both application codes and account creation) | Generate a Google App Password and add it to `application_settings.gmail_app_password`. Your profile `email` must be a Gmail address with IMAP enabled. |
 | Q2 hangs on one entry forever | Known-bad platform (Alignerr, Eightfold, Ashby) | Kill the process, escalate that entry to Q3, re-run. |
 | `form_stuck` after multiple Q2 retries | ATS uses a captcha or login pattern not yet handled | Capture the failure URL, run `--external-url <url> --dry-run`, read the debug dump under `~/.local/share/job-apply/debug/`. If you are comfortable in the code, add a per-ATS handler under `ats_handlers/` (see [CLAUDE.md](CLAUDE.md)). |
 | Dashboard shows wrong company names | `applications.json` is the source of truth. The company name is captured at apply time. | Edit the JSON manually if needed. |
