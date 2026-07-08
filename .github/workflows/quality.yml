@@ -18,58 +18,53 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install radon pylint pytest pytest-cov -r requirements.txt
+        run: pip install radon pylint -r requirements.txt
 
       - name: Radon cyclomatic complexity
         run: |
           echo "## Complexity Grades (C or worse = needs attention)"
-          radon cc job_search_apply.py dashboard.py -s -n C --total-average
+          radon cc job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ -s -n C --total-average
           echo ""
           echo "## Maintainability Index"
-          radon mi job_search_apply.py dashboard.py -s
+          radon mi job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ -s
 
       - name: Radon complexity gate
         run: |
-          # Fail if any function scores F (unmaintainable)
-          # Currently 2 functions are F — this tracks regression
-          F_COUNT=$(radon cc job_search_apply.py -s -n F --json | python3 -c "
+          # Fail if F-count (unmaintainable functions) grows across ALL source modules.
+          # RATCHET: 6 F-grade functions as of 2026-07:
+          #   _answer_external_screening_questions (191), _navigate_external_form (134),
+          #   auto_apply_workflow (55), _find_navigation_button (48), main (44),
+          #   batch_analysis._fingerprint_failure (41)
+          # Lower this limit as refactors land. NEVER raise it.
+          F_COUNT=$(radon cc job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ -s -n F --json | python3 -c "
           import json, sys
           data = json.load(sys.stdin)
           total = sum(len(v) for v in data.values())
           print(total)
           ")
           echo "Functions with F complexity: $F_COUNT"
-          if [ "$F_COUNT" -gt 3 ]; then
-            echo "::error::Too many F-complexity functions ($F_COUNT > 3). Refactor before merging."
+          if [ "$F_COUNT" -gt 6 ]; then
+            echo "::error::Too many F-complexity functions ($F_COUNT > 6). Refactor before merging."
             exit 1
           fi
 
-      - name: Pylint score
+      - name: Pylint score and gate
         run: |
-          pylint job_search_apply.py dashboard.py \
+          pylint job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py ats_handlers/ \
             --disable=C0114,C0115,C0116,C0301,C0302,W0603,W0718,R0902,R0911,R0912,R0913,R0914,R0915,R0917,E0401,W0511 \
             --max-line-length=100 \
             --exit-zero | tee pylint-report.txt
-          # Extract score
-          SCORE=$(grep "rated at" pylint-report.txt | grep -oP '[\d.]+/10' | head -1)
-          echo "Pylint score: $SCORE"
-
-      - name: Pylint score gate
-        run: |
-          SCORE=$(pylint job_search_apply.py dashboard.py \
-            --disable=C0114,C0115,C0116,C0301,C0302,W0603,W0718,R0902,R0911,R0912,R0913,R0914,R0915,R0917,E0401,W0511 \
-            --max-line-length=100 \
-            --exit-zero 2>&1 | grep -oP '[\d.]+(?=/10)' | head -1)
-          echo "Score: $SCORE/10"
-          if [ "$(echo "$SCORE < 5.0" | bc)" -eq 1 ]; then
-            echo "::error::Pylint score $SCORE is below 5.0 threshold"
+          SCORE=$(grep -oP '[\d.]+(?=/10)' pylint-report.txt | head -1)
+          echo "Pylint score: $SCORE/10"
+          python3 -c "import sys; sys.exit(0 if float('$SCORE') >= 9.0 else 1)" || {
+            echo "::error::Pylint score $SCORE is below 9.0 threshold"
             exit 1
-          fi
+          }
 
       - name: Code metrics summary
         run: |
           echo "## Raw Metrics"
-          radon raw job_search_apply.py dashboard.py -s
+          radon raw job_search_apply.py assisted_apply_mcp.py batch_analysis.py dashboard.py -s
           echo ""
           echo "## Halstead Metrics (top 10 most complex)"
           radon hal job_search_apply.py -s 2>/dev/null | head -40 || true

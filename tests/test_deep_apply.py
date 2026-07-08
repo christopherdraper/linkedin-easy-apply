@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from job_search_apply import (  # noqa: E402
     ApplicantProfile,
     _deep_apply_eligible,
-    _deep_apply_queue_path,
     _escalate_to_q3,
     _generate_deep_apply_prompt,
     _load_deep_apply_queue,
@@ -123,13 +122,6 @@ class TestDeepApplyEligible:
             "failure_category": "modal_lost",
         }
         assert _deep_apply_eligible(entry, set()) is True
-
-
-class TestDeepApplyQueuePath:
-    def test_returns_path(self):
-        result = _deep_apply_queue_path()
-        assert isinstance(result, Path)
-        assert result.name == "deep_apply_queue.json"
 
 
 class TestDeepApplyQueueStorage:

@@ -276,7 +276,6 @@ class TestQ1HandlerIntegration:
             patch("job_search_apply._classify_page", return_value=login_classification),
             patch("job_search_apply._find_navigation_button", return_value=("none", None)),
             patch("job_search_apply._answer_external_screening_questions", return_value=0),
-            patch("job_search_apply._is_login_wall", return_value=False),
             patch("job_search_apply._detect_login_page", return_value=False),
             patch("job_search_apply._detect_captcha", return_value=None),
         ):
@@ -326,7 +325,6 @@ class TestQ1HandlerIntegration:
             patch("job_search_apply._classify_page", return_value=form_classification),
             patch("job_search_apply._find_navigation_button", return_value=("submit", MagicMock())),
             patch("job_search_apply._answer_external_screening_questions", return_value=0),
-            patch("job_search_apply._is_login_wall", return_value=False),
             patch("job_search_apply._detect_login_page", return_value=False),
             patch("job_search_apply._detect_captcha", return_value=None),
             patch("job_search_apply._safe_click"),

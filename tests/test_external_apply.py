@@ -13,6 +13,7 @@ from job_search_apply import (  # noqa: E402
     _classify_page,
     _detect_ats_platform,
     _detect_captcha,
+    _detect_login_page,
     _detect_success_or_confirmation,
     _extract_page_snapshot,
     _fill_registration_form,
@@ -21,30 +22,32 @@ from job_search_apply import (  # noqa: E402
     _get_domain,
     _handle_file_uploads,
     _inject_captcha_token,
-    _is_login_wall,
     _load_ats_accounts,
     _parse_job_cards,
+    _resolve_login_wall,
     _save_ats_account,
     _solve_captcha,
 )
 
 # ---------------------------------------------------------------------------
-# _is_login_wall tests
+# Login wall detection / resolution tests
 # ---------------------------------------------------------------------------
 
 
-class TestIsLoginWall:
+class TestLoginWallDetection:
     def test_login_url_detected(self):
         page = MagicMock()
         page.url = "https://company.wd5.myworkdayjobs.com/login"
         page.query_selector.return_value = None  # no guest link
-        assert _is_login_wall(page) is True
+        assert _detect_login_page(page) is True
+        assert _resolve_login_wall(page, None) is False
 
     def test_signin_url_detected(self):
         page = MagicMock()
         page.url = "https://jobs.lever.co/company/signin"
         page.query_selector.return_value = None
-        assert _is_login_wall(page) is True
+        assert _detect_login_page(page) is True
+        assert _resolve_login_wall(page, None) is False
 
     def test_normal_url_no_password(self):
         page = MagicMock()
@@ -54,7 +57,7 @@ class TestIsLoginWall:
         # page.frames should not have extra frames
         page.frames = [page.main_frame]
         page.evaluate.return_value = False
-        assert _is_login_wall(page) is False
+        assert _detect_login_page(page) is False
 
     def test_password_field_detected(self):
         page = MagicMock()
@@ -71,21 +74,24 @@ class TestIsLoginWall:
             return None
 
         page.query_selector.side_effect = side_effect
-        assert _is_login_wall(page) is True
+        assert _detect_login_page(page) is True
+        assert _resolve_login_wall(page, None) is False
 
     def test_guest_link_bypasses_login(self):
         page = MagicMock()
         page.url = "https://company.wd5.myworkdayjobs.com/login"
         guest_btn = MagicMock()
         page.query_selector.return_value = guest_btn  # guest link found
-        assert _is_login_wall(page) is False
+        assert _detect_login_page(page) is True
+        assert _resolve_login_wall(page, None) is True
 
     def test_sign_in_to_apply_text(self):
         page = MagicMock()
         page.url = "https://company.com/careers/apply"
         page.query_selector.return_value = None
         page.evaluate.return_value = "please sign in to apply for this position"
-        assert _is_login_wall(page) is True
+        assert _detect_login_page(page) is True
+        assert _resolve_login_wall(page, None) is False
 
     def test_bmc_from_device_bypasses_login(self):
         """BMC-style 'From Device' option should bypass via resume upload."""
@@ -116,7 +122,8 @@ class TestIsLoginWall:
             page.expect_file_chooser.return_value.__exit__ = MagicMock(return_value=False)
             fc_mock.value = MagicMock()
 
-            assert _is_login_wall(page, profile) is False
+            assert _detect_login_page(page) is True
+            assert _resolve_login_wall(page, profile) is True
 
     def test_login_wall_with_stored_account(self):
         """Should attempt ATS login when stored credentials exist."""
@@ -128,7 +135,8 @@ class TestIsLoginWall:
         profile.auto_create_accounts = True
 
         with patch("job_search_apply._attempt_ats_login", return_value=True):
-            assert _is_login_wall(page, profile) is False
+            assert _detect_login_page(page) is True
+            assert _resolve_login_wall(page, profile) is True
 
 
 # ---------------------------------------------------------------------------

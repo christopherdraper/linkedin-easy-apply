@@ -8,7 +8,6 @@ Developer reference for Claude Code (claude.ai/code) and human contributors work
 ~/.openclaw/skills/job-apply/          # Code lives here
   job_search_apply.py                  # Q1: search, score, Easy Apply + external ATS (~7400 lines)
   assisted_apply_mcp.py                # Q2: MCP Playwright autonomous retry agent (~2000 lines)
-  deep_apply_computer_use.py           # Deprecated Q1 fallback (Xvfb + xdotool + screenshot vision)
   batch_analysis.py                    # Post-batch failure analysis -> GitHub issues for recurring patterns
   dashboard.py                         # Flask dashboard + per-application report pages
   templates/                           # dashboard.html, report.html, decision_log.html
@@ -134,7 +133,6 @@ ats_handlers/
 |--------|------:|---------|
 | `job_search_apply.py` | ~7400 | Core: search, score, Easy Apply + external ATS form filling, cover letters, hiring manager messaging |
 | `assisted_apply_mcp.py` | ~2000 | Q2 agent: retries failed applications using Playwright + Claude AI |
-| `deep_apply_computer_use.py` | ~500 | **Deprecated.** Q1 fallback agent using Xvfb + xdotool + screenshot vision |
 | `batch_analysis.py` | ~400 | Post-batch failure analysis -> creates GitHub issues for recurring patterns |
 | `dashboard.py` | ~400 | Flask dashboard (port 5050): market pulse, application table, per-app report pages |
 

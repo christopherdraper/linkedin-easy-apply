@@ -6,7 +6,7 @@ Uses Playwright (sync API) with Claude AI to autonomously complete job
 applications that failed during Q1 automated batch runs.  Produces a
 per-application decision log for human review.
 
-Replaces deep_apply_computer_use.py (Xvfb + xdotool + screenshot vision).
+Replaces the former deep_apply_computer_use.py (Xvfb + xdotool + screenshot vision).
 
 Usage:
     python assisted_apply_mcp.py                     # process next pending Q2
@@ -347,18 +347,6 @@ Rules:
 # ---------------------------------------------------------------------------
 # Playwright execution helpers
 # ---------------------------------------------------------------------------
-
-
-def _get_accessibility_snapshot(page) -> str:
-    """Get a text representation of the page accessibility tree."""
-    try:
-        snapshot = page.accessibility.snapshot()
-        if not snapshot:
-            return ""
-        return json.dumps(snapshot, indent=2)
-    except Exception as e:
-        log.warning("Failed to get accessibility snapshot: %s", e)
-        return ""
 
 
 def _get_page_text_snapshot(page) -> str:

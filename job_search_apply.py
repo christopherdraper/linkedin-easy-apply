@@ -3634,10 +3634,6 @@ _DEEP_APPLY_ELIGIBLE_CATEGORIES = frozenset(
 )
 
 
-def _deep_apply_queue_path() -> Path:
-    return DEEP_APPLY_QUEUE_FILE
-
-
 def _load_deep_apply_queue() -> List[Dict]:
     if DEEP_APPLY_QUEUE_FILE.exists():
         try:
@@ -4409,17 +4405,6 @@ def _detect_login_page(page) -> bool:
         pass
 
     return False
-
-
-def _is_login_wall(page, profile: Optional["ApplicantProfile"] = None) -> bool:
-    """Return True if the current page requires login or account creation.
-
-    When *profile* is provided and auto_create_accounts is enabled, attempts
-    to log in with stored credentials or create a new account before giving up.
-    """
-    if not _detect_login_page(page):
-        return False
-    return not _resolve_login_wall(page, profile)
 
 
 def _extract_page_snapshot(page, max_chars: int = 8000) -> str:
