@@ -86,6 +86,60 @@ class TestApplicantProfileFromDict:
         assert p.skills == ["A", "B", "C", "D", "E"]
 
 
+class TestAccountCreationPrerequisite:
+    """auto_create_accounts defaults on and requires a usable Gmail App Password."""
+
+    @staticmethod
+    def _profile(settings):
+        return ApplicantProfile.from_dict(
+            {
+                "profile": {
+                    "personal": {"full_name": "X", "email": "x@gmail.com", "phone": "0"},
+                    "documents": {"resume_path": "r.pdf"},
+                    "application_settings": settings,
+                }
+            }
+        )
+
+    def test_defaults_on_when_key_absent(self):
+        p = self._profile({})
+        assert p.auto_create_accounts is True
+
+    def test_explicit_false_respected(self):
+        p = self._profile({"auto_create_accounts": False})
+        assert p.auto_create_accounts is False
+
+    def test_error_when_enabled_without_gmail(self):
+        # Default-on account creation with no App Password is a fatal setup error.
+        p = self._profile({})
+        err = p.apply_prerequisite_error()
+        assert err is not None
+        assert "auto_create_accounts" in err
+        assert "gmail_app_password" in err
+
+    def test_no_error_when_gmail_configured(self):
+        p = self._profile(
+            {
+                "gmail_app_password": "abcd" * 4,
+                "auto_fetch_verification_codes": True,
+            }
+        )
+        assert p.gmail_app_password  # resolves only when auto_fetch is on
+        assert p.apply_prerequisite_error() is None
+
+    def test_no_error_when_account_creation_disabled(self):
+        # Opting out is the escape hatch: no Gmail password required.
+        p = self._profile({"auto_create_accounts": False})
+        assert p.apply_prerequisite_error() is None
+
+    def test_password_without_auto_fetch_still_errors(self):
+        # gmail_app_password only resolves when auto_fetch_verification_codes is on,
+        # so a password set without that toggle still fails the prerequisite.
+        p = self._profile({"gmail_app_password": "abcd" * 4})
+        assert p.gmail_app_password is None
+        assert p.apply_prerequisite_error() is not None
+
+
 class TestFormatPreviousEmployers:
     def test_empty(self, profile):
         profile.previous_employers = []

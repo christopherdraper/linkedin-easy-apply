@@ -158,30 +158,29 @@ If the user is on a headless server (no display), stop and point them to the hea
 
 ---
 
-## Step 7. Optional credentials and account creation
+## Step 7. Credentials and account creation (required, do not skip)
+
+**Account creation is ON by default** (`auto_create_accounts: true` in the template). It is the only way past the login wall on account-gated platforms (Workday et al., ~29% of external applications). Because account creation needs an email confirmation code fetched over Gmail IMAP, **a Gmail App Password is mandatory** while it is on. The apply commands (`job_search_apply.py` and `assisted_apply_mcp.py`) now **hard-error and exit** on any run if account creation is on but no usable Gmail App Password is set — so this step is not optional. Complete item 1, or explicitly opt out in item 1b.
 
 `ASK USER` (one at a time, with the explanation):
 
-1. **Account creation** for ATS platforms that require an account before applying (Workday most of all).
-   "Some platforms (Workday especially, ~29% of external applications) won't let the bot apply without an account. I can have the bot create one automatically and store the credentials locally in `ats_accounts.json` (chmod 600). This is off by default. Turn it on? Note: it needs the Gmail App Password below to receive the confirmation code, and your profile email must be a Gmail address."
+1. **Gmail App Password** — required for account creation and for Greenhouse/PageUp email codes.
+   "Account creation (on by default) and some ATS platforms need an email confirmation code. I fetch it over Gmail IMAP, which needs a Gmail App Password. Go to Google Account, Security, 2-Step Verification, App Passwords, generate one for 'Mail', and paste it here."
+   Requirements: the profile `email` must be a **Gmail** address with IMAP enabled, and the value is the 16-character **App Password**, not the normal Google password. When you set it, also set `auto_fetch_verification_codes: true` (the password is ignored without it).
+   If the user cannot or will not provide one, go to item 1b — do not just skip, or every apply run will error out.
 
-   If the user says yes, set `application_settings.auto_create_accounts: true`. **Then the Gmail App Password in item 2 is required, not optional** — without it, account creation aborts at the email-verification step (`Email verification required but no gmail_app_password`) and every account-gated platform fails. Say so explicitly and do not let them skip item 2 if they enabled this.
+   1b. **Opt out of account creation** (only if they have no Gmail App Password).
+   "Without a Gmail App Password I have to turn off automatic account creation, or the bot will refuse to run. That means account-gated platforms like Workday get skipped (recorded as `login_wall`). OK?"
+   If yes, set `application_settings.auto_create_accounts: false`. This is the escape hatch the error message points to.
 
-   If they say no, leave `auto_create_accounts: false`. Account-gated platforms (Workday, etc.) will simply be recorded as `login_wall` failures and skipped. That is a valid choice.
+2. **Captcha API key** — genuinely optional (this one you may skip).
+   "Some ATS platforms (Lever, Eightfold, some Workdays) use captchas *when applying* — this does not affect account creation. To solve them automatically, sign up at 2captcha.com or capsolver.com and add a few dollars of credit. Paste the API key here, or say 'skip' to fail on captcha challenges."
 
-2. **Gmail App Password** for ATS email verification codes (used by Greenhouse, PageUp, account creation, and others).
-   "Greenhouse and PageUp send email codes during application, and account creation needs one too. To handle them automatically, I need a Gmail App Password. Go to Google Account, Security, 2-Step Verification, App Passwords, generate one for 'Mail'. Paste it here, or say 'skip' to handle codes manually."
-   This only works if the profile `email` is a Gmail address with IMAP enabled, and the value is the 16-character App Password, **not** the user's normal Google password. If account creation (item 1) is on, do not accept 'skip' here.
-
-3. **Captcha API key** for ATS captcha challenges.
-   "Some ATS platforms (Lever, Eightfold, some Workdays) use captchas *when applying* (this does not affect account creation). To solve them automatically, sign up at 2captcha.com or capsolver.com and add a few dollars of credit. Paste the API key here, or say 'skip' to fail on captcha challenges."
-
-For each value the user provides, edit `~/.local/share/job-apply/profile.json` under `application_settings` to set:
-- `auto_create_accounts: true` (only if they opted in; otherwise leave the template's `false`)
-- `gmail_app_password: "<value>"`
+Edit `~/.local/share/job-apply/profile.json` under `application_settings` to set what applies:
+- `gmail_app_password: "<value>"` and `auto_fetch_verification_codes: true` (item 1), OR `auto_create_accounts: false` (item 1b)
 - `captcha_api_key: "<value>"` and `captcha_service: "2captcha"` (or `"capsolver"`)
 
-`VERIFY`: After editing, `python3 -c "import json; s=json.load(open('$HOME/.local/share/job-apply/profile.json'))['profile']['application_settings']; print('auto_create_accounts:', s.get('auto_create_accounts')); print('gmail set:', bool(s.get('gmail_app_password')))"`. If `auto_create_accounts` is `true`, confirm `gmail set` is also `True` — if not, the friend enabled account creation with no way to receive codes; go back to item 2.
+`VERIFY`: `python3 -c "import json; s=json.load(open('$HOME/.local/share/job-apply/profile.json'))['profile']['application_settings']; ac=s.get('auto_create_accounts', True); g=bool(s.get('gmail_app_password')) and s.get('auto_fetch_verification_codes'); print('account creation:', ac, '| gmail usable:', g); print('OK' if (g or not ac) else 'WILL ERROR ON RUN — fix item 1 or 1b')"`. It must print `OK`.
 
 **Never echo the credential values back.**
 

@@ -17,6 +17,18 @@ from q2apply.loop import process_application
 log = logging.getLogger(__name__)
 
 
+def _require_apply_setup(profile: ApplicantProfile) -> None:
+    """Fail fast before a Q2 apply run if the profile is misconfigured.
+
+    Q2 also creates ATS accounts (navigation._handle_login_wall), so it needs
+    the same Gmail App Password prerequisite as Q1.
+    """
+    err = profile.apply_prerequisite_error()
+    if err:
+        log.error("❌ %s", err)
+        raise SystemExit(1)
+
+
 def _get_q2_pending() -> List[Dict]:
     """Get all pending Q2 entries from the queue."""
     queue = _load_deep_apply_queue()
@@ -29,6 +41,7 @@ def process_next_pending(
 ) -> List[Dict]:
     """Process up to max_count pending Q2 entries. Returns results list."""
     profile = ApplicantProfile.from_dict(json.loads(PROFILE_PATH.read_text()))
+    _require_apply_setup(profile)
     pending = _get_q2_pending()
 
     if not pending:
@@ -80,6 +93,7 @@ def process_by_id(
 ) -> str:
     """Process a specific job by ID. Returns status string."""
     profile = ApplicantProfile.from_dict(json.loads(PROFILE_PATH.read_text()))
+    _require_apply_setup(profile)
     queue = _load_deep_apply_queue()
     entry = next((q for q in queue if q["job_id"] == job_id), None)
 

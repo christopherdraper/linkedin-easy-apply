@@ -46,7 +46,7 @@ class ApplicantProfile:
     education_degree: Optional[str] = None
     education_university: Optional[str] = None
     education_year: Optional[int] = None
-    auto_create_accounts: bool = False
+    auto_create_accounts: bool = True
     captcha_api_key: Optional[str] = None
     captcha_service: str = "2captcha"
     proxy_rules: Dict[str, str] = field(default_factory=dict)  # ATS domain → proxy URL
@@ -113,7 +113,7 @@ class ApplicantProfile:
             education_university=edu.get("university"),
             education_year=edu.get("graduation_year"),
             auto_create_accounts=bool(
-                p.get("application_settings", {}).get("auto_create_accounts")
+                p.get("application_settings", {}).get("auto_create_accounts", True)
             ),
             captcha_api_key=p.get("application_settings", {}).get("captcha_api_key"),
             captcha_service=p.get("application_settings", {}).get("captcha_service", "2captcha"),
@@ -123,6 +123,35 @@ class ApplicantProfile:
     @classmethod
     def from_json(cls, path: str) -> "ApplicantProfile":
         return cls.from_dict(json.loads(Path(path).expanduser().read_text()))
+
+    def apply_prerequisite_error(self) -> Optional[str]:
+        """Return a fatal setup error for apply runs, or None if good to go.
+
+        Account creation is on by default and is the only way past the login
+        wall on account-gated platforms (Workday et al.). It needs an email
+        confirmation code, which the bot fetches over Gmail IMAP -- so a usable
+        Gmail App Password is mandatory whenever ``auto_create_accounts`` is on.
+        Note ``self.gmail_app_password`` already resolves to None unless
+        ``auto_fetch_verification_codes`` is also true, so this one check covers
+        both missing-password and IMAP-disabled cases.
+        """
+        if self.auto_create_accounts and not self.gmail_app_password:
+            return (
+                "Setup incomplete: auto_create_accounts is on but no usable Gmail "
+                "App Password is configured.\n"
+                "Account creation (Workday and other account-gated platforms) needs "
+                "an email confirmation code, fetched over Gmail IMAP.\n"
+                "Fix ONE of the following in ~/.local/share/job-apply/profile.json "
+                "under application_settings:\n"
+                "  1. Set gmail_app_password to a 16-char Google App Password AND "
+                "auto_fetch_verification_codes: true. Your profile email must be a "
+                "Gmail address with IMAP enabled. (Google Account > Security > "
+                "2-Step Verification > App Passwords > 'Mail'.)\n"
+                "  2. OR set auto_create_accounts: false to skip account-gated "
+                "platforms instead of creating accounts.\n"
+                "See README 'Application Settings' or AGENTS.md Step 7."
+            )
+        return None
 
 
 def _format_previous_employers(profile: ApplicantProfile) -> str:

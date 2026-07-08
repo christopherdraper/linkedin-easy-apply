@@ -165,7 +165,7 @@ These live in `profile.json` under `application_settings`, not as env vars.
 | `captcha_api_key` | Lever (hCaptcha), Eightfold (reCAPTCHA), some Workdays — **at apply time only, not account creation** | Sign up at 2captcha.com or capsolver.com. Add credits. |
 | `captcha_service` | as above | `"2captcha"` or `"capsolver"`. Defaults to `2captcha`. |
 | `proxy_rules` | SmartRecruiters (Incapsula WAF). Optional everywhere else. | Dict of `domain: socks5://host:port`. Example: `{"smartrecruiters.com": "socks5://127.0.0.1:1080"}`. |
-| `auto_create_accounts` | Workday and other account-gated platforms | Boolean, **defaults to `false`** — the bot will not create accounts until you set this `true`. Requires `gmail_app_password` (accounts need an email confirmation code); without it, creation aborts and the platform is skipped as a `login_wall` failure. |
+| `auto_create_accounts` | Workday and other account-gated platforms | Boolean, **defaults to `true`**. Requires `gmail_app_password` + `auto_fetch_verification_codes: true` (accounts need an email confirmation code). **The apply commands hard-error and exit** if this is on and no usable Gmail App Password is set — set the password, or set this `false` to skip account-gated platforms instead. |
 | `max_applications_per_day` | always | Hard daily cap. Default 10. Override per-run with `--max-applications`. |
 | `min_match_score` | always | Floor for the AI match score (0.0 to 1.0). Default 0.30 in code, 0.75 in the profile template. Override per-run with `--min-score`. |
 

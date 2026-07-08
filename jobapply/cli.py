@@ -431,10 +431,19 @@ def _run_market_snapshot(args, parser) -> None:
         sys.exit(1)
 
 
+def _abort_if_setup_incomplete(profile: ApplicantProfile) -> None:
+    """Fail fast before any apply run if the profile is misconfigured."""
+    err = profile.apply_prerequisite_error()
+    if err:
+        log.error("❌ %s", err)
+        sys.exit(1)
+
+
 def _run_external_url(args) -> None:
     """Handle the --external-url branch: apply to a single external job URL."""
     _raw = json.loads(Path(args.profile).expanduser().read_text())
     profile = ApplicantProfile.from_dict(_raw)
+    _abort_if_setup_incomplete(profile)
     job = {
         "id": f"ext_{hashlib.sha256(args.external_url.encode()).hexdigest()[:12]}",
         "url": args.external_url,
@@ -619,4 +628,5 @@ def main():
     profile, _criteria, max_applications, min_score, titles, remote = _resolve_batch_settings(
         args, parser
     )
+    _abort_if_setup_incomplete(profile)
     _run_batch(args, profile, _criteria, max_applications, min_score, titles, remote)
