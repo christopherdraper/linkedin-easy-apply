@@ -5,7 +5,7 @@ repos:
       - id: gitleaks
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.10
+    rev: v0.15.2
     hooks:
       - id: ruff          # lint and auto-fix
         args: [--fix]
@@ -22,7 +22,16 @@ repos:
     rev: v2.14
     hooks:
       - id: vulture
-        args: ["job_search_apply.py", "--min-confidence", "80"]
+        args:
+          [
+            "job_search_apply.py",
+            "assisted_apply_mcp.py",
+            "batch_analysis.py",
+            "dashboard.py",
+            "ats_handlers",
+            "--min-confidence",
+            "80",
+          ]
 
   - repo: local
     hooks:

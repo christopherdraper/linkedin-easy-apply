@@ -4914,7 +4914,7 @@ def _answer_external_screening_questions(  # noqa: C901
                     f"{label} (choose one: {', '.join(btn_texts)})", profile
                 )
                 if answer:
-                    for btn, btn_text in zip(buttons, btn_texts):
+                    for btn, btn_text in zip(buttons, btn_texts, strict=False):
                         if answer.lower() in btn_text.lower() or btn_text.lower() in answer.lower():
                             _safe_click(btn, page)
                             log.info(f"   🤖 Yes/No '{label[:40]}' → '{btn_text}'")

@@ -1,6 +1,6 @@
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 extend-exclude = [".cache"]
 
 [tool.ruff.lint]
@@ -31,3 +31,13 @@ python_functions = ["test_*"]
 [tool.bandit]
 skips = ["B110", "B112", "B310", "B311", "B404", "B603", "B607"]  # B110/B112: try/except/pass intentional; B310: urlopen on hardcoded API URLs; B311: random for timing jitter, not crypto; B404/B603/B607: Xvfb subprocess launch with hardcoded args
 exclude_dirs = ["tests"]
+
+[tool.coverage.run]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+# True source coverage (tests/ omitted). RATCHET: raise to 40 after test
+# Wave 1 lands, 52 after Wave 2. Never lower.
+fail_under = 24
+precision = 1
+show_missing = true
