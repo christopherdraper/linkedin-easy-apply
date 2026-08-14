@@ -664,6 +664,10 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
 def _extract_results_count(page) -> Optional[int]:
     """Extract the total results count from a LinkedIn job search page."""
     # fmt: off
+    # The first four selectors are the authenticated jobs-search DOM. The last
+    # is the logged-out/guest jobs view (results-context-header__job-count),
+    # which LinkedIn serves to fresh or untrusted sessions; keep it as the final
+    # fallback so an authenticated count is always preferred when available.
     text = page.evaluate(
         "() => {"
         "  const selectors = ["
@@ -671,6 +675,7 @@ def _extract_results_count(page) -> Optional[int]:
         "    '.jobs-search-results-list__title-heading small',"
         "    'header .jobs-search-results-list__text',"
         "    '.jobs-search-no-results-banner',"
+        "    '.results-context-header__job-count',"
         "  ];"
         "  for (const sel of selectors) {"
         "    const el = document.querySelector(sel);"
