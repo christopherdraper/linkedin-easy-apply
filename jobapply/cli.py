@@ -64,201 +64,142 @@ def _run_setup():
     print("   The script will now auto-login when your session expires.")
 
 
+# Once a profile page reaches one of these, only recommendations/footer noise follows.
+_PROFILE_NOISE_MARKERS = (
+    "Who your viewers also viewed",
+    "People you may know",
+    "More profiles for you",
+    "You might like",
+    "Pages for you",
+    "About\nAccessibility",
+)
+
+
+def _profile_page_text(page, url: str) -> str:
+    """Load a LinkedIn profile (detail) page and return its de-noised main text.
+
+    Reads rendered innerText rather than specific component selectors: LinkedIn
+    rewrites its profile DOM often (e.g. the 2026 server-driven-UI overhaul broke
+    the old #experience / artdeco-list__item selectors), but the visible text is
+    stable. Trims the recommendations/footer tail so only profile content remains.
+    """
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    _ensure_logged_in(page, url)
+    page.wait_for_timeout(3500)
+    for _ in range(4):
+        page.evaluate("window.scrollBy(0, 900)")
+        page.wait_for_timeout(600)
+    txt = page.evaluate("(document.querySelector('main') || document.body).innerText") or ""
+    # Collapse blanks and drop consecutive duplicates (LinkedIn repeats a11y text).
+    deduped: list = []
+    for line in (ln.strip() for ln in txt.split("\n")):
+        if line and (not deduped or deduped[-1] != line):
+            deduped.append(line)
+    text = "\n".join(deduped)
+    cut = len(text)
+    for marker in _PROFILE_NOISE_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut].strip()
+
+
 def _sync_linkedin_profile(profile_path: str) -> None:
-    """Scrape the user's LinkedIn profile and update profile.json with full work history."""
+    """Scrape the signed-in user's own LinkedIn profile and update profile.json."""
     try:
         import playwright  # noqa: F401
     except ImportError:
         raise RuntimeError("Playwright not installed") from None
 
     raw = json.loads(Path(profile_path).expanduser().read_text())
-    profile_url = raw.get("profile", raw).get("personal", {}).get("linkedin_url")
-    if not profile_url:
-        log.error("❌ No linkedin_url in profile.json — can't sync")
-        return
-
-    log.info(f"🔄 Syncing profile from LinkedIn: {profile_url}")
 
     with _stealth_playwright() as p:
         browser, context, page, owns_browser = _playwright_context(p)
         try:
-            page.goto(profile_url, wait_until="domcontentloaded", timeout=20000)
+            # Resolve the signed-in member's OWN canonical profile. /in/me/ always
+            # redirects to the logged-in user's profile, so we never scrape a
+            # namesake even if personal.linkedin_url is wrong, stale, or missing.
+            page.goto(
+                "https://www.linkedin.com/in/me/", wait_until="domcontentloaded", timeout=30000
+            )
+            _ensure_logged_in(page, "https://www.linkedin.com/in/me/")
             page.wait_for_timeout(3000)
-            _ensure_logged_in(page, profile_url)
-            page.wait_for_timeout(2000)
+            profile_url = page.url.split("?")[0].rstrip("/")
+            if "/in/" not in profile_url:
+                log.error("❌ Could not resolve your own profile (landed on %s)", page.url)
+                return
+            log.info(f"🔄 Syncing your LinkedIn profile: {profile_url}")
+            # Self-heal: persist the canonical URL back into the profile.
+            raw.setdefault("profile", raw).setdefault("personal", {})["linkedin_url"] = profile_url
 
-            # Scroll down to load all sections
-            for _ in range(5):
-                page.evaluate("window.scrollBy(0, 800)")
-                page.wait_for_timeout(1000)
+            exp_txt = _profile_page_text(page, profile_url + "/details/experience/")
+            edu_txt = _profile_page_text(page, profile_url + "/details/education/")
+            sk_txt = _profile_page_text(page, profile_url + "/details/skills/")
+            main_txt = _profile_page_text(page, profile_url + "/")
 
-            # --- Extract work experience ---
-            experience = page.evaluate("""() => {
-                const items = [];
-                // LinkedIn experience section
-                const section = document.querySelector('#experience')
-                    || document.querySelector('section:has(#experience)');
-                if (!section) return items;
-                const container = section.closest('section')
-                    || section.parentElement?.closest('section');
-                if (!container) return items;
-                const entries = container.querySelectorAll(
-                    'li.artdeco-list__item, '
-                    + 'div[data-view-name="profile-component-entity"]'
-                );
-                for (const entry of entries) {
-                    const spans = entry.querySelectorAll(
-                        'span[aria-hidden="true"], span.visually-hidden'
-                    );
-                    const texts = [];
-                    for (const s of spans) {
-                        const t = s.innerText?.trim();
-                        if (t && !texts.includes(t)) texts.push(t);
-                    }
-                    if (texts.length >= 2) {
-                        items.push({texts: texts});
-                    }
-                }
-                return items;
-            }""")
+            log.info(
+                "   📋 experience %d chars · 🎓 education %d chars · 🛠️  skills %d chars",
+                len(exp_txt),
+                len(edu_txt),
+                len(sk_txt),
+            )
+            if not (exp_txt or edu_txt):
+                log.error("❌ No profile text extracted — LinkedIn may have blocked the session")
+                return
+            if not _AI_AVAILABLE:
+                log.warning("⚠️  AI unavailable — cannot parse profile text. Raw experience:")
+                print(exp_txt[:2000])
+                return
 
-            # --- Extract skills ---
-            skills_url = profile_url.rstrip("/") + "/details/skills/"
-            page.goto(skills_url, wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(3000)
-            for _ in range(3):
-                page.evaluate("window.scrollBy(0, 600)")
-                page.wait_for_timeout(800)
+            client = _get_ai_client()
+            parse_prompt = f"""Parse this person's own LinkedIn profile into structured JSON.
+The text below is the rendered content of their profile detail pages.
 
-            skills = page.evaluate("""() => {
-                const items = [];
-                const entries = document.querySelectorAll(
-                    'span[aria-hidden="true"]'
-                );
-                const seen = new Set();
-                for (const el of entries) {
-                    const t = el.innerText?.trim();
-                    if (t && t.length > 1 && t.length < 60
-                        && !t.includes('\\n') && !seen.has(t)
-                        && !t.match(/^\\d/)
-                        && !['Show all', 'Show less', 'See all'].some(
-                            x => t.startsWith(x))) {
-                        seen.add(t);
-                        items.push(t);
-                    }
-                }
-                return items;
-            }""")
+HEADLINE / ABOUT (top of profile):
+{main_txt[:1800]}
 
-            # --- Extract education ---
-            edu_url = profile_url.rstrip("/") + "/details/education/"
-            page.goto(edu_url, wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(2000)
+EXPERIENCE:
+{exp_txt[:4000]}
 
-            education = page.evaluate("""() => {
-                const items = [];
-                const entries = document.querySelectorAll(
-                    'li.artdeco-list__item, '
-                    + 'div[data-view-name="profile-component-entity"]'
-                );
-                for (const entry of entries) {
-                    const spans = entry.querySelectorAll(
-                        'span[aria-hidden="true"]'
-                    );
-                    const texts = [];
-                    for (const s of spans) {
-                        const t = s.innerText?.trim();
-                        if (t && !texts.includes(t)) texts.push(t);
-                    }
-                    if (texts.length >= 1) items.push({texts: texts});
-                }
-                return items;
-            }""")
+EDUCATION:
+{edu_txt[:2000]}
 
-            # --- Extract About/Summary ---
-            page.goto(profile_url, wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(2000)
+SKILLS:
+{sk_txt[:1500]}
 
-            about = page.evaluate("""() => {
-                const section = document.querySelector('#about')
-                    || document.querySelector('section:has(#about)');
-                if (!section) return '';
-                const container = section.closest('section')
-                    || section.parentElement?.closest('section');
-                if (!container) return '';
-                const div = container.querySelector(
-                    'div.display-flex span[aria-hidden="true"]'
-                );
-                return div ? div.innerText?.trim() : '';
-            }""")
-
-            log.info(f"   📋 Experience entries: {len(experience)}")
-            log.info(f"   🛠️  Skills found: {len(skills)}")
-            log.info(f"   🎓 Education entries: {len(education)}")
-            log.info(f"   📝 About section: {'yes' if about else 'no'}")
-
-            # --- Use AI to parse the raw scraped data into structured format ---
-            if _AI_AVAILABLE and (experience or skills):
-                client = _get_ai_client()
-                parse_prompt = f"""Parse this LinkedIn profile data into structured JSON.
-
-Raw experience entries (each has an array of text spans from the DOM):
-{json.dumps(experience, indent=2)}
-
-Raw skills list:
-{json.dumps(skills[:80])}
-
-Raw education:
-{json.dumps(education, indent=2)}
-
-About/Summary:
-{about[:500] if about else "not found"}
-
-Return ONLY valid JSON with this structure:
+Return ONLY valid JSON, no markdown fences, with this structure:
 {{
+  "current_title": "most recent / present job title",
+  "current_employer": "most recent / present employer",
   "previous_employers": [
-    {{"title": "Job Title", "employer": "Company Name", "dates": "Start - End", "industry": "Industry if obvious", "description": "Brief 1-sentence summary of what they did"}}
+    {{"title": "", "employer": "", "dates": "Start - End", "industry": "", "description": "1 concise sentence"}}
   ],
-  "skills": {{
-    "programming_languages": ["..."],
-    "frameworks": ["..."],
-    "tools": ["..."]
-  }},
-  "education": {{
-    "highest_degree": "...",
-    "field_of_study": "...",
-    "university": "...",
-    "graduation_year": 2017
-  }},
-  "specializations": ["..."],
-  "about": "1-2 sentence summary"
+  "skills": {{"programming_languages": [], "frameworks": [], "tools": []}},
+  "education": {{"highest_degree": "", "field_of_study": "", "university": "", "graduation_year": 2021}},
+  "specializations": [],
+  "about": "1-2 sentence professional summary"
 }}
 
 Rules:
-- List ALL jobs from experience, most recent first
-- Categorize skills properly (languages vs frameworks vs tools)
-- Keep descriptions factual and brief
-- Output ONLY the JSON, no markdown fences"""
+- The most recent role (marked Present/current) is current_title + current_employer; put every earlier role in previous_employers, most recent first (INCLUDING earlier roles at the same employer).
+- highest_degree = the highest COMPLETED degree; a finished Bachelor's outranks incomplete graduate coursework.
+- Categorize skills: languages (Python, MATLAB, ...) vs frameworks/software (CAD, simulation tools) vs tools/domain methods. Keep only real professional skills; drop noise.
+- Output ONLY the JSON."""
 
-                response = client.messages.create(
-                    model="claude-sonnet-5",
-                    thinking={"type": "disabled"},
-                    max_tokens=3000,
-                    messages=[{"role": "user", "content": parse_prompt}],
-                )
-                stats.add_ai_tokens(response.usage)
-                parsed_text = response.content[0].text.strip()
-                json_match = re.search(r"\{.*\}", parsed_text, re.DOTALL)
-                if json_match:
-                    parsed = json.loads(json_match.group())
-                    _apply_synced_profile(raw, parsed, profile_path)
-                else:
-                    log.error("❌ AI failed to return valid JSON")
-                    log.info("   Raw response: %s", parsed_text[:200])
-            else:
-                log.warning("⚠️  AI not available — dumping raw data for manual review")
-                print(json.dumps({"experience": experience, "skills": skills}, indent=2))
-
+            response = client.messages.create(
+                model="claude-sonnet-5",
+                thinking={"type": "disabled"},
+                max_tokens=3000,
+                messages=[{"role": "user", "content": parse_prompt}],
+            )
+            stats.add_ai_tokens(response.usage)
+            parsed_text = response.content[0].text.strip()
+            json_match = re.search(r"\{.*\}", parsed_text, re.DOTALL)
+            if not json_match:
+                log.error("❌ AI failed to return valid JSON")
+                log.info("   Raw response: %s", parsed_text[:200])
+                return
+            _apply_synced_profile(raw, json.loads(json_match.group()), profile_path)
         finally:
             page.close()
             if owns_browser:
@@ -270,24 +211,20 @@ def _apply_synced_profile(raw: dict, parsed: dict, profile_path: str) -> None:
     p = raw.setdefault("profile", raw)
     exp = p.setdefault("experience", {})
 
-    # Update previous employers (keep current employer separate)
+    # Current role (the parser separates the present job from prior ones)
+    if parsed.get("current_title"):
+        exp["current_title"] = parsed["current_title"]
+    if parsed.get("current_employer"):
+        exp["current_employer"] = parsed["current_employer"]
+
+    # Prior roles, most recent first (already excludes the current role above)
     if parsed.get("previous_employers"):
-        current_employer = exp.get("current_employer", "").lower()
         prev = []
         for job in parsed["previous_employers"]:
-            # Skip current employer — it's already tracked
-            if current_employer and current_employer in job.get("employer", "").lower():
-                # But update current title if newer data
-                if job.get("title"):
-                    exp["current_title"] = job["title"]
-                continue
             entry = {"title": job.get("title", ""), "employer": job.get("employer", "")}
-            if job.get("industry"):
-                entry["industry"] = job["industry"]
-            if job.get("dates"):
-                entry["dates"] = job["dates"]
-            if job.get("description"):
-                entry["description"] = job["description"]
+            for key in ("industry", "dates", "description"):
+                if job.get(key):
+                    entry[key] = job[key]
             prev.append(entry)
         exp["previous_employers"] = prev
         log.info(f"   ✅ Updated previous_employers: {len(prev)} entries")
@@ -309,6 +246,10 @@ def _apply_synced_profile(raw: dict, parsed: dict, profile_path: str) -> None:
     if parsed.get("education"):
         p["education"] = parsed["education"]
         log.info("   ✅ Updated education")
+
+    # Professional summary (used for resume/cover-letter context)
+    if parsed.get("about"):
+        p["summary"] = parsed["about"]
 
     # Record sync timestamp
     p["_last_profile_sync"] = time.strftime("%Y-%m-%dT%H:%M:%S")
