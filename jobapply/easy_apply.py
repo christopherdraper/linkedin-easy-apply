@@ -124,8 +124,17 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
                         page, job_id, f"Submit clicked but validation errors: {err_text}"
                     )
                     return f"failed: form validation errors after submit: {err_text}"
-                # No confirmation AND no errors — check once more
+                # No confirmation text matched and no validation errors. Treat as
+                # submitted if the form has transitioned past Submit: on success
+                # LinkedIn replaces the multi-step form with an "application sent"
+                # panel (or closes the modal), so the Submit button is gone. This
+                # is markup-agnostic and survives LinkedIn confirmation-markup
+                # changes (the brittle confirmation_sel text hooks above do not).
                 success = page.query_selector(confirmation_sel)
+                if not success:
+                    modal_now = page.query_selector(_MODAL_SEL)
+                    if modal_now is None or modal_now.query_selector(_SUBMIT_BTN_SEL) is None:
+                        success = True
             if owns_browser:
                 _save_session(context)
             return "submitted" if success else "submitted (unconfirmed — check LinkedIn)"
