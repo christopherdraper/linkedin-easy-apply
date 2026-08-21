@@ -14,6 +14,9 @@ from ats_handlers._registry import register
 
 log = logging.getLogger("job_apply")
 
+WD_REVIEW_PARKED_STATUS = "review_parked: manual submit required"
+_WD_MAX_VISION_PASSES = 3  # per-application cap; each pass drives the whole form (120 actions)
+
 
 class WorkdayHandler(BaseATSHandler):
     @property
@@ -30,42 +33,72 @@ class WorkdayHandler(BaseATSHandler):
         # loop fills 0 fields per iteration until it hits max steps (20).
         self._close_blocking_modal(page)
 
-        # "Start Your Application" popup -- "Autofill with Resume"
-        try:
-            autofill = page.query_selector("a[data-automation-id='autofillWithResume']")
-            if autofill and autofill.is_visible():
-                from job_search_apply import _safe_click
+        # "Start Your Application" popup -- "Autofill with Resume" / "Apply
+        # Manually". Only ever fires once per application: after it clicks
+        # successfully once, ctx["_wd_autofilled"] latches it off so it never
+        # re-fires on a later page that happens to reuse similar markup.
+        if not ctx.get("_wd_autofilled"):
+            try:
+                autofill = page.query_selector("a[data-automation-id='autofillWithResume']")
+                if autofill and autofill.is_visible():
+                    from job_search_apply import _safe_click
 
-                _safe_click(autofill, page)
-                page.wait_for_timeout(3000)
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=15000)
-                except Exception:  # noqa: BLE001, S110
-                    pass
-                ctx["skip_step"] = True
-                return None
-        except Exception:  # noqa: BLE001, S110
-            pass
+                    _safe_click(autofill, page)
+                    page.wait_for_timeout(3000)
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception:  # noqa: BLE001, S110
+                        pass
+                    ctx["_wd_autofilled"] = True
+                    ctx["skip_step"] = True
+                    return None
+            except Exception:  # noqa: BLE001, S110
+                pass
 
-        # Fallback: "Apply Manually"
-        try:
-            manual = page.query_selector("a[data-automation-id='applyManually']")
-            if manual and manual.is_visible():
-                from job_search_apply import _safe_click
+            # Fallback: "Apply Manually"
+            try:
+                manual = page.query_selector("a[data-automation-id='applyManually']")
+                if manual and manual.is_visible():
+                    from job_search_apply import _safe_click
 
-                _safe_click(manual, page)
-                page.wait_for_timeout(3000)
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=15000)
-                except Exception:  # noqa: BLE001, S110
-                    pass
-                ctx["skip_step"] = True
-                return None
-        except Exception:  # noqa: BLE001, S110
-            pass
+                    _safe_click(manual, page)
+                    page.wait_for_timeout(3000)
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception:  # noqa: BLE001, S110
+                        pass
+                    ctx["_wd_autofilled"] = True
+                    ctx["skip_step"] = True
+                    return None
+            except Exception:  # noqa: BLE001, S110
+                pass
 
         # Re-dismiss cookie banner (can reappear after navigation)
         self._dismiss_cookie_banner(page)
+
+        if self._is_review_page(page) or self._at_terminal_submit(page):
+            log.info("   Workday: Review page reached -- parking (no auto-submit)")
+            return WD_REVIEW_PARKED_STATUS
+
+        # Workday form pages: the generic deterministic dropdown handling corrupts
+        # Workday's searchable dropdowns (it reads merged option lists and fills
+        # garbage, so the page never validates or advances). Drive each form page
+        # with vision instead and SKIP the deterministic fill entirely. Bounded per
+        # application by _WD_MAX_VISION_PASSES to cap cost.
+        profile = ctx.get("profile")
+        if profile is not None and self._is_form_page(page):
+            passes = ctx.get("_wd_vpasses", 0)
+            if passes < _WD_MAX_VISION_PASSES:
+                ctx["_wd_vpasses"] = passes + 1
+                from ats_handlers import _workday_vision
+
+                log.info("   Workday: vision completing form page (pass %d)", passes + 1)
+                try:
+                    _workday_vision.vision_complete_page(page, profile)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("Workday page vision failed: %s", str(e)[:100])
+                ctx["skip_step"] = True  # bypass the corrupting deterministic fill
+
         return None
 
     def resolve_login_wall(self, page, ctx: dict) -> bool:
@@ -357,6 +390,90 @@ class WorkdayHandler(BaseATSHandler):
                 log.info("   Workday: closed blocking modal (%s)", closed)
         except Exception as e:  # noqa: BLE001
             log.debug("Workday close modal failed: %s", e)
+
+    @staticmethod
+    def _is_review_page(page) -> bool:
+        """True only on the final Workday Review page (heading 'Review' AND a
+        Submit button AND a review summary present) -- deliberately strict so we
+        never stop early on an intermediate page that merely mentions 'review'.
+        """
+        try:
+            return bool(
+                page.evaluate(r"""() => {
+              const heads = [...document.querySelectorAll('h1,h2,h3')]
+                  .map(e => (e.innerText || '').trim().toLowerCase());
+              const hasReviewHeading = heads.some(t => t === 'review' || t.startsWith('review'));
+              const nav = [...document.querySelectorAll(
+                  "[data-automation-id='pageFooterNextButton'], button, [role='button']")];
+              const hasSubmit = nav.some(b => /^\s*submit\b/i.test(b.innerText || ''));
+              const hasSummary = !!document.querySelector(
+                  "[data-automation-id='summaryItem'], [data-automation-id='reviewPanel'], "
+                  + "[data-automation-id='reviewSection']");
+              return hasReviewHeading && hasSubmit && hasSummary;
+            }""")
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _at_terminal_submit(page) -> bool:
+        """Selector-independent backstop for the Review-stop gate.
+
+        `_is_review_page` depends on an unvalidated data-automation-id guess
+        (hasSummary); if that guess is wrong on some Workday tenant, the gate
+        fails OPEN and the shared loop can click Submit. This check does not
+        depend on that selector: it returns True iff the only visible, enabled
+        way forward on the page is a Submit control -- i.e. there is a visible
+        enabled control whose text matches Submit and NO visible enabled
+        forward control (Next / Continue / Save and continue). This only ADDS
+        parking on top of `_is_review_page`; it never removes it, and it fails
+        CLOSED (returns False) on any evaluate error so a detector bug cannot
+        itself trigger parking.
+        """
+        try:
+            return bool(
+                page.evaluate(r"""() => {
+              const isVisible = (el) => {
+                  const r = el.getBoundingClientRect();
+                  if (r.width < 1 || r.height < 1) return false;
+                  const style = window.getComputedStyle(el);
+                  return style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const isEnabled = (el) => {
+                  if (el.disabled) return false;
+                  if ((el.getAttribute('aria-disabled') || '').toLowerCase() === 'true')
+                      return false;
+                  return true;
+              };
+              const candidates = [...document.querySelectorAll(
+                  'button, [role="button"], [data-automation-id="pageFooterNextButton"]')]
+                  .filter(el => isVisible(el) && isEnabled(el));
+              const textOf = (el) => (el.innerText || el.textContent || '');
+              const hasSubmit = candidates.some(el => /\bsubmit\b/i.test(textOf(el)));
+              const hasForward = candidates.some(
+                  el => /next|continue|save and continue/i.test(textOf(el)));
+              return hasSubmit && !hasForward;
+            }""")
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _is_form_page(page) -> bool:
+        """True on a fillable Workday application form page: the footer
+        Next/Save-and-Continue control is present AND there are form fields. Keeps
+        the vision pass from firing on login/landing/confirmation states."""
+        try:
+            return bool(
+                page.evaluate("""() => {
+                  const nav = document.querySelector("[data-automation-id='pageFooterNextButton']");
+                  const fields = document.querySelectorAll(
+                    "[data-automation-id^='formField-'], input, textarea, [aria-haspopup='listbox']");
+                  return !!nav && fields.length > 0;
+                }""")
+            )
+        except Exception:  # noqa: BLE001
+            return False
 
 
 register("Workday", WorkdayHandler)

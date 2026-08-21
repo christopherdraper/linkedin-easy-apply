@@ -50,6 +50,10 @@ class ApplicantProfile:
     captcha_api_key: Optional[str] = None
     captcha_service: str = "2captcha"
     proxy_rules: Dict[str, str] = field(default_factory=dict)  # ATS domain → proxy URL
+    # Voluntary EEO / self-identification answers (gender, ethnicity, veteran, etc.).
+    # Only consumed where a form requires them (e.g. Workday self-ID pages); left
+    # empty means "decline / prefer not to say".
+    self_identification: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "ApplicantProfile":
@@ -118,6 +122,7 @@ class ApplicantProfile:
             captcha_api_key=p.get("application_settings", {}).get("captcha_api_key"),
             captcha_service=p.get("application_settings", {}).get("captcha_service", "2captcha"),
             proxy_rules=p.get("application_settings", {}).get("proxy_rules", {}),
+            self_identification=p.get("self_identification", {}),
         )
 
     @classmethod
