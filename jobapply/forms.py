@@ -15,6 +15,15 @@ from jobapply.safety import ApplicationAbortError, _check_field_label, _looks_li
 
 log = logging.getLogger(__name__)
 
+# LinkedIn migrated the Easy Apply modal to new hashed-class markup: the container
+# is now `[data-testid='dialog']` (outer, holds the footer) / `[data-testid='dialog-content']`
+# (the fields). This union matches BOTH the new markup and the legacy artdeco markup.
+# Keep it additive — never drop the old selectors (external ATS + old LinkedIn rely on them).
+_MODAL_SEL = (
+    "[data-testid='dialog-content'], [data-testid='dialog'], "
+    ".artdeco-modal, .jobs-easy-apply-modal, [role='dialog']"
+)
+
 
 def _dump_form_debug(page, job_id: str, reason: str) -> Optional[str]:
     """Capture a screenshot and HTML dump of a stuck form for debugging."""
@@ -28,7 +37,7 @@ def _dump_form_debug(page, job_id: str, reason: str) -> Optional[str]:
         page.screenshot(path=str(screenshot_path), full_page=True)
 
         # Capture the modal/form HTML specifically, not the whole page
-        modal = page.query_selector(".artdeco-modal, .jobs-easy-apply-modal, [role='dialog']")
+        modal = page.query_selector(_MODAL_SEL)
         if modal:
             html = modal.inner_html()
         else:
@@ -51,7 +60,8 @@ def _get_validation_errors(page) -> List[str]:
     try:
         errors = page.evaluate("""() => {
             const modal = document.querySelector(
-                '.artdeco-modal, .jobs-easy-apply-modal, [role="dialog"]'
+                '[data-testid="dialog-content"], [data-testid="dialog"], '
+                + '.artdeco-modal, .jobs-easy-apply-modal, [role="dialog"]'
             );
             if (!modal) return [];
             const errorEls = modal.querySelectorAll(
@@ -59,6 +69,8 @@ def _get_validation_errors(page) -> List[str]:
                 + '[data-test-form-element-error], '
                 + '.fb-dash-form-element__error-text, '
                 + '[class*="error-text"], '
+                + '[data-testid*="error"], '
+                + '[id^="error-message"], '
                 + '[role="alert"]'
             );
             const msgs = [];
@@ -120,6 +132,7 @@ def _fill_empty_required_fields(page, profile) -> int:
 
     # Also try radio buttons and checkboxes that might be required but unanswered
     _answer_radio_buttons(form, profile)
+    _answer_radiogroup_fieldsets(form, profile)
     _check_mandatory_checkboxes(form)
 
     return filled
@@ -216,6 +229,141 @@ def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:  # noqa: C90
                             "source": "ai_radio",
                         }
                     )
+
+
+# JS run per fieldset: extract the question text (nearest preceding sibling / an
+# aria-labelledby target) and, for each radio, the visible option text (from the
+# option wrapper, since the new-markup `<label for>` is empty).
+_RADIOGROUP_META_JS = r"""f => {
+    const rs = [...f.querySelectorAll('input[type=radio]')];
+    let q = '';
+    let cur = f;
+    for (let i = 0; i < 5 && cur; i++) {
+        cur = cur.previousElementSibling;
+        if (cur) {
+            const t = (cur.textContent || '').replace(/\s+/g, ' ').trim();
+            if (t) { q = t; break; }
+        }
+    }
+    if (!q) {
+        const lb = f.getAttribute('aria-labelledby');
+        if (lb) { const e = document.getElementById(lb); if (e) q = e.textContent.trim(); }
+    }
+    const opts = rs.map(r => {
+        let w = r;
+        for (let i = 0; i < 6 && w.parentElement; i++) {
+            w = w.parentElement;
+            if (w.querySelectorAll('input[type=radio]').length === 1
+                && (w.textContent || '').trim()) break;
+        }
+        return { id: r.id, text: (w.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) };
+    });
+    return { q: q.slice(0, 160), opts };
+}"""
+
+
+def _click_radio_by_id(fs, rid: str) -> bool:
+    """Select the radio with id *rid* inside fieldset *fs*.
+
+    New-markup radios are visually hidden, so click the associated `<label for>`
+    (which toggles the input even when the label is empty); fall back to a forced
+    check / JS click on the input itself.
+    """
+    lab = fs.evaluate_handle(
+        "(f, id) => f.querySelector('label[for=\"' + CSS.escape(id) + '\"]')", rid
+    ).as_element()
+    if lab:
+        try:
+            lab.click(timeout=3000)
+            return True
+        except Exception:  # noqa: S110
+            try:
+                lab.evaluate("e => e.click()")
+                return True
+            except Exception:  # noqa: S110
+                pass
+    inp = fs.evaluate_handle("(f, id) => f.querySelector('#' + CSS.escape(id))", rid).as_element()
+    if inp:
+        try:
+            inp.check(force=True)
+            return True
+        except Exception:  # noqa: S110
+            try:
+                inp.evaluate("e => e.click()")
+                return True
+            except Exception:  # noqa: S110
+                pass
+    return False
+
+
+def _pick_radiogroup_option(question: str, opts: List[dict], profile: ApplicantProfile):
+    """Pick the (radio-id, option-text) for a new-markup radio question.
+
+    Yes/No groups resolve deterministically via `_determine_radio_answer`;
+    multi-choice groups fall back to AI. Returns (None, None) if undecidable.
+    """
+    opt_lower = [(o["id"], (o["text"] or "").strip().lower()) for o in opts]
+    is_yes_no = all(t.startswith("yes") or t.startswith("no") for _, t in opt_lower if t)
+    if is_yes_no:
+        answer = _determine_radio_answer(question, profile)
+        for rid, t in opt_lower:
+            if t.startswith(answer):
+                return rid, answer
+        return None, None
+    if not _AI_AVAILABLE:
+        return None, None
+    choices = "\n".join(f"  {i}: {o['text']}" for i, o in enumerate(opts) if o["text"])
+    ai = _ai_answer_question(
+        f"{question}\n\nChoose one (reply with the number only):\n{choices}", profile
+    )
+    if ai is None:
+        return None, None
+    ai_clean = ai.strip().lower().rstrip(".")
+    try:
+        idx = int(ai_clean)
+        if 0 <= idx < len(opts):
+            return opts[idx]["id"], opts[idx]["text"]
+    except ValueError:
+        for o in opts:
+            ot = (o["text"] or "").lower()
+            if ot and (ot.startswith(ai_clean[:20]) or ai_clean[:20] in ot):
+                return o["id"], o["text"]
+    return None, None
+
+
+def _answer_radiogroup_fieldsets(form, profile: ApplicantProfile) -> None:
+    """Answer LinkedIn's new-markup Yes/No screening questions.
+
+    New Easy Apply renders each choice question as `<fieldset role="radiogroup">`
+    with visually-hidden radios whose `<label for>` is EMPTY (the option text
+    lives in a sibling card, the question text in a preceding element). The legacy
+    `_answer_radio_buttons` keys on option text inside `<label>`, so it never
+    clicks these. This handles them additively and is a no-op on legacy markup
+    (whose labels carry text) and on external ATS forms.
+    """
+    for fs in form.query_selector_all("fieldset[role='radiogroup']"):
+        try:
+            if fs.query_selector("input[type='radio']:checked"):
+                continue
+            if len(fs.query_selector_all("input[type='radio']")) < 2:
+                continue
+            # Only new-markup groups: legacy/external groups have text in <label>.
+            labels = fs.query_selector_all("label")
+            if labels and any((lb.inner_text() or "").strip() for lb in labels):
+                continue
+            meta = fs.evaluate(_RADIOGROUP_META_JS)
+            question = (meta.get("q") or "").strip().lower()
+            opts = meta.get("opts") or []
+            if not question or not opts:
+                continue
+            chosen_id, chosen_text = _pick_radiogroup_option(question, opts, profile)
+            if chosen_id and _click_radio_by_id(fs, chosen_id):
+                log.info("   📻 Radio '%s' → '%s'", question[:50], chosen_text)
+                stats._field_fills.append(
+                    {"field": question[:100], "value": str(chosen_text)[:100], "source": "radio"}
+                )
+        except Exception as exc:
+            log.debug("New-markup radio group failed (non-critical): %s", exc)
 
 
 def _determine_radio_answer(question: str, profile: ApplicantProfile) -> str:
@@ -333,6 +481,7 @@ def _dismiss_typeahead(page, inp) -> None:
         )
         if typeahead_container and typeahead_container.is_visible():
             header = page.query_selector(
+                "[data-testid='dialog'] header, [data-testid='dialog'] h2, "
                 ".artdeco-modal__header, h2.t-bold, .jobs-easy-apply-modal__header"
             )
             if header:
@@ -714,7 +863,7 @@ def _check_mandatory_checkboxes(page) -> None:
 
 def _get_form_container(page):
     """Return the Easy Apply modal element, or fall back to the full page."""
-    modal = page.query_selector(".artdeco-modal, .jobs-easy-apply-modal, [role='dialog']")
+    modal = page.query_selector(_MODAL_SEL)
     return modal if modal else page
 
 
@@ -723,13 +872,16 @@ def _answer_screening_questions(page, profile: ApplicantProfile) -> None:
     # Scope all queries to the modal to avoid picking up video player / page inputs
     form = _get_form_container(page)
     _answer_radio_buttons(form, profile)
+    _answer_radiogroup_fieldsets(form, profile)
     _answer_textareas(form, profile)
     _answer_select_dropdowns(form, profile)
     _check_mandatory_checkboxes(form)
 
-    # Fill text/number inputs — use broad selector to catch LinkedIn's obfuscated inputs
+    # Fill text/number inputs — use broad selector to catch LinkedIn's obfuscated inputs.
+    # New Easy Apply markup renders the phone field as `type='tel'` with hashed classes.
     for inp in form.query_selector_all(
-        "input[type='text'], input[type='number'], input.artdeco-text-input--input"
+        "input[type='text'], input[type='number'], input[type='tel'], "
+        "input[type='email'], input[type='url'], input.artdeco-text-input--input"
     ):
         try:
             if inp.input_value():

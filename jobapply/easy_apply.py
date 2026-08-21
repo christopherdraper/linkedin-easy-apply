@@ -10,6 +10,7 @@ from typing import Dict, Optional
 from jobapply import stats
 from jobapply.browser import _playwright_context, _save_session, _stealth_playwright
 from jobapply.forms import (
+    _MODAL_SEL,
     _answer_screening_questions,
     _dismiss_all_typeaheads,
     _dump_form_debug,
@@ -21,6 +22,25 @@ from jobapply.profile import ApplicantProfile
 from jobapply.safety import ApplicationAbortError
 
 log = logging.getLogger(__name__)
+
+# Footer primary-button selectors. New Easy Apply markup gives the footer buttons
+# only hashed classes + `type="button"` (no aria-label / data-testid), so the one
+# stable hook is the visible TEXT. Union the text selectors with the legacy
+# aria-label selectors so both markups match. These are queried INSIDE the modal
+# element (not page-wide) so the "similar jobs" carousel's own Next button and
+# other page chrome can never be mistaken for the form's primary button.
+_SUBMIT_BTN_SEL = (
+    "button[aria-label='Submit application'], button[aria-label*='Submit'], "
+    "button:has-text('Submit application')"
+)
+_REVIEW_BTN_SEL = (
+    "button[aria-label='Review your application'], button[aria-label*='Review'], "
+    "button:has-text('Review')"
+)
+_NEXT_BTN_SEL = (
+    "button[aria-label='Continue to next step'], button[aria-label*='Continue'], "
+    "button:has-text('Next')"
+)
 
 
 def _dismiss_save_dialog(page) -> None:
@@ -39,7 +59,7 @@ def _dismiss_save_dialog(page) -> None:
 
 def _get_modal_text(page) -> str:
     """Get the text content of the Easy Apply modal for stall detection."""
-    modal = page.query_selector(".artdeco-modal, .jobs-easy-apply-modal, [role='dialog']")
+    modal = page.query_selector(_MODAL_SEL)
     if modal:
         try:
             return modal.inner_text()[:800]
@@ -59,7 +79,7 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
         _dismiss_save_dialog(page)
 
         # Check if modal is still open
-        modal = page.query_selector(".artdeco-modal, .jobs-easy-apply-modal, [role='dialog']")
+        modal = page.query_selector(_MODAL_SEL)
         if not modal:
             _dump_form_debug(page, job_id, "Application modal closed unexpectedly")
             return "failed: lost track of form steps"
@@ -67,15 +87,11 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
         # Fill screening questions on EVERY page (new fields appear after each Next)
         _answer_screening_questions(page, profile)
 
-        submit_btn = page.query_selector(
-            "button[aria-label='Submit application'], button[aria-label*='Submit']"
-        )
-        review_btn = page.query_selector(
-            "button[aria-label='Review your application'], button[aria-label*='Review']"
-        )
-        next_btn = page.query_selector(
-            "button[aria-label='Continue to next step'], button[aria-label*='Continue']"
-        )
+        # Scope button lookups to the modal: page-wide text selectors would also
+        # match the "similar jobs" carousel's Next button and other page chrome.
+        submit_btn = modal.query_selector(_SUBMIT_BTN_SEL)
+        review_btn = modal.query_selector(_REVIEW_BTN_SEL)
+        next_btn = modal.query_selector(_NEXT_BTN_SEL)
 
         if submit_btn:
             _dismiss_all_typeaheads(page)
@@ -86,6 +102,8 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
                 "[aria-label='Your application was sent'], "
                 ".artdeco-modal__header:has-text('Application submitted'), "
                 "h2:has-text('application was sent'), "
+                "h2:has-text('Application sent'), "
+                "[data-testid='dialog']:has-text('application was sent'), "
                 ".artdeco-inline-feedback--success, "
                 "[data-test-modal-id='post-apply-modal']"
             )
