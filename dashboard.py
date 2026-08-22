@@ -425,6 +425,12 @@ def main():
     parser = argparse.ArgumentParser(description="LinkedIn Easy Apply Dashboard")
     parser.add_argument("--port", type=int, default=5050, help="Port to run on (default: 5050)")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Interface to bind (default: 127.0.0.1 localhost-only; 0.0.0.0 to expose). "
+        "When exposing, restrict access at the firewall -- the Flask dev server has no auth.",
+    )
     args = parser.parse_args()
 
     if not args.no_browser:
@@ -434,7 +440,7 @@ def main():
     print(f"📁 Applications: {LOG_FILE}")
     print(f"📁 Market data:  {SEARCH_LOG_FILE}\n")
 
-    app.run(host="127.0.0.1", port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False)
 
 
 if __name__ == "__main__":
