@@ -411,7 +411,7 @@ def _run_external_url(args) -> None:
         from jobapply.applog import load_log, save_log
         from jobapply.workflow import _build_application_entry
 
-        compat = {"match_score": None, "reasoning": "", "deal_breakers": []}
+        compat = {"match_score": 0.0, "reasoning": "", "deal_breakers": []}
         entry = _build_application_entry(job, compat, status, "", "", None, None, None)
         entries = load_log()
         entries.append(entry)

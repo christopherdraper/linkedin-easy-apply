@@ -622,7 +622,7 @@
                 <td>{{ e.company }}</td>
                 <td class="truncate">{{ e.location or '—' }}</td>
                 <td>
-                    {% set score = e.match_score|default(0) %}
+                    {% set score = e.match_score or 0 %}
                     {% set pct = (score * 100)|int %}
                     {% if score >= 0.7 %}
                         {% set color = '#34d399' %}
