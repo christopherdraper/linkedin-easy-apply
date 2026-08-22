@@ -35,6 +35,7 @@ class ApplicantProfile:
     city: Optional[str] = None
     state: Optional[str] = None
     zip_code: Optional[str] = None
+    street_address: Optional[str] = None
     country: Optional[str] = None
     skills: List[str] = field(default_factory=list)
     specializations: List[str] = field(default_factory=list)
@@ -99,6 +100,11 @@ class ApplicantProfile:
             city=location.get("city"),
             state=location.get("state"),
             zip_code=location.get("zip_code"),
+            street_address=(
+                location.get("street")
+                or location.get("address_line1")
+                or location.get("street_address")
+            ),
             country=location.get("country"),
             skills=all_skills,
             specializations=exp.get("specializations", []),
@@ -176,6 +182,7 @@ def _profile_summary(profile: ApplicantProfile) -> str:
     location_parts = [p for p in [profile.city, profile.state] if p]
     loc_suffix = f" {profile.zip_code}" if profile.zip_code else ""
     country_line = f"\nCountry: {profile.country}" if profile.country else ""
+    street_line = f"\nStreet address: {profile.street_address}" if profile.street_address else ""
 
     # Education
     edu_parts = []
@@ -197,7 +204,7 @@ def _profile_summary(profile: ApplicantProfile) -> str:
     return f"""Name: {profile.full_name}
 Email: {profile.email}
 Phone: {profile.phone}
-Location: {", ".join(location_parts) or "not provided"}{loc_suffix}{country_line}
+Location: {", ".join(location_parts) or "not provided"}{loc_suffix}{country_line}{street_line}
 LinkedIn: {profile.linkedin_url or "not provided"}
 GitHub: {profile.github_url or "not provided"}
 Current title: {profile.current_title or "not provided"}
