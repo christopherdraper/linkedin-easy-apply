@@ -115,6 +115,24 @@ def _save_cover_letter_docx(text: str, job_id: str) -> Path:
     return out
 
 
+def _read_cover_letter_text(cl_path: str) -> str:
+    """Return the plain text of a saved cover letter (.docx or legacy .txt).
+
+    Cover letters are saved as .docx (binary), so a naive read_text() throws
+    UnicodeDecodeError. Extract paragraph text via python-docx for .docx and
+    fall back to read_text() for legacy .txt files.
+    """
+    p = Path(cl_path)
+    if not p.exists():
+        return ""
+    if p.suffix.lower() == ".docx":
+        from docx import Document
+
+        doc = Document(str(p))
+        return "\n".join(par.text for par in doc.paragraphs)
+    return p.read_text()
+
+
 def _ensure_cover_letter_docx(cl_path: str) -> str:
     """If cover letter is a .txt file, convert to .docx and return new path."""
     p = Path(cl_path)

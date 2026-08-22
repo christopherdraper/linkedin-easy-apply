@@ -25,7 +25,11 @@ from threading import Timer
 from flask import Flask, abort, redirect, render_template, request, url_for
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from job_search_apply import ApplicantProfile, _generate_deep_apply_prompt  # noqa: E402
+from job_search_apply import (  # noqa: E402
+    ApplicantProfile,
+    _generate_deep_apply_prompt,
+    _read_cover_letter_text,
+)
 
 DATA_DIR = Path.home() / ".local" / "share" / "job-apply"
 LOG_FILE = DATA_DIR / "applications.json"
@@ -270,13 +274,11 @@ def report(job_id):
 
     cover_letter = ""
     cl_path = entry.get("cover_letter_path", "")
-    if cl_path:
-        p = Path(cl_path)
-        if p.exists():
-            try:
-                cover_letter = p.read_text()
-            except Exception:
-                cover_letter = "(unable to read file)"
+    if cl_path and Path(cl_path).exists():
+        try:
+            cover_letter = _read_cover_letter_text(cl_path)
+        except Exception:
+            cover_letter = "(unable to read file)"
 
     return render_template("report.html", entry=entry, cover_letter=cover_letter)
 
