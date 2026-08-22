@@ -395,6 +395,7 @@ def _run_external_url(args) -> None:
     }
     log.info(f"🌐 Applying to external URL: {args.external_url}")
     stats.reset_run_stats()
+    stats._apply_start_time = time.time()
     status = submit_external_apply(
         job,
         profile,
@@ -402,6 +403,20 @@ def _run_external_url(args) -> None:
         dry_run=args.dry_run,
     )
     log.info(f"Result: {status}")
+
+    # Log to applications.json so single-URL runs (e.g. a Workday req driven to
+    # Review) show up in the dashboard, same as batch runs. Without this the
+    # dashboard silently omits every --external-url application.
+    if not args.dry_run:
+        from jobapply.applog import load_log, save_log
+        from jobapply.workflow import _build_application_entry
+
+        compat = {"match_score": None, "reasoning": "", "deal_breakers": []}
+        entry = _build_application_entry(job, compat, status, "", "", None, None, None)
+        entries = load_log()
+        entries.append(entry)
+        save_log(entries)
+        log.info("   💾 Logged to applications.json")
 
 
 def _resolve_batch_settings(args, parser):
