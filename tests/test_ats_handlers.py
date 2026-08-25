@@ -459,6 +459,7 @@ class TestQ2HandlerHooks:
 
 
 from ats_handlers.workday import (  # noqa: E402
+    _WD_MAX_ERROR_RELOADS,
     _WD_MAX_VISION_PASSES,
     WD_REVIEW_PARKED_STATUS,
     WorkdayHandler,
@@ -771,101 +772,73 @@ class TestSmartRecruitersHandler:
         page.goto.assert_not_called()  # already on oneclick, no navigation
 
 
-class TestWorkdayResumeApplicationAfterLogin:
-    """Workday does not resume the application after sign-in.
+class TestWorkdayErrorPageRecovery:
+    """Workday's SPA intermittently renders "Something went wrong".
 
-    Regression (2026-08-24): a 0.92-scoring Rolls-Royce req failed the batch
-    run with "no Next/Submit button found". The debug dump showed an
-    authenticated but empty "Create Account" shell -- login had succeeded, then
-    Workday never returned to the form, so the generic loop found no footer
-    button. The same job succeeded via --external-url, which navigates straight
-    to /apply/autofillWithResume.
+    Regression (2026-08-24, reproduced 2026-08-25): a 0.92-scoring Rolls-Royce
+    req failed the batch twice with "no Next/Submit button found". The debug
+    SCREENSHOT showed the candidate logged in and the application open on the
+    My Information step, with Workday's own error panel telling the user to
+    refresh. The HTML dump was misleading -- truncated at 50k with a stale SPA
+    <title> -- so the failure looked like a login/navigation problem when it was
+    really an unhandled error state. The handler now does what the panel asks.
     """
 
-    def test_apply_url_appends_autofill_path(self):
-        url = "https://rr.wd3.myworkdayjobs.com/en-US/professional/job/Indianapolis/Engineer_JR1"
-        assert WorkdayHandler._apply_url(url).endswith("/apply/autofillWithResume")
-
-    def test_apply_url_strips_query_and_fragment(self):
-        url = "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1?source=LINKEDIN#top"
-        assert WorkdayHandler._apply_url(url) == (
-            "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1/apply/autofillWithResume"
-        )
-
-    def test_apply_url_left_alone_when_already_apply(self):
-        url = "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1/apply/autofillWithResume"
-        assert WorkdayHandler._apply_url(url) == url
-
-    def test_pre_flight_records_entry_url(self):
-        handler = WorkdayHandler()
+    def _page_with_text(self, text):
         page = MagicMock()
-        page.url = "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1"
+        page.evaluate.return_value = text.lower()
+        return page
+
+    def test_detects_error_panel(self):
+        page = self._page_with_text("Something went wrong. Please refresh the page and try again.")
+        assert WorkdayHandler._is_error_page(page) is True
+
+    def test_ignores_normal_page(self):
+        page = self._page_with_text("My Information")
+        assert WorkdayHandler._is_error_page(page) is False
+
+    def test_evaluate_failure_is_not_an_error_page(self):
+        page = MagicMock()
+        page.evaluate.side_effect = RuntimeError("detached frame")
+        assert WorkdayHandler._is_error_page(page) is False
+
+    def test_reloads_on_error_panel(self):
+        handler = WorkdayHandler()
+        page = self._page_with_text("Something went wrong. Please refresh the page.")
         ctx = {}
-        with patch("job_search_apply._safe_click"):
-            handler.pre_flight(page, ctx)
-        assert ctx["_wd_entry_url"] == page.url
+        with patch.object(WorkdayHandler, "_dismiss_cookie_banner"):
+            assert handler._recover_from_error_page(page, ctx) is True
+        page.reload.assert_called_once()
+        assert ctx["_wd_error_reloads"] == 1
 
-    def test_pre_flight_ignores_non_workday_url(self):
+    def test_reload_is_capped(self):
+        """A genuinely broken application must still fail, not loop forever."""
+        handler = WorkdayHandler()
+        page = self._page_with_text("Something went wrong. Please refresh the page.")
+        ctx = {"_wd_error_reloads": _WD_MAX_ERROR_RELOADS}
+        with patch.object(WorkdayHandler, "_dismiss_cookie_banner"):
+            assert handler._recover_from_error_page(page, ctx) is False
+        page.reload.assert_not_called()
+
+    def test_no_reload_on_healthy_page(self):
+        handler = WorkdayHandler()
+        page = self._page_with_text("My Information")
+        assert handler._recover_from_error_page(page, {}) is False
+        page.reload.assert_not_called()
+
+    def test_on_step_start_skips_step_after_recovery(self):
+        """The reloaded page must not be filled in the same iteration."""
         handler = WorkdayHandler()
         page = MagicMock()
-        page.url = "https://www.linkedin.com/jobs/view/123/"
-        ctx = {}
-        with patch("job_search_apply._safe_click"):
-            handler.pre_flight(page, ctx)
-        assert "_wd_entry_url" not in ctx
-
-    def test_login_navigates_back_to_application(self):
-        """The regression: after login the handler must return to the form."""
-        handler = WorkdayHandler()
-        page = MagicMock()
-        page.evaluate.return_value = "create account already have an account"
-        page.url = "https://rr.wd3.myworkdayjobs.com/login"
-        profile = MagicMock()
-        profile.auto_create_accounts = True
-        ctx = {
-            "profile": profile,
-            "_wd_entry_url": "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1",
-        }
+        page.query_selector.return_value = None
+        ctx = {"_wd_autofilled": True}
         with (
-            patch("job_search_apply._attempt_ats_login", return_value=True),
-            patch.object(WorkdayHandler, "_is_form_page", staticmethod(lambda page: False)),
+            patch.object(WorkdayHandler, "_close_blocking_modal"),
             patch.object(WorkdayHandler, "_dismiss_cookie_banner"),
+            patch.object(WorkdayHandler, "_recover_from_error_page", return_value=True),
         ):
-            assert handler.resolve_login_wall(page, ctx) is True
-
-        page.goto.assert_called_once()
-        assert page.goto.call_args[0][0] == (
-            "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1/apply/autofillWithResume"
-        )
-
-    def test_no_navigation_when_already_on_form(self):
-        """Already on a fillable form: don't bounce the page needlessly."""
-        handler = WorkdayHandler()
-        page = MagicMock()
-        page.evaluate.return_value = "create account already have an account"
-        page.url = "https://rr.wd3.myworkdayjobs.com/login"
-        ctx = {"profile": MagicMock(), "_wd_entry_url": "https://rr.wd3.myworkdayjobs.com/job/1"}
-        with (
-            patch("job_search_apply._attempt_ats_login", return_value=True),
-            patch.object(WorkdayHandler, "_is_form_page", staticmethod(lambda page: True)),
-        ):
-            handler.resolve_login_wall(page, ctx)
-        page.goto.assert_not_called()
-
-    def test_autofill_latch_cleared_so_popup_can_rerun(self):
-        """A fresh apply URL re-shows the Autofill popup; the latch must reset."""
-        handler = WorkdayHandler()
-        page = MagicMock()
-        ctx = {
-            "_wd_entry_url": "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1",
-            "_wd_autofilled": True,
-        }
-        with (
-            patch.object(WorkdayHandler, "_is_form_page", staticmethod(lambda page: False)),
-            patch.object(WorkdayHandler, "_dismiss_cookie_banner"),
-        ):
-            handler._return_to_application(page, ctx)
-        assert "_wd_autofilled" not in ctx
+            assert handler.on_step_start(page, ctx) is None
+        assert ctx["skip_step"] is True
 
 
 class TestWorkdayAccountCreation:

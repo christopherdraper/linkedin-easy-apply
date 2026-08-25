@@ -49,6 +49,23 @@ def score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     return {"match_score": score, "matched_skills": matched, "reasoning": "", "deal_breakers": []}
 
 
+# Hard blockers only. workflow.auto_apply_workflow drops a job outright on ANY
+# non-empty deal_breakers, so this list must never carry soft skill gaps -- a
+# free-text field let the scorer kill viable jobs with notes like "no
+# demonstrated FAA/STC process experience", which belongs in the score instead.
+# A closed vocabulary makes that structurally impossible; an unlisted blocker
+# merely fails to auto-skip (a human still sees the job), which is the safer
+# direction to fail in.
+_DEAL_BREAKERS = [
+    "requires_clearance_not_held",
+    "requires_citizenship_not_held",
+    "requires_sponsorship_unavailable",
+    "requires_license_or_certification_not_held",
+    "wrong_country",
+    "relocation_required",
+    "staffing_agency",
+]
+
 # Structured-output schema for ai_score_job. Numeric bounds (minimum/maximum)
 # are not supported by the API schema validator, so the 0-1 clamp stays in Python.
 _SCORE_SCHEMA = {
@@ -57,7 +74,7 @@ _SCORE_SCHEMA = {
         "score": {"type": "number"},
         "reasoning": {"type": "string"},
         "matched_skills": {"type": "array", "items": {"type": "string"}},
-        "deal_breakers": {"type": "array", "items": {"type": "string"}},
+        "deal_breakers": {"type": "array", "items": {"type": "string", "enum": _DEAL_BREAKERS}},
     },
     "required": ["score", "reasoning", "matched_skills", "deal_breakers"],
     "additionalProperties": False,
@@ -90,12 +107,13 @@ Rate how well this job matches the candidate. Respond with ONLY valid JSON, no o
   "score": <0.0 to 1.0>,
   "reasoning": "<1-2 sentences: why this is or isn't a good match>",
   "matched_skills": ["<skills from their profile that appear in the job>"],
-  "deal_breakers": ["<any red flags: on-site only, wrong seniority, relocation required, etc.>"]
+  "deal_breakers": ["<zero or more of the allowed codes below — usually empty>"]
 }}
 
 Scoring guide: 0.9+ = excellent fit, 0.7-0.9 = strong match, 0.5-0.7 = decent match, 0.3-0.5 = partial match, below 0.3 = poor fit. Be honest — don't inflate scores for weak matches.
-IMPORTANT: Contract, freelance, and hourly roles are acceptable — do NOT flag them as deal-breakers. Only flag on-site-only, relocation, wrong seniority, or missing hard technical requirements.
-GEOGRAPHY: Compare "Job location" against "Candidate home location" above. A job in the candidate's own metro area — a suburb, enclave, or neighbouring town within normal commuting distance — is a LOCAL job, not a relocation, even when the town name differs from the candidate's listed city. Do NOT add relocation to deal_breakers and do NOT lower the score for such jobs. Only treat it as relocation when the job would genuinely require moving household to a different metro area. "Remote" is never a relocation.
+DEAL-BREAKERS ARE HARD BLOCKERS ONLY. A deal_breaker means the candidate is categorically ineligible — the application would be rejected no matter how good the rest of the fit is. Use ONLY these codes: {", ".join(_DEAL_BREAKERS)}. Leave the list EMPTY unless one genuinely applies.
+Missing skills, missing tools, too few years of experience, unfamiliar domains, and "no demonstrated X" gaps are NOT deal-breakers — express those by lowering the score. Contract, freelance, and hourly roles are NOT deal-breakers either.
+GEOGRAPHY: Compare "Job location" against "Candidate home location" above. A job in the candidate's own metro area — a suburb, enclave, or neighbouring town within normal commuting distance — is a LOCAL job, not a relocation, even when the town name differs from the candidate's listed city. Do NOT add relocation_required and do NOT lower the score for such jobs. Only use relocation_required when the job would genuinely require moving household to a different metro area. "Remote" is never a relocation.
 BACKEND/SOFTWARE ENGINEERING: The candidate is open to backend software engineering roles, especially Python-heavy ones. Do NOT penalize a match just because the candidate's current title is SRE — they have strong Python skills, API development experience, and have built production automation and agentic AI systems. Score Python/backend roles based on actual skill overlap, not title mismatch.
 STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or talent consultancy (not the actual employer), add "staffing_agency" to deal_breakers. Signs: company name includes words like Solutions, Staffing, Talent, Consulting, Search, Partners, Recruiting, Group; the description says "our client" or "on behalf of"; vague about the actual employer. Direct employers only — no middlemen."""
 
@@ -110,6 +128,11 @@ STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or tale
         result = json.loads(response.content[0].text)
         # Schema can't enforce numeric bounds, so clamp to 0-1 here
         result["match_score"] = round(min(1.0, max(0.0, float(result.get("score", 0.0)))), 2)
+        # Belt and braces on the enum: a soft skill gap that slips through would
+        # silently drop the job, so keep only recognised blocker codes.
+        result["deal_breakers"] = [
+            d for d in result.get("deal_breakers", []) if d in _DEAL_BREAKERS
+        ]
         return result
     except Exception as e:
         log.warning(f"   AI scoring failed, using keyword fallback: {e}")

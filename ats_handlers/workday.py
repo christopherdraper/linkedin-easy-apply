@@ -16,6 +16,7 @@ log = logging.getLogger("job_apply")
 
 WD_REVIEW_PARKED_STATUS = "review_parked: manual submit required"
 _WD_MAX_VISION_PASSES = 3  # per-application cap; each pass drives the whole form (120 actions)
+_WD_MAX_ERROR_RELOADS = 2  # per-application cap on "Something went wrong" reloads
 
 
 class WorkdayHandler(BaseATSHandler):
@@ -25,11 +26,6 @@ class WorkdayHandler(BaseATSHandler):
 
     def pre_flight(self, page, ctx):
         self._dismiss_cookie_banner(page)
-        # Remember where we landed from the job board. Workday's post-login
-        # redirect loses the application, so _return_to_application needs a
-        # known-good posting URL to go back to.
-        if "myworkdayjobs.com" in (page.url or ""):
-            ctx["_wd_entry_url"] = page.url
         return None
 
     def on_step_start(self, page, ctx):
@@ -80,6 +76,13 @@ class WorkdayHandler(BaseATSHandler):
 
         # Re-dismiss cookie banner (can reappear after navigation)
         self._dismiss_cookie_banner(page)
+
+        # Workday's SPA sometimes drops a step and renders "Something went
+        # wrong / refresh the page". Do what it asks before anything else reads
+        # the page, otherwise the step is scored as "no nav button" and lost.
+        if self._recover_from_error_page(page, ctx):
+            ctx["skip_step"] = True
+            return None
 
         if self._is_review_page(page) or self._at_terminal_submit(page):
             log.info("   Workday: Review page reached -- parking (no auto-submit)")
@@ -139,57 +142,55 @@ class WorkdayHandler(BaseATSHandler):
         domain = _get_domain(page.url)
         if _attempt_ats_login(page, domain):
             log.info("   Workday: logged in with stored credentials")
-            self._return_to_application(page, ctx)
             return True
 
         # Try Workday-specific account creation
         if getattr(profile, "auto_create_accounts", False):
-            created = self._create_workday_account(page, profile)
-            if created:
-                self._return_to_application(page, ctx)
-            return created
+            return self._create_workday_account(page, profile)
 
         return False
 
     @staticmethod
-    def _apply_url(url: str) -> str:
-        """Normalise a Workday posting URL to its application entry point."""
-        base = url.split("?")[0].split("#")[0].rstrip("/")
-        if "/apply" in base:
-            return base
-        return f"{base}/apply/autofillWithResume"
+    def _is_error_page(page) -> bool:
+        """True on Workday's "Something went wrong" panel.
 
-    def _return_to_application(self, page, ctx) -> None:
-        """Navigate back to the application form after a login/registration.
-
-        Workday does not resume the application after sign-in -- it drops the
-        session on whatever shell it feels like (commonly a stale "Create
-        Account" page carrying no form fields at all). The generic form loop
-        then finds no footer Next button, burns its three no-button retries and
-        fails the job with "no Next/Submit button found". The direct
-        --external-url path never hits this because it navigates straight to
-        /apply/autofillWithResume, so do the same thing here.
+        Workday's SPA intermittently drops a step (seen twice on the My
+        Information step of a Rolls-Royce req) and renders an error panel whose
+        own instruction is to refresh. It carries no form fields and no footer
+        button, so the generic loop reads it as "no nav button", burns its three
+        retries and fails the application.
         """
-        if self._is_form_page(page):
-            return
-
-        target = ctx.get("_wd_entry_url") or page.url
-        if "myworkdayjobs.com" not in (target or ""):
-            return
-
-        target = self._apply_url(target)
         try:
-            log.info("   Workday: resuming application at %s", target)
-            page.goto(target, wait_until="domcontentloaded", timeout=30000)
+            text = page.evaluate("document.body?.innerText?.toLowerCase() || ''")
+            return "something went wrong" in text and "refresh the page" in text
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _recover_from_error_page(self, page, ctx) -> bool:
+        """Reload past a Workday error panel. True if a reload was performed.
+
+        Bounded by _WD_MAX_ERROR_RELOADS so a genuinely broken application
+        still fails instead of reloading forever.
+        """
+        if not self._is_error_page(page):
+            return False
+
+        reloads = ctx.get("_wd_error_reloads", 0)
+        if reloads >= _WD_MAX_ERROR_RELOADS:
+            log.warning("   Workday: error page persists after %d reloads", reloads)
+            return False
+
+        ctx["_wd_error_reloads"] = reloads + 1
+        log.info("   Workday: 'Something went wrong' -- reloading (%d)", reloads + 1)
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(3000)
         except Exception as exc:  # noqa: BLE001
-            log.debug("Workday: could not resume application: %s", str(exc)[:100])
-            return
+            log.debug("Workday: reload failed: %s", str(exc)[:100])
+            return False
 
         self._dismiss_cookie_banner(page)
-        # A fresh apply URL re-shows the "Autofill with Resume" popup, so let
-        # on_step_start handle it again rather than latching it off.
-        ctx.pop("_wd_autofilled", None)
+        return True
 
     def _create_workday_account(self, page, profile) -> bool:
         """Create a Workday account using React-SPA-compatible selectors."""

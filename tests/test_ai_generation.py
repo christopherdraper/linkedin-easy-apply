@@ -17,7 +17,7 @@ from job_search_apply import (
     score_job,
 )
 from jobapply import stats
-from jobapply.content import _home_location
+from jobapply.content import _DEAL_BREAKERS, _home_location
 
 VALID_SCORE_JSON = (
     '{"score": 0.9, "reasoning": "Strong overlap", '
@@ -153,6 +153,56 @@ class TestAiScoreJobGeography:
         profile.city = None
         profile.state = None
         assert _home_location(profile) == "not provided"
+
+
+class TestAiScoreJobDealBreakers:
+    """deal_breakers must carry hard blockers only.
+
+    Regression (2026-08-24): the field was free text, so the scorer filled it
+    with soft skill gaps -- an AAR cabin-engineering role was killed by
+    ["No commercial aircraft (Airbus/Boeing) experience documented",
+     "No demonstrated FAA/STC process experience", ...]. Because
+    auto_apply_workflow drops a job on ANY non-empty deal_breakers, those notes
+    silently removed viable jobs that should merely have scored lower.
+    """
+
+    def test_schema_constrains_deal_breakers_to_known_codes(self, ai_client, profile, job):
+        with ai_client(VALID_SCORE_JSON) as mock_client:
+            ai_score_job(job, profile)
+        schema = mock_client.return_value.messages.create.call_args.kwargs["output_config"][
+            "format"
+        ]["schema"]
+        assert schema["properties"]["deal_breakers"]["items"]["enum"] == _DEAL_BREAKERS
+
+    def test_skill_gap_strings_are_discarded(self, ai_client, profile, job):
+        """The exact payload that killed the AAR job must now be dropped."""
+        raw = (
+            '{"score": 0.72, "reasoning": "close", "matched_skills": [], '
+            '"deal_breakers": ["No demonstrated FAA/STC process experience", '
+            '"Limited cabin interior/interiors engineering background"]}'
+        )
+        with ai_client(raw):
+            result = ai_score_job(job, profile)
+        assert result["deal_breakers"] == []
+        assert result["match_score"] == 0.72
+
+    def test_real_blockers_survive(self, ai_client, profile, job):
+        raw = (
+            '{"score": 0.8, "reasoning": "agency", "matched_skills": [], '
+            '"deal_breakers": ["staffing_agency", "requires_clearance_not_held"]}'
+        )
+        with ai_client(raw):
+            result = ai_score_job(job, profile)
+        assert result["deal_breakers"] == ["staffing_agency", "requires_clearance_not_held"]
+
+    def test_prompt_states_hard_blockers_only(self, ai_client, profile, job):
+        with ai_client(VALID_SCORE_JSON) as mock_client:
+            ai_score_job(job, profile)
+        prompt = mock_client.return_value.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "HARD BLOCKERS ONLY" in prompt
+        assert "are NOT deal-breakers" in prompt
+        for code in _DEAL_BREAKERS:
+            assert code in prompt
 
 
 class TestAiGenerateCoverLetter:
