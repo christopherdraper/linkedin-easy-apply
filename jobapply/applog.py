@@ -86,20 +86,23 @@ def save_search_log(entry: Dict):
         fd.close()
 
 
+# Statuses that mean "this job has had its turn" -- a later batch must not
+# spend another run on it. "review_parked" belongs here: the Workday draft
+# already exists server-side and only the human can submit it, so re-driving it
+# just burns a vision pass (~$1.20 and ~3 minutes) and adds a duplicate row.
+_ATTEMPTED_STATUSES = ("submitted", "failed", "skipped", "review_parked")
+
+
 def already_applied(log_entries: List[Dict]) -> set:
     """Return a set of canonical URLs and job IDs for previously attempted applications.
 
-    Includes both submitted and failed entries so we don't re-attempt the same
-    job with a different tracking-parameter URL.
+    Covers submitted, failed, skipped and review-parked entries so we don't
+    re-attempt the same job with a different tracking-parameter URL.
     """
     result = set()
     for e in log_entries:
         status = e.get("status", "")
-        if (
-            status.startswith("submitted")
-            or status.startswith("failed")
-            or status.startswith("skipped")
-        ):
+        if status.startswith(_ATTEMPTED_STATUSES):
             if e.get("url"):
                 # Strip tracking params for canonical matching
                 canonical = re.sub(r"\?.*$", "", e["url"])

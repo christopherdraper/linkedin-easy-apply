@@ -304,6 +304,44 @@ class TestSearchLog:
         assert (data_dir / "search_log.json.corrupt").read_text() == "{broken json"
 
 
+class TestAlreadyAppliedReviewParked:
+    """A Workday app parked at Review must never be re-driven.
+
+    Regression (2026-08-25): already_applied matched only submitted/failed/
+    skipped, so "review_parked: manual submit required" was invisible to dedup.
+    The same Rolls-Royce req was driven to Review three times across two days,
+    burning a vision pass (~$1.20, ~3 min) and a duplicate log row each time,
+    and starving the batch of its remaining application budget.
+    """
+
+    def test_review_parked_counts_as_attempted(self):
+        log = [
+            {
+                "url": "https://rr.wd3.myworkdayjobs.com/job/1",
+                "job_id": "li_abc",
+                "status": "review_parked: manual submit required",
+            }
+        ]
+        result = already_applied(log)
+        assert "https://rr.wd3.myworkdayjobs.com/job/1" in result
+        assert "li_abc" in result
+
+    def test_all_attempted_statuses_covered(self):
+        for status in (
+            "submitted",
+            "failed: form stuck",
+            "skipped: requires account",
+            "review_parked: manual submit required",
+        ):
+            log = [{"url": "https://a.com/j/1", "job_id": "li_1", "status": status}]
+            assert already_applied(log) == {"https://a.com/j/1", "li_1"}, status
+
+    def test_unattempted_status_still_ignored(self):
+        """A status we don't recognise must not silently block the job."""
+        log = [{"url": "https://a.com/j/1", "job_id": "li_1", "status": "dry_run"}]
+        assert already_applied(log) == set()
+
+
 class TestAlreadyAppliedEdgeCases:
     """Edge cases beyond the basics in test_profile.py (status filtering,
     canonical query-param dedup, missing url)."""
