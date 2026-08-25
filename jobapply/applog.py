@@ -136,15 +136,22 @@ def save_score_cache(cache: Dict[str, Dict]) -> None:
     SCORE_CACHE_FILE.write_text(json.dumps(cache, indent=2))
 
 
-def cached_score(cache: Dict[str, Dict], job_id: str) -> Dict | None:
+def cached_score(cache: Dict[str, Dict], job_id: str, fingerprint: str = "") -> Dict | None:
     """Return a still-fresh cached verdict for job_id, or None.
 
-    Entries past SCORE_CACHE_TTL_DAYS, and entries produced by the keyword
-    fallback scorer rather than the AI (a transient AI outage is not a real
-    rejection), are treated as misses so the job gets scored again.
+    Treated as misses, so the job gets scored again:
+      - entries past SCORE_CACHE_TTL_DAYS;
+      - entries from the keyword fallback scorer rather than the AI, since a
+        transient AI outage is not a real rejection;
+      - entries whose ``scorer`` fingerprint differs from the caller's, i.e.
+        the scoring rules have been edited since. Without this the cache would
+        keep serving verdicts the current rules would no longer reach, and a
+        scoring fix would not take effect until every entry aged out.
     """
     entry = cache.get(job_id)
     if not entry or not entry.get("ai_scored"):
+        return None
+    if fingerprint and entry.get("scorer") != fingerprint:
         return None
     try:
         age_days = (time.time() - float(entry["scored_at"])) / 86400
@@ -153,7 +160,13 @@ def cached_score(cache: Dict[str, Dict], job_id: str) -> Dict | None:
     return None if age_days > SCORE_CACHE_TTL_DAYS else entry
 
 
-def remember_score(cache: Dict[str, Dict], job_id: str, compat: Dict, ai_scored: bool) -> None:
+def remember_score(
+    cache: Dict[str, Dict],
+    job_id: str,
+    compat: Dict,
+    ai_scored: bool,
+    fingerprint: str = "",
+) -> None:
     """Record a scoring verdict so overlapping title searches don't re-score it.
 
     Stores the raw score rather than a reject decision: min_match_score is a
@@ -168,5 +181,6 @@ def remember_score(cache: Dict[str, Dict], job_id: str, compat: Dict, ai_scored:
         "deal_breakers": compat.get("deal_breakers", []),
         "matched_skills": compat.get("matched_skills", []),
         "ai_scored": ai_scored,
+        "scorer": fingerprint,
         "scored_at": time.time(),
     }

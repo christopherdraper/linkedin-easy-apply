@@ -195,6 +195,23 @@ class TestAiScoreJobDealBreakers:
             result = ai_score_job(job, profile)
         assert result["deal_breakers"] == ["staffing_agency", "requires_clearance_not_held"]
 
+    def test_prompt_weights_core_over_peripheral_gaps(self, ai_client, profile, job):
+        """Core competency present + peripheral gap must read as a modest
+        deduction, not a near-miss.
+
+        The 2026-08-24 batch parked 13 jobs at 0.72 (just under the 0.75 bar)
+        on reasons that recurred verbatim: "only 4 years" against "5+ years"
+        (21 and 11 mentions) and holding Siemens NX where the posting listed
+        SolidWorks (12 mentions). Same-class tools and a one-year shortfall
+        should not decide a qualified candidate.
+        """
+        with ai_client(VALID_SCORE_JSON) as mock_client:
+            ai_score_job(job, profile)
+        prompt = mock_client.return_value.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "CORE VS PERIPHERAL:" in prompt
+        assert "counts as a MATCH, not a gap" in prompt
+        assert "Siemens NX" in prompt
+
     def test_prompt_states_hard_blockers_only(self, ai_client, profile, job):
         with ai_client(VALID_SCORE_JSON) as mock_client:
             ai_score_job(job, profile)

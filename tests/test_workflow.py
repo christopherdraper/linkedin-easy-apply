@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jobapply.stats as stats  # noqa: E402
 import jobapply.workflow as workflow  # noqa: E402
 from jobapply.applog import remember_score  # noqa: E402
+from jobapply.content import SCORER_FINGERPRINT  # noqa: E402
 from jobapply.profile import JobSearchParams  # noqa: E402
 from jobapply.workflow import (  # noqa: E402
     _build_application_entry,
@@ -272,7 +273,7 @@ class TestAutoApplyWorkflow:
         low_compat = {"match_score": 0.2, "reasoning": "weak", "deal_breakers": []}
         params = JobSearchParams(title="devops engineer")
         primed = {}
-        remember_score(primed, job["id"], low_compat, ai_scored=True)
+        remember_score(primed, job["id"], low_compat, True, SCORER_FINGERPRINT)
 
         with ExitStack() as stack:
             mocks = _workflow_seams(stack, [dict(job)], low_compat, data_dir / "cl.docx")

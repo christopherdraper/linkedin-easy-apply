@@ -20,6 +20,7 @@ from jobapply.applog import (
 from jobapply.browser import _human_delay
 from jobapply.config import COVER_LETTER_DIR, LOG_FILE
 from jobapply.content import (
+    SCORER_FINGERPRINT,
     _save_cover_letter_docx,
     ai_build_notes,
     ai_generate_cover_letter,
@@ -236,12 +237,14 @@ def auto_apply_workflow(  # noqa: C901
         # Overlapping title searches surface the same posting repeatedly (one
         # batch spent 60 scoring calls on 29 unique jobs). Reuse a recent
         # verdict instead of paying for the same judgement again.
-        compat = cached_score(score_cache, job.get("id", ""))
+        compat = cached_score(score_cache, job.get("id", ""), SCORER_FINGERPRINT)
         if compat is not None:
             log.info(f"   ♻️  Reusing cached score ({compat['match_score']}): {job['title']}")
         else:
             compat = ai_score_job(job, profile)
-            remember_score(score_cache, job.get("id", ""), compat, _AI_AVAILABLE)
+            remember_score(
+                score_cache, job.get("id", ""), compat, _AI_AVAILABLE, SCORER_FINGERPRINT
+            )
             score_cache_dirty = True
 
         if compat["match_score"] < min_match_score:

@@ -271,6 +271,35 @@ class TestScoreCache:
     def test_malformed_entry_is_a_miss(self):
         assert cached_score({"li_1": {"ai_scored": True}}, "li_1") is None
 
+    def test_verdict_from_different_scoring_rules_is_a_miss(self):
+        """A scoring fix must take effect now, not in 14 days.
+
+        Regression (2026-08-25): the CORE VS PERIPHERAL rule was added to lift
+        jobs that were parking at 0.72 on peripheral gaps -- but the very jobs
+        it targeted were being served from cache under the OLD rules, so the
+        improvement would have been invisible until every entry aged out.
+        """
+        cache = {}
+        remember_score(cache, "li_1", self._entry(), ai_scored=True, fingerprint="oldrules")
+        assert cached_score(cache, "li_1", "newrules") is None
+        assert cached_score(cache, "li_1", "oldrules")["match_score"] == 0.62
+
+    def test_real_fingerprint_round_trips(self):
+        from jobapply.content import SCORER_FINGERPRINT
+
+        cache = {}
+        remember_score(cache, "li_1", self._entry(), True, SCORER_FINGERPRINT)
+        assert cached_score(cache, "li_1", SCORER_FINGERPRINT) is not None
+
+    def test_fingerprint_tracks_the_scoring_rules(self):
+        """Editing a rule must change the fingerprint automatically."""
+        import hashlib
+
+        from jobapply.content import _SCORING_RULES, SCORER_FINGERPRINT
+
+        assert SCORER_FINGERPRINT == hashlib.sha256(_SCORING_RULES.encode()).hexdigest()[:12]
+        assert "CORE VS PERIPHERAL" in _SCORING_RULES
+
 
 class TestSearchLog:
     def test_creates_file_and_appends(self, data_dir):
