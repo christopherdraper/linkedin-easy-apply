@@ -2212,12 +2212,47 @@ def _navigate_external_form(  # noqa: C901
     return f"failed: exceeded max form steps ({_MAX_EXTERNAL_STEPS})"
 
 
+def _canonical_ats_key(url: str) -> str:
+    """Reduce an ATS URL to the requisition it identifies.
+
+    Strips query/fragment and any /apply... sub-path, so a posting page and its
+    application page collapse to one key.
+    """
+    base = re.sub(r"\?.*$", "", url or "").split("#")[0].rstrip("/")
+    base = re.sub(r"/apply(/.*)?$", "", base)
+    return base.lower()
+
+
+def _duplicate_ats_application(ats_url: str) -> Optional[str]:
+    """Status to return if this requisition has already been applied to.
+
+    A single ATS requisition can be fronted by several job-board postings --
+    LinkedIn lists Rolls-Royce reqs both plainly and in a "with verification"
+    variant, each with its own posting id. Batch dedup keys on the posting id,
+    so the duplicate only becomes visible here, once the real ATS URL is known.
+    Stopping now skips the form/vision pass, which is where the cost is.
+    """
+    key = _canonical_ats_key(ats_url)
+    if not key or key.startswith("about:"):
+        return None
+
+    from jobapply.applog import _ATTEMPTED_STATUSES, load_log
+
+    for entry in load_log():
+        if not str(entry.get("status", "")).startswith(_ATTEMPTED_STATUSES):
+            continue
+        if entry.get("ats_url") and _canonical_ats_key(entry["ats_url"]) == key:
+            return "skipped: already applied to this requisition"
+    return None
+
+
 def submit_external_apply(  # noqa: C901
     job: Dict,
     profile: ApplicantProfile,
     cover_letter_path: str = "",
     proxy: Optional[str] = None,
     dry_run: bool = False,
+    dedupe_ats: bool = False,
 ) -> str:
     """
     Submit an external job application using AI-powered form filling.
@@ -2334,6 +2369,15 @@ def submit_external_apply(  # noqa: C901
 
             # Update ATS URL after pre-flight may have navigated
             stats._final_ats_url = page.url
+
+            # Now that the real requisition is known, drop out if a different
+            # posting for it has already been applied to (batch runs only --
+            # an explicit --external-url is always honoured).
+            if dedupe_ats:
+                duplicate = _duplicate_ats_application(page.url)
+                if duplicate:
+                    log.info("   ⏭  %s (%s)", duplicate, _canonical_ats_key(page.url)[:70])
+                    return duplicate
 
             # Login wall check: handler gets first chance, then generic resolution
             if _detect_login_page(page):

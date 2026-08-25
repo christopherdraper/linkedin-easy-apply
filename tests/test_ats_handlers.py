@@ -1554,3 +1554,58 @@ class TestWorkdayVisionDrive:
         vcp.assert_called_once()
         assert result is None
         assert ctx["skip_step"] is True
+
+
+from jobapply.external import (  # noqa: E402
+    _canonical_ats_key,
+    _duplicate_ats_application,
+)
+
+
+class TestAtsRequisitionDedup:
+    """One ATS requisition can be fronted by several job-board postings.
+
+    Regression (2026-08-25): LinkedIn lists Rolls-Royce reqs both plainly and
+    in a "with verification" variant. Postings 4437870820 and 4456063734 have
+    different ids, so batch dedup saw two jobs, but both resolve to the same
+    Workday requisition -- which was driven to Review twice in one run, each
+    pass costing a vision run (~$1.20, ~3 min) and an application slot.
+    """
+
+    WD = "https://rr.wd3.myworkdayjobs.com/en-US/professional/job/Indianapolis/Eng_JR1"
+
+    def test_apply_subpath_collapses_to_the_requisition(self):
+        assert _canonical_ats_key(f"{self.WD}/apply/autofillWithResume") == _canonical_ats_key(
+            self.WD
+        )
+
+    def test_query_and_fragment_ignored(self):
+        assert _canonical_ats_key(f"{self.WD}?source=LINKEDIN#top") == _canonical_ats_key(self.WD)
+
+    def test_trailing_slash_ignored(self):
+        assert _canonical_ats_key(f"{self.WD}/") == _canonical_ats_key(self.WD)
+
+    def test_distinct_requisitions_do_not_collide(self):
+        other = self.WD.replace("Eng_JR1", "Eng_JR2")
+        assert _canonical_ats_key(other) != _canonical_ats_key(self.WD)
+
+    def test_second_posting_for_same_req_is_skipped(self):
+        log = [{"status": "review_parked: manual submit required", "ats_url": self.WD}]
+        with patch("jobapply.applog.load_log", return_value=log):
+            result = _duplicate_ats_application(f"{self.WD}/apply/autofillWithResume")
+        assert result == "skipped: already applied to this requisition"
+
+    def test_new_requisition_proceeds(self):
+        log = [{"status": "submitted", "ats_url": self.WD}]
+        with patch("jobapply.applog.load_log", return_value=log):
+            assert _duplicate_ats_application(self.WD.replace("Eng_JR1", "Eng_JR9")) is None
+
+    def test_unattempted_status_does_not_block(self):
+        log = [{"status": "dry_run", "ats_url": self.WD}]
+        with patch("jobapply.applog.load_log", return_value=log):
+            assert _duplicate_ats_application(self.WD) is None
+
+    def test_blank_and_about_blank_are_ignored(self):
+        with patch("jobapply.applog.load_log", return_value=[]):
+            assert _duplicate_ats_application("") is None
+            assert _duplicate_ats_application("about:blank") is None

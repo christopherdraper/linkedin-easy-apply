@@ -141,7 +141,12 @@ class TestSubmitOne:
             status = _submit_one(job, profile, Path("/tmp/cl.docx"), dry_run=False, proxy=None)
         assert status == "failed: no apply button found"
         mock_ext.assert_called_once_with(
-            job, profile, cover_letter_path="/tmp/cl.docx", proxy=None, dry_run=False
+            job,
+            profile,
+            cover_letter_path="/tmp/cl.docx",
+            proxy=None,
+            dry_run=False,
+            dedupe_ats=True,
         )
         mock_easy.assert_not_called()
 

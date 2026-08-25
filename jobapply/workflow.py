@@ -93,6 +93,7 @@ def _submit_one(
             cover_letter_path=str(cl_file),
             proxy=proxy,
             dry_run=dry_run,
+            dedupe_ats=True,
         )
         icon = (
             "✅"
