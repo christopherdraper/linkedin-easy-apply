@@ -408,14 +408,14 @@ def _run_external_url(args) -> None:
     # Review) show up in the dashboard, same as batch runs. Without this the
     # dashboard silently omits every --external-url application.
     if not args.dry_run:
-        from jobapply.applog import load_log, save_log
+        from jobapply.applog import save_log
         from jobapply.workflow import _build_application_entry
 
         compat = {"match_score": 0.0, "reasoning": "", "deal_breakers": []}
         entry = _build_application_entry(job, compat, status, "", "", None, None, None)
-        entries = load_log()
-        entries.append(entry)
-        save_log(entries)
+        # save_log appends to the existing log, so pass ONLY the new entry.
+        # Passing the full log duplicates every existing record.
+        save_log([entry])
         log.info("   💾 Logged to applications.json")
 
 
