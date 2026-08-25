@@ -8,7 +8,15 @@ from typing import Dict, Optional
 
 from jobapply import stats
 from jobapply.ai import _AI_AVAILABLE
-from jobapply.applog import already_applied, load_log, save_log
+from jobapply.applog import (
+    already_applied,
+    cached_score,
+    load_log,
+    load_score_cache,
+    remember_score,
+    save_log,
+    save_score_cache,
+)
 from jobapply.browser import _human_delay
 from jobapply.config import COVER_LETTER_DIR, LOG_FILE
 from jobapply.content import (
@@ -187,6 +195,9 @@ def auto_apply_workflow(  # noqa: C901
     if applied_urls:
         log.info(f"   Skipping {len(applied_urls)} already-applied jobs\n")
 
+    score_cache = load_score_cache()
+    score_cache_dirty = False
+
     log.info(f"🔍 Searching {label} for '{params.title}'...")
     try:
         jobs = _search_source(source, params, proxy)
@@ -222,7 +233,16 @@ def auto_apply_workflow(  # noqa: C901
         # (previously the submit functions reset them after scoring ran).
         stats.reset_run_stats()
 
-        compat = ai_score_job(job, profile)
+        # Overlapping title searches surface the same posting repeatedly (one
+        # batch spent 60 scoring calls on 29 unique jobs). Reuse a recent
+        # verdict instead of paying for the same judgement again.
+        compat = cached_score(score_cache, job.get("id", ""))
+        if compat is not None:
+            log.info(f"   ♻️  Reusing cached score ({compat['match_score']}): {job['title']}")
+        else:
+            compat = ai_score_job(job, profile)
+            remember_score(score_cache, job.get("id", ""), compat, _AI_AVAILABLE)
+            score_cache_dirty = True
 
         if compat["match_score"] < min_match_score:
             reason = f" — {compat['reasoning']}" if compat.get("reasoning") else ""
@@ -284,6 +304,9 @@ def auto_apply_workflow(  # noqa: C901
             _human_delay(base=8.0, jitter=12.0)  # 8-20s, occasionally 20-35s
         else:
             _human_delay(base=3.0, jitter=5.0)  # 3-8s for external ATS
+
+    if score_cache_dirty:
+        save_score_cache(score_cache)
 
     save_log(applications)
 

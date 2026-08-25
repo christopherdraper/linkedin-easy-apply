@@ -17,6 +17,7 @@ from job_search_apply import (
     score_job,
 )
 from jobapply import stats
+from jobapply.content import _home_location
 
 VALID_SCORE_JSON = (
     '{"score": 0.9, "reasoning": "Strong overlap", '
@@ -117,6 +118,41 @@ class TestAiScoreJob:
         assert "Senior DevOps Engineer" in prompt
         assert "TechCo" in prompt
         assert "Test User" in prompt
+
+
+class TestAiScoreJobGeography:
+    """The scorer must not mistake the candidate's own metro for a relocation.
+
+    Regression (2026-08-24): a Speedway, IN job (an enclave inside Indianapolis,
+    ~15 min from the candidate's home) was scored twice — once "geographically
+    compatible with his current Indianapolis base", once "requiring relocation
+    from Indianapolis". Because workflow.py skips a job outright on ANY
+    non-empty deal_breakers, the spurious relocation flag silently dropped
+    local on-site jobs — exactly the ones the search was scoped to find.
+    """
+
+    def test_prompt_labels_both_locations(self, ai_client, profile, job):
+        job["location"] = "Speedway, IN"
+        with ai_client(VALID_SCORE_JSON) as mock_client:
+            ai_score_job(job, profile)
+        prompt = mock_client.return_value.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "Job location: Speedway, IN" in prompt
+        assert "Candidate home location: Indianapolis, IN" in prompt
+
+    def test_prompt_carries_same_metro_rule(self, ai_client, profile, job):
+        with ai_client(VALID_SCORE_JSON) as mock_client:
+            ai_score_job(job, profile)
+        prompt = mock_client.return_value.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "GEOGRAPHY:" in prompt
+        assert "not a relocation" in prompt
+
+    def test_home_location_formats_city_state(self, profile):
+        assert _home_location(profile) == "Indianapolis, IN"
+
+    def test_home_location_handles_missing_fields(self, profile):
+        profile.city = None
+        profile.state = None
+        assert _home_location(profile) == "not provided"
 
 
 class TestAiGenerateCoverLetter:

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import jobapply.stats as stats  # noqa: E402
 import jobapply.workflow as workflow  # noqa: E402
+from jobapply.applog import remember_score  # noqa: E402
 from jobapply.profile import JobSearchParams  # noqa: E402
 from jobapply.workflow import (  # noqa: E402
     _build_application_entry,
@@ -200,6 +201,10 @@ def _workflow_seams(stack, jobs, compat, cl_path, submit_status="submitted"):
             patch("jobapply.workflow.already_applied", return_value=set())
         ),
         "save_log": stack.enter_context(patch("jobapply.workflow.save_log")),
+        "load_score_cache": stack.enter_context(
+            patch("jobapply.workflow.load_score_cache", return_value={})
+        ),
+        "save_score_cache": stack.enter_context(patch("jobapply.workflow.save_score_cache")),
         "delay": stack.enter_context(patch("jobapply.workflow._human_delay")),
         "reset": stack.enter_context(patch("jobapply.workflow.stats.reset_run_stats")),
     }
@@ -240,6 +245,42 @@ class TestAutoApplyWorkflow:
         mocks["submit"].assert_not_called()
         mocks["cover"].assert_not_called()
         mocks["save_log"].assert_called_once_with([])
+
+    def test_rejected_job_is_not_rescored_on_a_later_run(self, data_dir, monkeypatch, job, profile):
+        """The waste this cache exists to stop: the same posting surfacing under
+        several overlapping title searches and being re-scored every time."""
+        monkeypatch.setattr(workflow, "COVER_LETTER_DIR", data_dir / "cover-letters")
+        low_compat = {"match_score": 0.2, "reasoning": "weak overlap", "deal_breakers": []}
+        params = JobSearchParams(title="devops engineer")
+        shared_cache = {}
+
+        for _ in range(2):
+            with ExitStack() as stack:
+                mocks = _workflow_seams(stack, [dict(job)], low_compat, data_dir / "cl.docx")
+                mocks["load_score_cache"].return_value = shared_cache
+                auto_apply_workflow(params, profile, max_applications=5, min_match_score=0.5)
+                scored_calls = mocks["score"].call_count
+
+        # Second run reused the cached verdict instead of calling the scorer.
+        assert scored_calls == 0
+        assert shared_cache[job["id"]]["match_score"] == 0.2
+
+    def test_score_cache_not_written_when_nothing_new_scored(
+        self, data_dir, monkeypatch, job, profile
+    ):
+        monkeypatch.setattr(workflow, "COVER_LETTER_DIR", data_dir / "cover-letters")
+        low_compat = {"match_score": 0.2, "reasoning": "weak", "deal_breakers": []}
+        params = JobSearchParams(title="devops engineer")
+        primed = {}
+        remember_score(primed, job["id"], low_compat, ai_scored=True)
+
+        with ExitStack() as stack:
+            mocks = _workflow_seams(stack, [dict(job)], low_compat, data_dir / "cl.docx")
+            mocks["load_score_cache"].return_value = primed
+            auto_apply_workflow(params, profile, max_applications=5, min_match_score=0.5)
+
+        mocks["score"].assert_not_called()
+        mocks["save_score_cache"].assert_not_called()
 
     def test_search_failure_returns_empty_result(self, data_dir, profile):
         params = JobSearchParams(title="devops engineer")

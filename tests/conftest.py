@@ -225,6 +225,7 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(jobapply.applog, "DATA_DIR", tmp_path)
     monkeypatch.setattr(jobapply.applog, "LOG_FILE", tmp_path / "applications.json")
     monkeypatch.setattr(jobapply.applog, "SEARCH_LOG_FILE", tmp_path / "search_log.json")
+    monkeypatch.setattr(jobapply.applog, "SCORE_CACHE_FILE", tmp_path / "score_cache.json")
     monkeypatch.setattr(jobapply.content, "COVER_LETTER_DIR", tmp_path / "cover-letters")
     monkeypatch.setattr(jobapply.queue, "DATA_DIR", tmp_path)
     monkeypatch.setattr(jobapply.queue, "LOG_FILE", tmp_path / "applications.json")

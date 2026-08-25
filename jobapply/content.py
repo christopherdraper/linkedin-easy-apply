@@ -16,6 +16,21 @@ from jobapply.safety import _sanitize_description
 log = logging.getLogger(__name__)
 
 
+def _home_location(profile: ApplicantProfile) -> str:
+    """The candidate's home city/state, for the scorer's geography comparison.
+
+    The scorer used to receive the job's location and the applicant's location
+    as two unrelated lines and had to guess whether they were the same metro.
+    It guessed inconsistently -- the same Speedway, IN job (an enclave inside
+    Indianapolis) was called both "geographically compatible" and "requiring
+    relocation from Indianapolis" on different passes. A spurious relocation
+    deal-breaker drops the job entirely, so the two locations are now labelled
+    and compared explicitly.
+    """
+    parts = [p for p in (profile.city, profile.state) if p]
+    return ", ".join(parts) if parts else "not provided"
+
+
 def score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     """Keyword-based fallback scorer used when AI is unavailable."""
     description = re.sub(
@@ -65,7 +80,8 @@ def ai_score_job(job: Dict, profile: ApplicantProfile) -> Dict:
 
 Job title: {job.get("title")}
 Company: {job.get("company")}
-Location: {job.get("location")}
+Job location: {job.get("location")}
+Candidate home location: {_home_location(profile)}
 Job description:
 {description}
 
@@ -79,6 +95,7 @@ Rate how well this job matches the candidate. Respond with ONLY valid JSON, no o
 
 Scoring guide: 0.9+ = excellent fit, 0.7-0.9 = strong match, 0.5-0.7 = decent match, 0.3-0.5 = partial match, below 0.3 = poor fit. Be honest — don't inflate scores for weak matches.
 IMPORTANT: Contract, freelance, and hourly roles are acceptable — do NOT flag them as deal-breakers. Only flag on-site-only, relocation, wrong seniority, or missing hard technical requirements.
+GEOGRAPHY: Compare "Job location" against "Candidate home location" above. A job in the candidate's own metro area — a suburb, enclave, or neighbouring town within normal commuting distance — is a LOCAL job, not a relocation, even when the town name differs from the candidate's listed city. Do NOT add relocation to deal_breakers and do NOT lower the score for such jobs. Only treat it as relocation when the job would genuinely require moving household to a different metro area. "Remote" is never a relocation.
 BACKEND/SOFTWARE ENGINEERING: The candidate is open to backend software engineering roles, especially Python-heavy ones. Do NOT penalize a match just because the candidate's current title is SRE — they have strong Python skills, API development experience, and have built production automation and agentic AI systems. Score Python/backend roles based on actual skill overlap, not title mismatch.
 STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or talent consultancy (not the actual employer), add "staffing_agency" to deal_breakers. Signs: company name includes words like Solutions, Staffing, Talent, Consulting, Search, Partners, Recruiting, Group; the description says "our client" or "on behalf of"; vague about the actual employer. Direct employers only — no middlemen."""
 

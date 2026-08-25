@@ -458,7 +458,11 @@ class TestQ2HandlerHooks:
         assert "q2_resolve_login_wall" in call_order
 
 
-from ats_handlers.workday import WorkdayHandler  # noqa: E402
+from ats_handlers.workday import (  # noqa: E402
+    _WD_MAX_VISION_PASSES,
+    WD_REVIEW_PARKED_STATUS,
+    WorkdayHandler,
+)
 
 
 class TestWorkdayHandler:
@@ -494,6 +498,7 @@ class TestWorkdayHandler:
         handler = WorkdayHandler()
         page = MagicMock()
         page.query_selector.return_value = None
+        page.evaluate.return_value = False
         ctx = {}
         result = handler.on_step_start(page, ctx)
         assert result is None
@@ -764,6 +769,103 @@ class TestSmartRecruitersHandler:
         result = handler.pre_flight(page, ctx)
         assert result is None
         page.goto.assert_not_called()  # already on oneclick, no navigation
+
+
+class TestWorkdayResumeApplicationAfterLogin:
+    """Workday does not resume the application after sign-in.
+
+    Regression (2026-08-24): a 0.92-scoring Rolls-Royce req failed the batch
+    run with "no Next/Submit button found". The debug dump showed an
+    authenticated but empty "Create Account" shell -- login had succeeded, then
+    Workday never returned to the form, so the generic loop found no footer
+    button. The same job succeeded via --external-url, which navigates straight
+    to /apply/autofillWithResume.
+    """
+
+    def test_apply_url_appends_autofill_path(self):
+        url = "https://rr.wd3.myworkdayjobs.com/en-US/professional/job/Indianapolis/Engineer_JR1"
+        assert WorkdayHandler._apply_url(url).endswith("/apply/autofillWithResume")
+
+    def test_apply_url_strips_query_and_fragment(self):
+        url = "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1?source=LINKEDIN#top"
+        assert WorkdayHandler._apply_url(url) == (
+            "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1/apply/autofillWithResume"
+        )
+
+    def test_apply_url_left_alone_when_already_apply(self):
+        url = "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1/apply/autofillWithResume"
+        assert WorkdayHandler._apply_url(url) == url
+
+    def test_pre_flight_records_entry_url(self):
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.url = "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1"
+        ctx = {}
+        with patch("job_search_apply._safe_click"):
+            handler.pre_flight(page, ctx)
+        assert ctx["_wd_entry_url"] == page.url
+
+    def test_pre_flight_ignores_non_workday_url(self):
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.url = "https://www.linkedin.com/jobs/view/123/"
+        ctx = {}
+        with patch("job_search_apply._safe_click"):
+            handler.pre_flight(page, ctx)
+        assert "_wd_entry_url" not in ctx
+
+    def test_login_navigates_back_to_application(self):
+        """The regression: after login the handler must return to the form."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "create account already have an account"
+        page.url = "https://rr.wd3.myworkdayjobs.com/login"
+        profile = MagicMock()
+        profile.auto_create_accounts = True
+        ctx = {
+            "profile": profile,
+            "_wd_entry_url": "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1",
+        }
+        with (
+            patch("job_search_apply._attempt_ats_login", return_value=True),
+            patch.object(WorkdayHandler, "_is_form_page", staticmethod(lambda page: False)),
+            patch.object(WorkdayHandler, "_dismiss_cookie_banner"),
+        ):
+            assert handler.resolve_login_wall(page, ctx) is True
+
+        page.goto.assert_called_once()
+        assert page.goto.call_args[0][0] == (
+            "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1/apply/autofillWithResume"
+        )
+
+    def test_no_navigation_when_already_on_form(self):
+        """Already on a fillable form: don't bounce the page needlessly."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "create account already have an account"
+        page.url = "https://rr.wd3.myworkdayjobs.com/login"
+        ctx = {"profile": MagicMock(), "_wd_entry_url": "https://rr.wd3.myworkdayjobs.com/job/1"}
+        with (
+            patch("job_search_apply._attempt_ats_login", return_value=True),
+            patch.object(WorkdayHandler, "_is_form_page", staticmethod(lambda page: True)),
+        ):
+            handler.resolve_login_wall(page, ctx)
+        page.goto.assert_not_called()
+
+    def test_autofill_latch_cleared_so_popup_can_rerun(self):
+        """A fresh apply URL re-shows the Autofill popup; the latch must reset."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        ctx = {
+            "_wd_entry_url": "https://rr.wd3.myworkdayjobs.com/en-US/pro/job/Indy/Eng_JR1",
+            "_wd_autofilled": True,
+        }
+        with (
+            patch.object(WorkdayHandler, "_is_form_page", staticmethod(lambda page: False)),
+            patch.object(WorkdayHandler, "_dismiss_cookie_banner"),
+        ):
+            handler._return_to_application(page, ctx)
+        assert "_wd_autofilled" not in ctx
 
 
 class TestWorkdayAccountCreation:
@@ -1317,3 +1419,165 @@ class TestLeverHandlerBehavior:
         page.query_selector.side_effect = lambda s: prefilled if "name='name'" in s else None
         assert handler._fill_contact_fields(page, profile) == 0
         prefilled.fill.assert_not_called()
+
+
+class TestWorkdayReviewDetector:
+    def test_parked_status_is_not_a_failure(self):
+        # workflow.py only categorizes statuses that start with "failed";
+        # parked must never be seen as a failure or queued to Q2.
+        assert not WD_REVIEW_PARKED_STATUS.startswith("failed")
+
+    def test_is_review_page_true_when_js_reports_review(self):
+        page = MagicMock()
+        page.evaluate.return_value = True
+        assert WorkdayHandler._is_review_page(page) is True
+
+    def test_is_review_page_false_when_js_reports_false(self):
+        page = MagicMock()
+        page.evaluate.return_value = False
+        assert WorkdayHandler._is_review_page(page) is False
+
+    def test_is_review_page_false_on_evaluate_error(self):
+        page = MagicMock()
+        page.evaluate.side_effect = RuntimeError("page closed")
+        assert WorkdayHandler._is_review_page(page) is False
+
+
+class TestWorkdayAtTerminalSubmit:
+    """FINDING #1: selector-independent Submit-only backstop for the
+    Review-stop gate. Must never depend on _is_review_page's unvalidated
+    hasSummary selector, and must fail CLOSED (False) on error since it only
+    ever ADDS parking, never removes the existing gate."""
+
+    def test_true_when_submit_only_reported(self):
+        page = MagicMock()
+        page.evaluate.return_value = True
+        assert WorkdayHandler._at_terminal_submit(page) is True
+
+    def test_false_when_forward_button_also_present(self):
+        page = MagicMock()
+        page.evaluate.return_value = False
+        assert WorkdayHandler._at_terminal_submit(page) is False
+
+    def test_false_on_evaluate_error(self):
+        page = MagicMock()
+        page.evaluate.side_effect = RuntimeError("page closed")
+        assert WorkdayHandler._at_terminal_submit(page) is False
+
+
+class TestWorkdayReviewStop:
+    def _handler_page(self, is_review):
+        handler = WorkdayHandler()
+        page = MagicMock()
+        # No autofill/manual popups, no blocking modal:
+        page.query_selector.return_value = None
+        with patch.object(WorkdayHandler, "_is_review_page", return_value=is_review):
+            return handler, page
+
+    def test_on_step_start_parks_on_review_page(self):
+        handler, page = self._handler_page(is_review=True)
+        with patch.object(WorkdayHandler, "_is_review_page", return_value=True):
+            result = handler.on_step_start(page, {})
+        assert result == WD_REVIEW_PARKED_STATUS
+
+    def test_on_step_start_returns_none_off_review_page(self):
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.query_selector.return_value = None
+        with (
+            patch.object(WorkdayHandler, "_is_review_page", return_value=False),
+            patch.object(WorkdayHandler, "_at_terminal_submit", return_value=False),
+            patch.object(WorkdayHandler, "_is_form_page", return_value=False),
+        ):
+            result = handler.on_step_start(page, {})
+        assert result is None
+
+    def test_on_step_start_parks_on_terminal_submit_backstop_alone(self):
+        """FINDING #1: even when _is_review_page's selector guess is wrong
+        (returns False), the selector-independent Submit-only backstop must
+        still park -- the 'never auto-submit Workday' invariant cannot depend
+        on a single unvalidated selector."""
+        handler = WorkdayHandler()
+        page = MagicMock()
+        page.query_selector.return_value = None
+        with (
+            patch.object(WorkdayHandler, "_is_review_page", return_value=False),
+            patch.object(WorkdayHandler, "_at_terminal_submit", return_value=True),
+        ):
+            result = handler.on_step_start(page, {})
+        assert result == WD_REVIEW_PARKED_STATUS
+
+    def test_review_stop_not_reached_when_autofill_popup_present(self):
+        # If the Autofill-with-Resume popup is up, that path returns first with
+        # skip_step and never calls _is_review_page.
+        handler = WorkdayHandler()
+        page = MagicMock()
+        autofill = MagicMock()
+        autofill.is_visible.return_value = True
+        page.query_selector.side_effect = lambda sel: (
+            autofill if "autofillWithResume" in sel else None
+        )
+        ctx = {}
+        with (
+            patch("job_search_apply._safe_click"),
+            patch.object(WorkdayHandler, "_is_review_page") as is_review,
+        ):
+            result = handler.on_step_start(page, ctx)
+        assert ctx.get("skip_step") is True
+        assert result is None
+        is_review.assert_not_called()
+
+
+class TestWorkdayVisionDrive:
+    """The generic deterministic dropdown handler corrupts Workday's searchable
+    dropdowns (reads merged option lists, fills garbage, page never
+    validates/advances). Fix: drive every Workday form page with vision and
+    skip the deterministic fill entirely, bounded by _WD_MAX_VISION_PASSES."""
+
+    def _run(self, page, ctx, is_form_page=True, vcp_kwargs=None):
+        with (
+            patch.object(WorkdayHandler, "_is_review_page", return_value=False),
+            patch.object(WorkdayHandler, "_at_terminal_submit", return_value=False),
+            patch.object(WorkdayHandler, "_is_form_page", return_value=is_form_page),
+            patch("ats_handlers._workday_vision.vision_complete_page", **(vcp_kwargs or {})) as vcp,
+        ):
+            result = WorkdayHandler().on_step_start(page, ctx)
+            return result, vcp
+
+    def test_form_page_vision_completes_once_and_skips_deterministic_fill(self):
+        page = MagicMock()
+        page.query_selector.return_value = None
+        ctx = {"profile": MagicMock()}
+        result, vcp = self._run(page, ctx, is_form_page=True)
+        vcp.assert_called_once()
+        assert ctx["skip_step"] is True
+        assert result is None
+        assert ctx["_wd_vpasses"] == 1
+
+    def test_vision_not_called_once_budget_exhausted(self):
+        page = MagicMock()
+        page.query_selector.return_value = None
+        ctx = {"profile": MagicMock(), "_wd_vpasses": _WD_MAX_VISION_PASSES}
+        result, vcp = self._run(page, ctx, is_form_page=True)
+        vcp.assert_not_called()
+        assert result is None
+
+    def test_vision_not_called_on_non_form_page(self):
+        page = MagicMock()
+        page.query_selector.return_value = None
+        ctx = {"profile": MagicMock()}
+        result, vcp = self._run(page, ctx, is_form_page=False)
+        vcp.assert_not_called()
+        assert result is None
+        assert "_wd_vpasses" not in ctx
+
+    def test_vision_exception_is_swallowed(self):
+        page = MagicMock()
+        page.query_selector.return_value = None
+        ctx = {"profile": MagicMock()}
+        result, vcp = self._run(
+            page, ctx, is_form_page=True, vcp_kwargs={"side_effect": RuntimeError("boom")}
+        )
+        vcp.assert_called_once()
+        assert result is None
+        assert ctx["skip_step"] is True

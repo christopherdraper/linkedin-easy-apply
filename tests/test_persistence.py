@@ -6,6 +6,7 @@ every path constant in job_search_apply to tmp_path.
 
 import json
 import stat
+import time
 
 import pytest
 
@@ -17,6 +18,13 @@ from job_search_apply import (
     load_log,
     save_log,
     save_search_log,
+)
+from jobapply.applog import (
+    SCORE_CACHE_TTL_DAYS,
+    cached_score,
+    load_score_cache,
+    remember_score,
+    save_score_cache,
 )
 
 
@@ -115,6 +123,153 @@ class TestApplicationLog:
         entries = load_log()
         assert entries == [{"job_id": "li_new", "status": "submitted"}]
         assert (data_dir / "applications.json.corrupt").read_text() == "{broken json"
+
+    def test_save_log_caller_must_pass_only_new_entries(self, data_dir):
+        """Regression guard for the append footgun.
+
+        save_log() appends to what is already on disk. A caller that reads the
+        log, appends its entry, and passes the WHOLE list back duplicates every
+        existing record. This documents that contract so the anti-pattern is
+        obvious to the next caller.
+        """
+        save_log([{"job_id": "li_1", "status": "submitted"}])
+        # Correct usage: pass only the new entry.
+        save_log([{"job_id": "li_2", "status": "submitted"}])
+        assert len(load_log()) == 2
+
+        # Anti-pattern: passing the full log back duplicates the history.
+        everything = load_log()
+        everything.append({"job_id": "li_3", "status": "submitted"})
+        save_log(everything)
+        assert len(load_log()) == 5  # 2 originals + 2 re-appended + 1 new
+
+
+class TestExternalUrlLogging:
+    """--external-url runs must add exactly one row to applications.json.
+
+    Regression: the logging block passed the full log to save_log(), which
+    appends, so every single-URL run duplicated the entire file (39 rows from
+    20 real applications).
+    """
+
+    def test_logs_exactly_one_new_entry(self, data_dir, monkeypatch):
+        from types import SimpleNamespace
+
+        from jobapply import cli
+
+        save_log([{"job_id": "old_1", "status": "submitted"}])
+
+        profile_file = data_dir / "profile.json"
+        profile_file.write_text(
+            json.dumps(
+                {
+                    "profile": {
+                        "personal": {"full_name": "Jane Doe", "email": "j@example.com"},
+                        "documents": {"resume_path": ""},
+                    }
+                }
+            )
+        )
+
+        monkeypatch.setattr(cli, "_abort_if_setup_incomplete", lambda profile: None)
+        monkeypatch.setattr(
+            cli, "submit_external_apply", lambda *a, **k: "review_parked: manual submit required"
+        )
+
+        cli._run_external_url(
+            SimpleNamespace(
+                profile=str(profile_file),
+                external_url="https://acme.wd1.myworkdayjobs.com/job/1/apply",
+                job_title="Engineer",
+                company="Acme",
+                proxy=None,
+                dry_run=False,
+            )
+        )
+
+        entries = load_log()
+        assert len(entries) == 2, f"expected 1 new row, log grew to {len(entries)}"
+        assert entries[0]["job_id"] == "old_1"
+
+
+class TestScoreCache:
+    """Scored-and-rejected jobs are cached so overlapping title searches stop
+    paying to re-score them.
+
+    Regression driver (2026-08-24): one batch spent 60 AI scoring calls on 29
+    unique jobs (52% waste) because dedup only covered jobs already APPLIED to.
+    """
+
+    def _entry(self, **over):
+        base = {
+            "match_score": 0.62,
+            "reasoning": "close but junior",
+            "deal_breakers": [],
+            "matched_skills": ["python"],
+        }
+        base.update(over)
+        return base
+
+    def test_round_trip(self, data_dir):
+        cache = {}
+        remember_score(cache, "li_1", self._entry(), ai_scored=True)
+        save_score_cache(cache)
+        assert load_score_cache()["li_1"]["match_score"] == 0.62
+
+    def test_missing_file_returns_empty(self, data_dir):
+        assert load_score_cache() == {}
+
+    def test_corrupt_file_returns_empty(self, data_dir):
+        (data_dir / "score_cache.json").write_text("{not json")
+        assert load_score_cache() == {}
+
+    def test_save_overwrites_rather_than_appends(self, data_dir):
+        """Unlike save_log, the cache is a keyed store — no duplication."""
+        cache = {}
+        remember_score(cache, "li_1", self._entry(), ai_scored=True)
+        save_score_cache(cache)
+        remember_score(cache, "li_1", self._entry(match_score=0.9), ai_scored=True)
+        save_score_cache(cache)
+        reloaded = load_score_cache()
+        assert len(reloaded) == 1
+        assert reloaded["li_1"]["match_score"] == 0.9
+
+    def test_fresh_entry_is_a_hit(self):
+        cache = {}
+        remember_score(cache, "li_1", self._entry(), ai_scored=True)
+        assert cached_score(cache, "li_1")["match_score"] == 0.62
+
+    def test_unknown_id_is_a_miss(self):
+        assert cached_score({}, "li_nope") is None
+
+    def test_expired_entry_is_a_miss(self):
+        """A stale verdict must not blacklist a job forever."""
+        cache = {}
+        remember_score(cache, "li_1", self._entry(), ai_scored=True)
+        cache["li_1"]["scored_at"] = time.time() - (SCORE_CACHE_TTL_DAYS + 1) * 86400
+        assert cached_score(cache, "li_1") is None
+
+    def test_keyword_fallback_entry_is_a_miss(self):
+        """An AI outage produced that low score, not a real rejection."""
+        cache = {}
+        remember_score(cache, "li_1", self._entry(), ai_scored=False)
+        assert cached_score(cache, "li_1") is None
+
+    def test_stores_raw_score_not_a_reject_decision(self):
+        """min_match_score is per-run, so a later lower bar must re-derive."""
+        cache = {}
+        remember_score(cache, "li_1", self._entry(match_score=0.72), ai_scored=True)
+        entry = cached_score(cache, "li_1")
+        assert entry["match_score"] == 0.72
+        assert "rejected" not in entry
+
+    def test_blank_job_id_is_not_stored(self):
+        cache = {}
+        remember_score(cache, "", self._entry(), ai_scored=True)
+        assert cache == {}
+
+    def test_malformed_entry_is_a_miss(self):
+        assert cached_score({"li_1": {"ai_scored": True}}, "li_1") is None
 
 
 class TestSearchLog:

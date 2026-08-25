@@ -25,6 +25,11 @@ class WorkdayHandler(BaseATSHandler):
 
     def pre_flight(self, page, ctx):
         self._dismiss_cookie_banner(page)
+        # Remember where we landed from the job board. Workday's post-login
+        # redirect loses the application, so _return_to_application needs a
+        # known-good posting URL to go back to.
+        if "myworkdayjobs.com" in (page.url or ""):
+            ctx["_wd_entry_url"] = page.url
         return None
 
     def on_step_start(self, page, ctx):
@@ -134,13 +139,57 @@ class WorkdayHandler(BaseATSHandler):
         domain = _get_domain(page.url)
         if _attempt_ats_login(page, domain):
             log.info("   Workday: logged in with stored credentials")
+            self._return_to_application(page, ctx)
             return True
 
         # Try Workday-specific account creation
         if getattr(profile, "auto_create_accounts", False):
-            return self._create_workday_account(page, profile)
+            created = self._create_workday_account(page, profile)
+            if created:
+                self._return_to_application(page, ctx)
+            return created
 
         return False
+
+    @staticmethod
+    def _apply_url(url: str) -> str:
+        """Normalise a Workday posting URL to its application entry point."""
+        base = url.split("?")[0].split("#")[0].rstrip("/")
+        if "/apply" in base:
+            return base
+        return f"{base}/apply/autofillWithResume"
+
+    def _return_to_application(self, page, ctx) -> None:
+        """Navigate back to the application form after a login/registration.
+
+        Workday does not resume the application after sign-in -- it drops the
+        session on whatever shell it feels like (commonly a stale "Create
+        Account" page carrying no form fields at all). The generic form loop
+        then finds no footer Next button, burns its three no-button retries and
+        fails the job with "no Next/Submit button found". The direct
+        --external-url path never hits this because it navigates straight to
+        /apply/autofillWithResume, so do the same thing here.
+        """
+        if self._is_form_page(page):
+            return
+
+        target = ctx.get("_wd_entry_url") or page.url
+        if "myworkdayjobs.com" not in (target or ""):
+            return
+
+        target = self._apply_url(target)
+        try:
+            log.info("   Workday: resuming application at %s", target)
+            page.goto(target, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Workday: could not resume application: %s", str(exc)[:100])
+            return
+
+        self._dismiss_cookie_banner(page)
+        # A fresh apply URL re-shows the "Autofill with Resume" popup, so let
+        # on_step_start handle it again rather than latching it off.
+        ctx.pop("_wd_autofilled", None)
 
     def _create_workday_account(self, page, profile) -> bool:
         """Create a Workday account using React-SPA-compatible selectors."""
