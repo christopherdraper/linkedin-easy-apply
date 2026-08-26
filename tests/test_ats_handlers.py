@@ -1611,7 +1611,11 @@ class TestAtsRequisitionDedup:
             assert _duplicate_ats_application("about:blank") is None
 
 
-from ats_handlers.csod import _CSOD_MAX_ADVANCES, CornerstoneHandler  # noqa: E402
+from ats_handlers.csod import (  # noqa: E402
+    _CSOD_MAX_ADVANCES,
+    _CSOD_MAX_PRUNES,
+    CornerstoneHandler,
+)
 
 
 class TestCornerstoneHandler:
@@ -1782,12 +1786,33 @@ class TestDebugDumpCapturesTheForm:
         assert "firstName" in dumped
         assert "Privacy Preference Center" not in dumped
 
+    def test_consent_widget_is_rejected_even_though_it_has_inputs(self, tmp_path, monkeypatch):
+        """OneTrust carries category toggles and a search box, so "has fields"
+        alone still let the cookie banner win."""
+        import jobapply.forms as forms
+
+        monkeypatch.setattr(forms, "DEBUG_DIR", tmp_path)
+        widget = MagicMock()
+        widget.query_selector.return_value = MagicMock()  # the toggles
+        widget.evaluate.return_value = True  # matches a consent selector
+        widget.inner_html.return_value = "<h2>Privacy Preference Center</h2>"
+        page = MagicMock()
+        page.query_selector.return_value = widget
+        page.content.return_value = "<form><input name='firstName'></form>"
+
+        forms._dump_form_debug(page, "li_3", "stalled")
+
+        dumped = next(tmp_path.glob("*.html")).read_text()
+        assert "firstName" in dumped
+        assert "Privacy Preference Center" not in dumped
+
     def test_real_form_modal_is_still_preferred(self, tmp_path, monkeypatch):
         import jobapply.forms as forms
 
         monkeypatch.setattr(forms, "DEBUG_DIR", tmp_path)
         modal = MagicMock()
         modal.query_selector.return_value = MagicMock()  # has a field
+        modal.evaluate.return_value = False  # not a consent widget
         modal.inner_html.return_value = "<input name='realFormField'>"
         page = MagicMock()
         page.query_selector.return_value = modal
@@ -1797,3 +1822,211 @@ class TestDebugDumpCapturesTheForm:
 
         dumped = next(tmp_path.glob("*.html")).read_text()
         assert "realFormField" in dumped
+
+
+class TestCornerstoneResumeBlocks:
+    """CSOD's résumé parser leaves required sub-fields empty, blocking the step."""
+
+    def test_degree_mapping(self):
+        m = CornerstoneHandler._degree_option
+        assert m("B.S. Mechanical Engineering") == "bachelor's"
+        assert m("Bachelor of Science") == "bachelor's"
+        assert m("M.S. Aerospace") == "master's"
+        assert m("PhD") == "doctoral"
+        assert m("Associate's") == "associate's"
+        assert m("") == ""
+        assert m("Certificate in welding") == ""
+
+    def test_prune_stops_when_nothing_incomplete(self):
+        page = MagicMock()
+        page.evaluate_handle.return_value.as_element.return_value = None
+        CornerstoneHandler._prune_incomplete_blocks(page, MagicMock())
+        assert page.evaluate_handle.call_count == 1
+
+    def test_prune_deletes_then_rechecks(self):
+        page = MagicMock()
+        button = MagicMock()
+        button.inner_text.return_value = "Delete Education"
+        first, second = MagicMock(), MagicMock()
+        first.as_element.return_value = button
+        second.as_element.return_value = None
+        page.evaluate_handle.side_effect = [first, second]
+        CornerstoneHandler._prune_incomplete_blocks(page, MagicMock())
+        button.click.assert_called_once()
+
+    def test_prune_is_bounded(self):
+        """A page that never becomes valid must not loop forever."""
+        page = MagicMock()
+        button = MagicMock()
+        button.inner_text.return_value = "Delete Education"
+        handle = MagicMock()
+        handle.as_element.return_value = button
+        page.evaluate_handle.return_value = handle
+        CornerstoneHandler._prune_incomplete_blocks(page, MagicMock())
+        assert page.evaluate_handle.call_count <= _CSOD_MAX_PRUNES
+
+
+class TestCornerstoneDryRunSafety:
+    """A dry run must never submit a real application.
+
+    Regression (2026-08-26): the handler drives the form itself and bypasses
+    the generic loop via skip_step -- and the generic loop is where dry_run is
+    honoured. A --dry-run therefore clicked Submit on Linde's step 2 four
+    times; it only failed to go through because validation happened to block
+    it. dry_run now reaches the handler through handler_ctx.
+    """
+
+    def test_submit_is_not_clicked_when_dry_run(self):
+        page = MagicMock()
+        page.query_selector_all.return_value = []
+        with patch.object(CornerstoneHandler, "_has_submit", staticmethod(lambda p: True)):
+            assert CornerstoneHandler._advance(page, allow_submit=False) == "submit_blocked"
+
+    def test_dry_run_stops_before_submit(self):
+        handler = CornerstoneHandler()
+        page = MagicMock()
+        ctx = {"profile": MagicMock(), "dry_run": True, "_csod_filled": "Step 2 of 2"}
+        with (
+            patch.object(CornerstoneHandler, "_dismiss_cookie_banner"),
+            patch.object(CornerstoneHandler, "_is_confirmation", staticmethod(lambda p: False)),
+            patch.object(
+                CornerstoneHandler, "_is_application_form", classmethod(lambda c, p: True)
+            ),
+            patch.object(CornerstoneHandler, "_step_key", staticmethod(lambda p: "Step 2 of 2")),
+            patch.object(
+                CornerstoneHandler,
+                "_advance",
+                staticmethod(lambda p, allow_submit=True: "submit_blocked"),
+            ),
+        ):
+            assert handler.on_step_start(page, ctx) == "dry_run"
+
+    def test_real_run_is_allowed_to_submit(self):
+        handler = CornerstoneHandler()
+        page = MagicMock()
+        seen = {}
+
+        def fake_advance(p, allow_submit=True):
+            seen["allow_submit"] = allow_submit
+            return "submit"
+
+        ctx = {"profile": MagicMock(), "dry_run": False, "_csod_filled": "Step 2 of 2"}
+        with (
+            patch.object(CornerstoneHandler, "_dismiss_cookie_banner"),
+            patch.object(CornerstoneHandler, "_is_confirmation", staticmethod(lambda p: False)),
+            patch.object(
+                CornerstoneHandler, "_is_application_form", classmethod(lambda c, p: True)
+            ),
+            patch.object(CornerstoneHandler, "_step_key", staticmethod(lambda p: "Step 2 of 2")),
+            patch.object(CornerstoneHandler, "_advance", staticmethod(fake_advance)),
+        ):
+            handler.on_step_start(page, ctx)
+        assert seen["allow_submit"] is True
+
+    def test_handler_ctx_carries_dry_run(self):
+        """external.py must actually pass the flag through."""
+        import inspect
+
+        from jobapply.external import submit_external_apply
+
+        src = inspect.getsource(submit_external_apply)
+        assert '"dry_run": dry_run,' in src
+
+
+class TestCornerstoneRadioSelection:
+    """Screening answers were computed correctly then silently dropped.
+
+    Regression (2026-08-26): step 2's form is long enough that every screening
+    radio sits below the fold, so check() refused with "Element is outside of
+    the viewport" and all seven answers (noncompete, prior employment, work
+    authorization, visa, ITAR status, accuracy, data sharing) were lost.
+    """
+
+    def test_scrolls_into_view_before_checking(self):
+        el = MagicMock()
+        el.is_checked.return_value = True
+        assert CornerstoneHandler._select_radio(el) is True
+        el.scroll_into_view_if_needed.assert_called_once()
+
+    def test_falls_back_to_label_click(self):
+        el = MagicMock()
+        el.check.side_effect = RuntimeError("Element is outside of the viewport")
+        el.is_checked.return_value = True
+        assert CornerstoneHandler._select_radio(el) is True
+        el.evaluate.assert_called()
+
+    def test_reports_failure_when_nothing_sticks(self):
+        el = MagicMock()
+        el.check.side_effect = RuntimeError("nope")
+        el.evaluate.side_effect = RuntimeError("nope")
+        el.is_checked.return_value = False
+        assert CornerstoneHandler._select_radio(el) is False
+
+    def test_unchecked_result_is_not_reported_as_success(self):
+        """check() can pass while the widget stays unset."""
+        el = MagicMock()
+        el.is_checked.return_value = False
+        assert CornerstoneHandler._select_radio(el) is False
+
+
+class TestCornerstoneConsentQuestions:
+    """Procedural acknowledgements must be Yes, not profile-guessed.
+
+    Regression (2026-08-26): "Linde plc - recruitment privacy notice ..." was
+    resolved by the generic Yes/No resolver, which answered No. Linde then
+    refused every Submit with "Please acknowledge receipt of the respective
+    recruitment privacy notice and confirm by clicking 'Yes'." -- all other
+    fields valid.
+    """
+
+    def test_consent_patterns_cover_the_privacy_notice(self):
+        from ats_handlers.csod import _CONSENT_PATTERNS
+
+        q = (
+            "Linde plc - recruitment privacy notice By submitting my personal and "
+            "application data I acknowledge receipt of the notice"
+        ).lower()
+        assert any(p in q for p in _CONSENT_PATTERNS)
+
+    def test_screening_questions_are_not_treated_as_consent(self):
+        from ats_handlers.csod import _CONSENT_PATTERNS
+
+        for q in (
+            "do you currently work for a competitor of linde",
+            "have you ever worked for linde or any of its affiliates",
+            "will you now or in the future require a visa",
+        ):
+            assert not any(p in q for p in _CONSENT_PATTERNS), q
+
+
+class TestCornerstoneConfirmationDetection:
+    """Submitted applications were reported as failures.
+
+    Regression (2026-08-26): both Linde applications went through -- the
+    debug screenshots show "Thank You! You have successfully applied to
+    <role>" -- but _is_confirmation only matched "successfully submitted", so
+    the run fell through to the generic loop, stalled, and logged
+    "failed: external form stuck (step 7/20)" for work that had succeeded.
+    """
+
+    def _page(self, text):
+        page = MagicMock()
+        page.evaluate.return_value = text.lower()
+        return page
+
+    def test_linde_wording_is_recognised(self):
+        page = self._page("Thank You! You have successfully applied to Product Engineer II")
+        assert CornerstoneHandler._is_confirmation(page) is True
+
+    def test_other_confirmation_wordings_still_match(self):
+        for text in (
+            "Thank you for applying to Acme",
+            "Your application has been submitted",
+            "Application submitted",
+            "Your application has been received",
+        ):
+            assert CornerstoneHandler._is_confirmation(self._page(text)) is True, text
+
+    def test_form_page_is_not_a_confirmation(self):
+        page = self._page("Step 2 of 2 Submit Application Cancel Save Back")
+        assert CornerstoneHandler._is_confirmation(page) is False
