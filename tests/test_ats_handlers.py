@@ -1609,3 +1609,191 @@ class TestAtsRequisitionDedup:
         with patch("jobapply.applog.load_log", return_value=[]):
             assert _duplicate_ats_application("") is None
             assert _duplicate_ats_application("about:blank") is None
+
+
+from ats_handlers.csod import _CSOD_MAX_ADVANCES, CornerstoneHandler  # noqa: E402
+
+
+class TestCornerstoneHandler:
+    """Cornerstone OnDemand (linde.csod.com et al).
+
+    The generic filler cannot see CSOD's contact fields: first/last name and
+    email carry an EMPTY aria-label and no <label for>, identified only by
+    aria-labelledby="actionItem.firstName.idTag-error". Verified live against
+    Linde's Product Engineer II requisition.
+    """
+
+    def test_platform_name(self):
+        assert CornerstoneHandler().platform_name == "Cornerstone"
+
+    def test_url_resolves_to_handler(self):
+        h = get_handler("https://linde.csod.com/ux/ats/careersite/23/requisition/31102/application")
+        assert h.platform_name == "Cornerstone"
+
+    def test_careersite_path_alone_resolves(self):
+        h = get_handler("https://careers.acme.com/ux/ats/careersite/5/requisition/9/application")
+        assert h.platform_name == "Cornerstone"
+
+    def test_confirmation_returns_submitted(self):
+        handler = CornerstoneHandler()
+        page = MagicMock()
+        page.evaluate.return_value = "thank you for applying to linde"
+        with patch.object(CornerstoneHandler, "_dismiss_cookie_banner"):
+            assert handler.on_step_start(page, {"profile": MagicMock()}) == "submitted"
+
+    def test_detect_success_on_confirmation(self):
+        page = MagicMock()
+        page.evaluate.return_value = "your application has been submitted"
+        assert CornerstoneHandler().detect_success(page, {}) is True
+
+    def test_advance_stops_after_cap(self):
+        """A step that never validates must fail, not click Next forever."""
+        handler = CornerstoneHandler()
+        page = MagicMock()
+        page.evaluate.return_value = ""
+        ctx = {
+            "profile": MagicMock(),
+            "_csod_filled": "application",
+            "_csod_advances": _CSOD_MAX_ADVANCES,
+        }
+        with (
+            patch.object(CornerstoneHandler, "_dismiss_cookie_banner"),
+            patch.object(CornerstoneHandler, "_is_application_form", staticmethod(lambda p: True)),
+            patch.object(CornerstoneHandler, "_is_confirmation", staticmethod(lambda p: False)),
+        ):
+            result = handler.on_step_start(page, ctx)
+        assert result is not None and result.startswith("failed:")
+
+    def test_generic_filler_is_bypassed(self):
+        """The generic filler guesses on this markup, so it must never run."""
+        handler = CornerstoneHandler()
+        page = MagicMock()
+        ctx = {"profile": MagicMock()}
+        with (
+            patch.object(CornerstoneHandler, "_dismiss_cookie_banner"),
+            patch.object(CornerstoneHandler, "_is_application_form", staticmethod(lambda p: True)),
+            patch.object(CornerstoneHandler, "_is_confirmation", staticmethod(lambda p: False)),
+            patch.object(CornerstoneHandler, "_fill"),
+            patch.object(CornerstoneHandler, "_step_key", staticmethod(lambda p: "Step 1 of 2")),
+        ):
+            handler.on_step_start(page, ctx)
+        assert ctx["skip_step"] is True
+
+    def test_non_form_page_left_to_generic_logic(self):
+        handler = CornerstoneHandler()
+        page = MagicMock()
+        with (
+            patch.object(CornerstoneHandler, "_dismiss_cookie_banner"),
+            patch.object(CornerstoneHandler, "_is_confirmation", staticmethod(lambda p: False)),
+            patch.object(CornerstoneHandler, "_is_application_form", staticmethod(lambda p: False)),
+        ):
+            assert handler.on_step_start(page, {"profile": MagicMock()}) is None
+
+    # ---- EEO option matching ------------------------------------------------
+
+    GENDER = ["Please Select", "I do not want to answer", "Male", "Female", "Non-binary / Other"]
+    ETHNIC = ["Please Select", "I do not want to answer", "Hispanic or Latino", "Asian"]
+
+    def test_exact_profile_answer_wins(self):
+        assert CornerstoneHandler._match_option("Male", self.GENDER) == "Male"
+
+    def test_substring_profile_answer_matches(self):
+        got = CornerstoneHandler._match_option("Hispanic", self.ETHNIC)
+        assert got == "Hispanic or Latino"
+
+    def test_prefer_not_to_say_maps_to_decline(self):
+        assert (
+            CornerstoneHandler._match_option("Prefer not to say", self.GENDER)
+            == "I do not want to answer"
+        )
+
+    def test_blank_answer_declines(self):
+        assert CornerstoneHandler._match_option("", self.GENDER) == "I do not want to answer"
+
+    def test_placeholder_is_never_selected(self):
+        assert CornerstoneHandler._match_option("nonsense value", self.GENDER) != "Please Select"
+
+    def test_no_real_options_yields_nothing(self):
+        assert CornerstoneHandler._match_option("Male", ["Please Select"]) == ""
+
+
+class TestRadioGroupFalsePositive:
+    """A <fieldset> of text inputs is not a radio group.
+
+    Regression (2026-08-26): the selector in _answer_radio_buttons required
+    :has(input[type='radio']) on every alternative EXCEPT the bare "fieldset",
+    so an accessible section wrapper -- <fieldset><legend>Contact
+    Information</legend> around First Name / Last Name / Phone -- was treated
+    as a question whose options were its field labels. The AI picked one and we
+    clicked <label for="firstName">, which merely focuses the input. Zero
+    fields filled per step until the stall detector failed the application.
+    """
+
+    def test_selector_requires_a_radio_in_every_alternative(self):
+        import inspect
+
+        from jobapply.forms import _answer_radio_buttons
+
+        src = inspect.getsource(_answer_radio_buttons)
+        selector = src.split("query_selector_all(")[1].split(")")[0]
+        for alternative in selector.split(","):
+            alternative = alternative.strip().strip('"').strip()
+            if not alternative:
+                continue
+            assert "input[type='radio']" in alternative, f"unguarded alternative: {alternative}"
+
+    def test_container_without_radios_is_skipped(self):
+        from jobapply.forms import _answer_radio_buttons
+
+        section = MagicMock()
+        section.query_selector.return_value = None  # no radios anywhere
+        page = MagicMock()
+        page.query_selector_all.return_value = [section]
+
+        _answer_radio_buttons(page, MagicMock())
+
+        # Never asked for the legend, so never posed a question about it.
+        for call in section.query_selector.call_args_list:
+            assert "legend" not in str(call)
+
+
+class TestDebugDumpCapturesTheForm:
+    """A debug dump must never be just the cookie banner.
+
+    Regression (2026-08-26): _MODAL_SEL's bare [role='dialog'] also matches
+    OneTrust's consent widget (#onetrust-pc-sdk), so two Cornerstone dumps
+    contained only the Privacy Preference Center and no form markup at all.
+    """
+
+    def test_falls_back_to_page_when_modal_has_no_fields(self, tmp_path, monkeypatch):
+        import jobapply.forms as forms
+
+        monkeypatch.setattr(forms, "DEBUG_DIR", tmp_path)
+        cookie_widget = MagicMock()
+        cookie_widget.query_selector.return_value = None  # consent widget: no form fields
+        cookie_widget.inner_html.return_value = "<h2>Privacy Preference Center</h2>"
+        page = MagicMock()
+        page.query_selector.return_value = cookie_widget
+        page.content.return_value = "<form><input name='firstName'></form>"
+
+        forms._dump_form_debug(page, "li_1", "stalled")
+
+        dumped = next(tmp_path.glob("*.html")).read_text()
+        assert "firstName" in dumped
+        assert "Privacy Preference Center" not in dumped
+
+    def test_real_form_modal_is_still_preferred(self, tmp_path, monkeypatch):
+        import jobapply.forms as forms
+
+        monkeypatch.setattr(forms, "DEBUG_DIR", tmp_path)
+        modal = MagicMock()
+        modal.query_selector.return_value = MagicMock()  # has a field
+        modal.inner_html.return_value = "<input name='realFormField'>"
+        page = MagicMock()
+        page.query_selector.return_value = modal
+        page.content.return_value = "<html>whole page</html>"
+
+        forms._dump_form_debug(page, "li_2", "stalled")
+
+        dumped = next(tmp_path.glob("*.html")).read_text()
+        assert "realFormField" in dumped

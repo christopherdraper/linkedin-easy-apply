@@ -63,6 +63,10 @@ _ATS_PATTERNS = [
     # Mid-tier / emerging ATS
     ("Workable", "apply.workable.com"),
     ("Workable", "jobs.workable.com"),
+    # Cornerstone OnDemand: tenants are <company>.csod.com, application pages
+    # live under /ux/ats/careersite/<n>/requisition/<id>/application
+    ("Cornerstone", "csod.com"),
+    ("Cornerstone", "/ux/ats/careersite"),
     ("Taleo", "taleo.net"),
     ("SuccessFactors", "successfactors.com"),
     ("UltiPro", "ultipro.com"),

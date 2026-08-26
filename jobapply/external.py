@@ -2360,6 +2360,10 @@ def submit_external_apply(  # noqa: C901
                 "profile": profile,
                 "job": job,
                 "cover_letter_path": cover_letter_path,
+                # Handlers that drive the form themselves bypass the generic
+                # loop, and with it the dry_run check that lives there. They
+                # must be able to see the flag or a dry run would really submit.
+                "dry_run": dry_run,
             }
 
             # Handler pre-flight (platform-specific setup, e.g. Workday cookie banner)

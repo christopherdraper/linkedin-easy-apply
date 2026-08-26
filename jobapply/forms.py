@@ -24,6 +24,15 @@ _MODAL_SEL = (
     ".artdeco-modal, .jobs-easy-apply-modal, [role='dialog']"
 )
 
+# Consent widgets also carry role="dialog" and their own inputs (category
+# toggles, a cookie-search box), so "is it a dialog with fields" is not enough
+# to tell them from an application form. Name them and rule them out.
+_CONSENT_SEL = (
+    "#onetrust-pc-sdk, #onetrust-banner-sdk, #onetrust-consent-sdk, "
+    "[class*='onetrust'], [class*='ot-sdk'], [id*='cookie'], [class*='cookie-consent'], "
+    "[aria-label*='cookie' i], [aria-label*='consent' i]"
+)
+
 
 def _dump_form_debug(page, job_id: str, reason: str) -> Optional[str]:
     """Capture a screenshot and HTML dump of a stuck form for debugging."""
@@ -36,11 +45,20 @@ def _dump_form_debug(page, job_id: str, reason: str) -> Optional[str]:
         screenshot_path = DEBUG_DIR / f"{base}.png"
         page.screenshot(path=str(screenshot_path), full_page=True)
 
-        # Capture the modal/form HTML specifically, not the whole page
+        # Capture the modal/form HTML specifically, not the whole page -- but
+        # only when the match actually holds a form. _MODAL_SEL's bare
+        # [role='dialog'] also matches consent widgets (OneTrust's
+        # #onetrust-pc-sdk), which produced dumps containing nothing but the
+        # cookie banner and sent a Cornerstone investigation down a dead end.
+        html = ""
         modal = page.query_selector(_MODAL_SEL)
-        if modal:
-            html = modal.inner_html()
-        else:
+        if modal and modal.query_selector("input, select, textarea"):
+            is_consent = modal.evaluate(
+                f"e => e.matches({_CONSENT_SEL!r}) || !!e.closest({_CONSENT_SEL!r})"
+            )
+            if not is_consent:
+                html = modal.inner_html()
+        if not html:
             html = page.content()
 
         html_path = DEBUG_DIR / f"{base}.html"
@@ -140,15 +158,25 @@ def _fill_empty_required_fields(page, profile) -> int:
 
 def _answer_radio_buttons(page, profile: ApplicantProfile) -> None:  # noqa: C901
     """Answer all radio button groups on the current form page."""
-    # Find all fieldset-style radio groups via their container divs
+    # Find all fieldset-style radio groups via their container divs.
+    # Every alternative must require an actual radio: a bare "fieldset" matched
+    # any accessible section wrapper, so a plain
+    # <fieldset><legend>Contact Information</legend> of text inputs was read as
+    # a question whose "options" were its field labels. The AI then picked one
+    # and we clicked <label for="firstName">, which only focuses the input --
+    # zero fields filled per step, until the stall detector gave up.
     fieldsets = page.query_selector_all(
-        "fieldset, "
+        "fieldset:has(input[type='radio']), "
         "div[data-test-form-element]:has(input[type='radio']), "
         "div.fb-dash-form-element:has(input[type='radio']), "
         "div.ashby-application-form-field-entry:has(input[type='radio']), "
         "div[class*='section']:has(input[type='radio'])"
     )
     for group in fieldsets:
+        # Belt and braces: never treat a container without radios as a group.
+        if not group.query_selector("input[type='radio']"):
+            continue
+
         # Check if a radio is already selected in this group
         checked = group.query_selector("input[type='radio']:checked")
         if checked:
