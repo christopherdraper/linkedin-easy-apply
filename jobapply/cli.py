@@ -352,6 +352,31 @@ def _handle_deep_apply_cli(args, parser) -> None:
     )
 
 
+def _show_ats_credentials() -> None:
+    """Print the logins for bot-created ATS accounts.
+
+    Account creation generates a password and stores it here; without a way to
+    read it back the applicant cannot sign in to submit their own parked
+    applications, resets the password, and locks the bot out.
+    """
+    from jobapply.accounts import _load_ats_accounts
+
+    accounts = _load_ats_accounts()
+    if not accounts:
+        print("No ATS accounts have been created yet.")
+        return
+
+    print()
+    print("Accounts the bot created for you. Sign in with these rather than")
+    print("resetting the password -- a reset locks the bot out of the account.")
+    print()
+    for domain, acct in sorted(accounts.items()):
+        print(f"  {domain}")
+        print(f"      email:    {acct.get('email', '(unknown)')}")
+        print(f"      password: {acct.get('password', '(none stored)')}")
+        print()
+
+
 def _run_market_snapshot(args, parser) -> None:
     """Handle the --market-snapshot branch: count job postings per title."""
     _raw = json.loads(Path(args.profile).expanduser().read_text())
@@ -529,6 +554,13 @@ def main():
     parser.add_argument("--min-score", type=float, default=None)
     parser.add_argument("--dry-run", action="store_true", default=False)
     parser.add_argument(
+        "--show-credentials",
+        action="store_true",
+        default=False,
+        help="Print the logins for accounts the bot created on ATS sites, so you "
+        "can sign in yourself to submit an application",
+    )
+    parser.add_argument(
         "--market-snapshot",
         action="store_true",
         default=False,
@@ -568,6 +600,10 @@ def main():
 
     if args.sync_profile:
         _sync_linkedin_profile(args.profile)
+        return
+
+    if args.show_credentials:
+        _show_ats_credentials()
         return
 
     if args.market_snapshot:

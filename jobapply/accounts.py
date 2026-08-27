@@ -155,13 +155,37 @@ def _load_ats_accounts() -> Dict[str, Dict[str, str]]:
 
 
 def _save_ats_account(domain: str, email: str, password: str) -> None:
-    """Store ATS credentials for a domain."""
+    """Store ATS credentials for a domain, and tell the applicant they exist.
+
+    A generated password nobody was told about is a trap: the applicant still
+    has to sign in to submit a parked Workday application, cannot, and uses
+    "Forgot password" -- which invalidates the copy stored here, so the next
+    automated run hits the login wall. Both sides then keep resetting past each
+    other. Announcing the account at creation is what breaks that loop, so the
+    notice is deliberately hard to miss. The password itself is not logged;
+    `--show-credentials` prints it on demand.
+    """
     accounts = _load_ats_accounts()
+    is_new = domain not in accounts
     accounts[domain] = {"email": email, "password": password}
     ATS_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     ATS_ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
     os.chmod(ATS_ACCOUNTS_FILE, 0o600)
-    log.info(f"   🔑 Stored ATS account for {domain}")
+
+    if is_new:
+        log.info("")
+        log.info("   %s", "=" * 66)
+        log.info("   🔑 ACCOUNT CREATED — you will need this to submit")
+        log.info("      site:  %s", domain)
+        log.info("      email: %s", email)
+        log.info("      password: run  python job_search_apply.py --show-credentials")
+        log.info("      Use this password to sign in. Do NOT use 'Forgot password':")
+        log.info("      resetting it locks the bot out and it can no longer apply")
+        log.info("      or update applications for you.")
+        log.info("   %s", "=" * 66)
+        log.info("")
+    else:
+        log.info(f"   🔑 Updated stored ATS account for {domain}")
 
 
 def _generate_ats_password() -> str:

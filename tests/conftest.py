@@ -214,6 +214,7 @@ def data_dir(tmp_path, monkeypatch):
     ~/.local/share/job-apply. Returns the tmp_path."""
     import dashboard
     import job_search_apply
+    import jobapply.accounts
     import jobapply.applog
     import jobapply.browser
     import jobapply.content
@@ -239,6 +240,10 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(job_search_apply, "SESSION_FILE", tmp_path / "session.json")
     monkeypatch.setattr(job_search_apply, "CREDENTIALS_FILE", tmp_path / "credentials.json")
     monkeypatch.setattr(job_search_apply, "ATS_ACCOUNTS_FILE", tmp_path / "ats_accounts.json")
+    # accounts.py resolves ATS_ACCOUNTS_FILE in its OWN namespace, so patching
+    # only the facade let _save_ats_account write to the real credentials file
+    # and leak test accounts into it.
+    monkeypatch.setattr(jobapply.accounts, "ATS_ACCOUNTS_FILE", tmp_path / "ats_accounts.json")
     monkeypatch.setattr(
         job_search_apply, "DEEP_APPLY_QUEUE_FILE", tmp_path / "deep_apply_queue.json"
     )

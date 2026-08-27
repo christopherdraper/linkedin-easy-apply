@@ -411,3 +411,64 @@ class TestAlreadyAppliedEdgeCases:
         result = already_applied(log)
         assert "https://a.com/jobs/1?utm_source=x&eBP=y" in result
         assert "https://a.com/jobs/1" in result
+
+
+class TestAtsAccountAnnouncement:
+    """A generated password nobody was told about is a trap.
+
+    Regression (2026-08-27): the bot created Workday accounts with 16-char
+    generated passwords stored only in a 0600 file the applicant did not know
+    existed. To submit his own parked applications he had to use "Forgot
+    password", which invalidated the stored copy and locked the bot out of
+    both tenants; each side then kept resetting past the other.
+    """
+
+    def test_new_account_is_announced_with_retrieval_instructions(self, data_dir, caplog):
+        import logging
+
+        from jobapply.accounts import _save_ats_account
+
+        with caplog.at_level(logging.INFO):
+            _save_ats_account("acme.wd1.myworkdayjobs.com", "a@b.com", "S3cret-Passw0rd!")
+        out = caplog.text
+        assert "ACCOUNT CREATED" in out
+        assert "acme.wd1.myworkdayjobs.com" in out
+        assert "--show-credentials" in out
+        assert "Forgot password" in out
+
+    def test_password_is_never_written_to_the_log(self, data_dir, caplog):
+        import logging
+
+        from jobapply.accounts import _save_ats_account
+
+        with caplog.at_level(logging.INFO):
+            _save_ats_account("acme.wd1.myworkdayjobs.com", "a@b.com", "S3cret-Passw0rd!")
+        assert "S3cret-Passw0rd!" not in caplog.text
+
+    def test_updating_an_existing_account_is_not_announced(self, data_dir, caplog):
+        import logging
+
+        from jobapply.accounts import _save_ats_account
+
+        _save_ats_account("acme.wd1.myworkdayjobs.com", "a@b.com", "first")
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            _save_ats_account("acme.wd1.myworkdayjobs.com", "a@b.com", "second")
+        assert "ACCOUNT CREATED" not in caplog.text
+
+    def test_show_credentials_prints_the_login(self, data_dir, capsys):
+        from jobapply.accounts import _save_ats_account
+        from jobapply.cli import _show_ats_credentials
+
+        _save_ats_account("acme.wd1.myworkdayjobs.com", "a@b.com", "S3cret-Passw0rd!")
+        _show_ats_credentials()
+        out = capsys.readouterr().out
+        assert "acme.wd1.myworkdayjobs.com" in out
+        assert "a@b.com" in out
+        assert "S3cret-Passw0rd!" in out
+
+    def test_show_credentials_handles_no_accounts(self, data_dir, capsys):
+        from jobapply.cli import _show_ats_credentials
+
+        _show_ats_credentials()
+        assert "No ATS accounts" in capsys.readouterr().out
