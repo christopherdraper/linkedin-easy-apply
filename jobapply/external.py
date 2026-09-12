@@ -1933,6 +1933,19 @@ def _resolve_post_submit_captcha(page, profile, job, error_summary):
     return f"failed: captcha required: {error_summary[:200]}"
 
 
+# Accessibility live-regions that are announcements, not errors. Workday marks
+# its page-load announcement ("<Job title> page is loaded") with role="alert",
+# which the validation-error sweep below collects. Left unfiltered it aborts
+# every Workday application one step after Apply is clicked, before the handler
+# gets a second pass at the "Autofill with Resume" link.
+_BENIGN_ALERT_RE = re.compile(r"\bpage\s+is\s+loaded\s*$", re.IGNORECASE)
+
+
+def _filter_benign_alerts(errors):
+    """Drop a11y status announcements from collected validation-error text."""
+    return [e for e in errors if not _BENIGN_ALERT_RE.search((e or "").strip())]
+
+
 def _handle_post_submit_click(  # noqa: C901
     page,
     profile,
@@ -1980,6 +1993,7 @@ def _handle_post_submit_click(  # noqa: C901
             }
             return errors.slice(0, 5);
         }""")
+        validation_errors = _filter_benign_alerts(validation_errors)
         if validation_errors:
             error_summary = "; ".join(validation_errors)
             log.warning(f"   ⚠️ Validation errors: {error_summary[:200]}")

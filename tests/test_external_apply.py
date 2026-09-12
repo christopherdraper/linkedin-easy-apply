@@ -873,3 +873,46 @@ class TestHandleFileUploads:
 
         assert n == 1
         file_input.set_input_files.assert_called_once()
+
+
+class TestBenignAlertFiltering:
+    """Workday renders '<Job title> page is loaded' inside a role="alert"
+    element on every page. The validation-error sweep collects [role="alert"],
+    so that accessibility announcement was being reported as a form validation
+    error and aborting the run one step after Apply was clicked -- before the
+    Workday handler got a second pass at the visible 'Autofill with Resume'
+    link. Confirmed live against JR6154830 on 2026-09-12.
+    """
+
+    def test_page_is_loaded_announcement_is_not_an_error(self):
+        from jobapply.external import _filter_benign_alerts
+
+        assert _filter_benign_alerts(
+            ["Component Design Engineer (Inlets, Nacelles) page is loaded"]
+        ) == []
+
+    def test_real_validation_errors_survive(self):
+        from jobapply.external import _filter_benign_alerts
+
+        errs = ["This field is required", "Please enter a valid email address"]
+        assert _filter_benign_alerts(errs) == errs
+
+    def test_mixed_keeps_only_real_errors(self):
+        from jobapply.external import _filter_benign_alerts
+
+        assert _filter_benign_alerts(
+            ["Stress and Lifing Engineer page is loaded", "This field is required"]
+        ) == ["This field is required"]
+
+    def test_case_and_whitespace_insensitive(self):
+        from jobapply.external import _filter_benign_alerts
+
+        assert _filter_benign_alerts(["  Some Job PAGE IS LOADED  "]) == []
+
+    def test_error_mentioning_page_loaded_in_context_is_kept(self):
+        from jobapply.external import _filter_benign_alerts
+
+        # A genuine error that merely contains the word "page" must survive.
+        assert _filter_benign_alerts(["Please complete this page before continuing"]) == [
+            "Please complete this page before continuing"
+        ]
