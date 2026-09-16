@@ -8,6 +8,7 @@ import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ats_handlers import get_handler
 from jobapply import stats
@@ -1955,6 +1956,30 @@ def _filter_benign_alerts(errors):
     return [e for e in errors if not _BENIGN_ALERT_RE.search((e or "").strip())]
 
 
+def _resolve_linkedin_apply_href(href: str) -> str:
+    """Turn a LinkedIn "Apply on company website" href into the real ATS URL.
+
+    LinkedIn wraps outbound apply links in /safety/go/?url=<percent-encoded>,
+    and clicking one opens a new tab. Resolving the href up front lets the
+    flow navigate straight to the employer's ATS, which both avoids the
+    new-tab handoff and gives us a real external_url to record.
+
+    Returns "" when the href is not an external apply destination.
+    """
+    if not href or not href.startswith("http"):
+        return ""
+    parsed = urlparse(href)
+    if "linkedin.com" in parsed.netloc:
+        if "/safety/go" not in parsed.path:
+            return ""
+        target = parse_qs(parsed.query).get("url", [""])[0]
+        if not target:
+            return ""
+        target = unquote(target)
+        return target if target.startswith("http") else ""
+    return href
+
+
 def _handle_post_submit_click(  # noqa: C901
     page,
     profile,
@@ -2359,17 +2384,48 @@ def submit_external_apply(  # noqa: C901
                         _dump_form_debug(page, job.get("id", ""), "No Apply button found")
                         return "failed: no Apply button found on LinkedIn job page"
 
-                _safe_click(apply_btn, page)
-                page.wait_for_timeout(3000)
+                # Prefer navigating straight to the employer's ATS. LinkedIn
+                # renders the external apply control as an <a> wrapped in a
+                # /safety/go/?url= interstitial that opens a NEW TAB; the old
+                # click-then-grab-a-tab path picked context.pages[-1], which is
+                # the persistent about:blank tab, and the run then stalled with
+                # "external form stuck" on a blank page.
+                direct_url = ""
+                try:
+                    direct_url = _resolve_linkedin_apply_href(
+                        apply_btn.get_attribute("href") or ""
+                    )
+                except Exception:  # noqa: BLE001, S110
+                    pass
 
-                # Handle new tab (external URLs often open in new tab)
-                if len(context.pages) > 1:
-                    page.close()
-                    page = context.pages[-1]
-                    try:
-                        page.wait_for_load_state("domcontentloaded", timeout=15000)
-                    except Exception:  # noqa: S110
-                        pass
+                if direct_url:
+                    log.info("   \U0001f517 Resolved external apply URL, navigating directly")
+                    page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(2000)
+                else:
+                    known = set(context.pages)
+                    _safe_click(apply_btn, page)
+                    page.wait_for_timeout(3000)
+
+                    # Handle new tab (external URLs often open in new tab).
+                    # Pick the page that actually appeared, not pages[-1]:
+                    # a persistent about:blank tab can sit at the end.
+                    fresh = [
+                        q
+                        for q in context.pages
+                        if q not in known and not q.is_closed() and q.url != "about:blank"
+                    ]
+                    if fresh:
+                        old_page = page
+                        page = fresh[-1]
+                        try:
+                            old_page.close()
+                        except Exception:  # noqa: BLE001, S110
+                            pass
+                        try:
+                            page.wait_for_load_state("domcontentloaded", timeout=15000)
+                        except Exception:  # noqa: BLE001, S110
+                            pass
 
             # Wait for JS rendering and dismiss cookie banners
             _wait_and_dismiss_cookies(page)

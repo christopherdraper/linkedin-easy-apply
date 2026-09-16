@@ -956,3 +956,49 @@ class TestBenignAlertFilteringModal:
         # A genuine error that merely mentions a window must survive.
         keep = "Your session window expired, please restart the application"
         assert _filter_benign_alerts([keep]) == [keep]
+
+
+class TestLinkedInApplyHrefResolution:
+    """LinkedIn renders "Apply on company website" as an <a> whose href is a
+    /safety/go/?url=<encoded> interstitial, and clicking it opens a new tab.
+    The old flow clicked it and then took context.pages[-1], which is the
+    persistent about:blank tab, producing
+    `failed: external form stuck (step 3/20)` with an empty external_url.
+    Resolving the href directly skips the tab entirely.
+    Confirmed live 2026-09-16 against ENTRUST (UltiPro) and Regal Rexnord.
+    """
+
+    def test_decodes_safety_go_wrapper(self):
+        from jobapply.external import _resolve_linkedin_apply_href
+
+        raw = (
+            "https://www.linkedin.com/safety/go/?url=https%3A%2F%2Fcareers"
+            "%2Eregalrexnord%2Ecom%2Fen%2Fjobs%2Fr26_01831%2F&urlhash=abc"
+        )
+        assert (
+            _resolve_linkedin_apply_href(raw)
+            == "https://careers.regalrexnord.com/en/jobs/r26_01831/"
+        )
+
+    def test_passes_through_direct_external_link(self):
+        from jobapply.external import _resolve_linkedin_apply_href
+
+        direct = "https://recruiting2.ultipro.com/ENE1003ENENG/JobBoard/x/OpportunityDetail"
+        assert _resolve_linkedin_apply_href(direct) == direct
+
+    def test_returns_empty_for_linkedin_internal_link(self):
+        from jobapply.external import _resolve_linkedin_apply_href
+
+        # An on-site LinkedIn link is not an external apply destination.
+        assert _resolve_linkedin_apply_href("https://www.linkedin.com/jobs/view/123/") == ""
+
+    def test_returns_empty_for_blank_or_relative(self):
+        from jobapply.external import _resolve_linkedin_apply_href
+
+        assert _resolve_linkedin_apply_href("") == ""
+        assert _resolve_linkedin_apply_href("/jobs/view/123") == ""
+
+    def test_handles_wrapper_with_no_url_param(self):
+        from jobapply.external import _resolve_linkedin_apply_href
+
+        assert _resolve_linkedin_apply_href("https://www.linkedin.com/safety/go/?x=1") == ""
