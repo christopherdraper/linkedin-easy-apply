@@ -113,12 +113,19 @@ def _login_linkedin(page) -> bool:
         "input#password, input[name='session_password'], "
         "input[autocomplete='current-password'], input[type='password']",
     )
-    if not email_field or not pass_field:
+    # LinkedIn has two login layouts. The full form has email + password.
+    # The "Welcome back" variant remembers the account and renders ONLY a
+    # password field -- requiring both fields there made auto-relogin fail
+    # with "Could not find login form fields" on a form it could complete.
+    if not pass_field:
         log.error("❌ Could not find login form fields")
         return False
 
-    email_field.fill(creds["email"])
-    page.wait_for_timeout(500)
+    if email_field:
+        email_field.fill(creds["email"])
+        page.wait_for_timeout(500)
+    else:
+        log.info("   LinkedIn 'Welcome back' layout: password only")
     pass_field.fill(creds["password"])
     page.wait_for_timeout(500)
 

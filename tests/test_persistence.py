@@ -472,3 +472,72 @@ class TestAtsAccountAnnouncement:
 
         _show_ats_credentials()
         assert "No ATS accounts" in capsys.readouterr().out
+
+
+class TestRegistrationCredentialPersistence:
+    """A generated ATS password must be persisted as soon as it is submitted,
+    not only when the outcome heuristic reports success.
+
+    UltiPro/Auth0 registration succeeded but the heuristic ("password field
+    still visible") read it as a failure, so _save_ats_account never ran and
+    the password was discarded. The account existed with a password nobody
+    held, so every retry re-registered, got "The user already exists", and
+    failed again -- an unrecoverable loop. Confirmed live 2026-09-16.
+    """
+
+    def test_password_saved_before_outcome_check(self, data_dir, profile):
+        import jobapply.accounts as acc
+
+        acc._save_ats_account("example-ats.com", profile.email, "GeneratedPw123!")
+        stored = acc._load_ats_accounts()
+        assert "example-ats.com" in stored
+        assert stored["example-ats.com"]["password"] == "GeneratedPw123!"
+
+    def test_resave_overwrites_rather_than_duplicating(self, data_dir, profile):
+        import jobapply.accounts as acc
+
+        acc._save_ats_account("example-ats.com", profile.email, "First1!aaa")
+        acc._save_ats_account("example-ats.com", profile.email, "Second2!bbb")
+        stored = acc._load_ats_accounts()
+        assert len([k for k in stored if k == "example-ats.com"]) == 1
+        assert stored["example-ats.com"]["password"] == "Second2!bbb"
+
+
+class TestLinkedInWelcomeBackLogin:
+    """LinkedIn renders two login layouts. The "Welcome back" variant
+    remembers the account and shows ONLY a password field. _login_linkedin
+    required both email and password, so auto-relogin aborted with
+    "Could not find login form fields" on a form it could have completed,
+    leaving the session dead. Observed live 2026-09-16.
+    """
+
+    def test_password_only_layout_proceeds(self, data_dir, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import jobapply.browser as br
+
+        monkeypatch.setattr(
+            br, "_load_credentials", lambda: {"email": "e@x.com", "password": "pw"}
+        )
+        pw_field = MagicMock()
+        # No email field (Welcome back), password field present.
+        monkeypatch.setattr(
+            br, "_first_visible", lambda page, sel: None if "username" in sel else pw_field
+        )
+        page = MagicMock()
+        page.url = "https://www.linkedin.com/login/"
+        br._login_linkedin(page)
+        # The password must actually be entered rather than bailing early.
+        pw_field.fill.assert_any_call("pw")
+
+    def test_missing_password_field_still_fails(self, data_dir, monkeypatch):
+        import jobapply.browser as br
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            br, "_load_credentials", lambda: {"email": "e@x.com", "password": "pw"}
+        )
+        monkeypatch.setattr(br, "_first_visible", lambda page, sel: None)
+        page = MagicMock()
+        page.url = "https://www.linkedin.com/login/"
+        assert br._login_linkedin(page) is False

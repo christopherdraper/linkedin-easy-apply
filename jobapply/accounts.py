@@ -423,6 +423,25 @@ def _handle_registration_verification(page, profile: "ApplicantProfile") -> bool
         return True
 
 
+def _recover_existing_account(page, domain: str, email: str) -> bool:
+    """Handle an ATS that says the account already exists.
+
+    Tries the stored credential. If there is none, re-registering can never
+    succeed, so report that plainly instead of looping on "user already
+    exists" forever.
+    """
+    log.info("   \u2139\ufe0f Account already exists for %s, trying login", domain)
+    if _attempt_ats_login(page, domain):
+        return True
+    log.warning(
+        "   \U0001f511 %s has an account for %s but no stored password. "
+        "Reset it on the site, then re-run.",
+        domain,
+        email,
+    )
+    return False
+
+
 def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
     """Try to create an account on the current ATS page.
 
@@ -497,6 +516,16 @@ def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
         _safe_click(submit_btn, page)
         page.wait_for_timeout(3000)
 
+    # Persist the credential NOW, before any outcome heuristic runs.
+    # Registration can genuinely succeed while the checks below misread the
+    # page (UltiPro/Auth0 leaves the password field mounted), and a password
+    # that is generated, submitted, then discarded leaves an account nobody
+    # can log into: every retry re-registers and hits "user already exists",
+    # which is unrecoverable without a password reset. Saving early is safe --
+    # a stale entry for a failed registration merely fails a later login and
+    # is overwritten on the next attempt.
+    _save_ats_account(domain, profile.email, password)
+
     # Step 3: Handle email verification
     if not _handle_registration_verification(page, profile):
         return False
@@ -519,8 +548,7 @@ def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
                 "email is already",
             )
         ):
-            log.info("   ℹ️ Account already exists for %s, trying login", domain)
-            return _attempt_ats_login(page, domain)
+            return _recover_existing_account(page, domain, profile.email)
         if not any(s in body for s in ("account created", "registration successful", "welcome")):
             log.info("   ⚠️ Registration may not have succeeded (password field still visible)")
             return False
