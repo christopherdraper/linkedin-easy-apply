@@ -1938,7 +1938,16 @@ def _resolve_post_submit_captcha(page, profile, job, error_summary):
 # which the validation-error sweep below collects. Left unfiltered it aborts
 # every Workday application one step after Apply is clicked, before the handler
 # gets a second pass at the "Autofill with Resume" link.
-_BENIGN_ALERT_RE = re.compile(r"\bpage\s+is\s+loaded\s*$", re.IGNORECASE)
+_BENIGN_ALERT_PATTERNS = (
+    # Workday announces every page load in a role="alert" element.
+    r"\bpage\s+is\s+loaded\s*[.]?\s*$",
+    # Screen-reader boilerplate shipped inside modal dialogs (LinkedIn Easy
+    # Apply, and the standard video.js/ARIA dialog wording others reuse).
+    r"^\s*this\s+is\s+a\s+modal\s+window\s*[.]?\s*$",
+    r"^\s*beginning\s+of\s+dialog\s+window\s*[.]?\s*$",
+    r"^\s*end\s+of\s+dialog\s+window\s*[.]?\s*$",
+)
+_BENIGN_ALERT_RE = re.compile("|".join(_BENIGN_ALERT_PATTERNS), re.IGNORECASE)
 
 
 def _filter_benign_alerts(errors):

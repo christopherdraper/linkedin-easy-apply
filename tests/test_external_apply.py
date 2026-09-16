@@ -887,9 +887,10 @@ class TestBenignAlertFiltering:
     def test_page_is_loaded_announcement_is_not_an_error(self):
         from jobapply.external import _filter_benign_alerts
 
-        assert _filter_benign_alerts(
-            ["Component Design Engineer (Inlets, Nacelles) page is loaded"]
-        ) == []
+        assert (
+            _filter_benign_alerts(["Component Design Engineer (Inlets, Nacelles) page is loaded"])
+            == []
+        )
 
     def test_real_validation_errors_survive(self):
         from jobapply.external import _filter_benign_alerts
@@ -916,3 +917,42 @@ class TestBenignAlertFiltering:
         assert _filter_benign_alerts(["Please complete this page before continuing"]) == [
             "Please complete this page before continuing"
         ]
+
+
+class TestBenignAlertFilteringModal:
+    """LinkedIn's Easy Apply dialog carries the screen-reader boilerplate
+    "This is a modal window." inside an element the validation sweep collects,
+    so every Easy Apply run aborted with
+    `failed: form validation errors: This is a modal window.`
+    Same class of false positive as Workday's "<title> page is loaded".
+    Confirmed live against LinkedIn job 4458413950 on 2026-09-16.
+    """
+
+    def test_modal_window_boilerplate_is_not_an_error(self):
+        from jobapply.external import _filter_benign_alerts
+
+        assert _filter_benign_alerts(["This is a modal window."]) == []
+
+    def test_modal_boilerplate_with_trailing_text(self):
+        from jobapply.external import _filter_benign_alerts
+
+        assert _filter_benign_alerts(["This is a modal window"]) == []
+
+    def test_beginning_of_dialog_boilerplate(self):
+        from jobapply.external import _filter_benign_alerts
+
+        assert _filter_benign_alerts(["Beginning of dialog window."]) == []
+
+    def test_real_errors_still_survive_alongside_modal_text(self):
+        from jobapply.external import _filter_benign_alerts
+
+        assert _filter_benign_alerts(
+            ["This is a modal window.", "Please enter a valid phone number"]
+        ) == ["Please enter a valid phone number"]
+
+    def test_error_about_a_modal_is_kept(self):
+        from jobapply.external import _filter_benign_alerts
+
+        # A genuine error that merely mentions a window must survive.
+        keep = "Your session window expired, please restart the application"
+        assert _filter_benign_alerts([keep]) == [keep]
