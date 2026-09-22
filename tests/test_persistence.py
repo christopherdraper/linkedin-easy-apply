@@ -553,14 +553,12 @@ class TestExternalUrlCoverLetter:
     to "" and the required field was never filled. Validation failed forever.
     """
 
-    def test_external_url_passes_cover_letter_path(self, tmp_path, monkeypatch):
+    def test_external_url_passes_cover_letter_path(self, data_dir, tmp_path, monkeypatch):
         import json
         from types import SimpleNamespace
 
         from jobapply import cli
 
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
         monkeypatch.setattr(cli, "DATA_DIR", data_dir)
 
         profile_file = data_dir / "profile.json"
