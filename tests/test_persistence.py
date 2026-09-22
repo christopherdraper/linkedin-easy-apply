@@ -541,3 +541,67 @@ class TestLinkedInWelcomeBackLogin:
         page = MagicMock()
         page.url = "https://www.linkedin.com/login/"
         assert br._login_linkedin(page) is False
+
+
+class TestExternalUrlCoverLetter:
+    """--external-url must generate a cover letter like batch runs do.
+
+    Regression driver (2026-09-22): a single-URL run against a Greenhouse form
+    with a required Cover Letter field looped until it burned its whole step
+    budget, reporting "external form stuck (step N/20)". _run_external_url
+    called submit_external_apply() without cover_letter_path, so it defaulted
+    to "" and the required field was never filled. Validation failed forever.
+    """
+
+    def test_external_url_passes_cover_letter_path(self, tmp_path, monkeypatch):
+        import json
+        from types import SimpleNamespace
+
+        from jobapply import cli
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        monkeypatch.setattr(cli, "DATA_DIR", data_dir)
+
+        profile_file = data_dir / "profile.json"
+        profile_file.write_text(
+            json.dumps(
+                {
+                    "profile": {
+                        "personal": {"full_name": "Jane Doe", "email": "j@example.com"},
+                        "documents": {"resume_path": ""},
+                    }
+                }
+            )
+        )
+
+        monkeypatch.setattr(cli, "_abort_if_setup_incomplete", lambda profile: None)
+        monkeypatch.setattr(cli, "ai_generate_cover_letter", lambda job, profile: "Dear team,")
+        cl_path = tmp_path / "cover.docx"
+        cl_path.write_text("x")
+        monkeypatch.setattr(cli, "_save_cover_letter_docx", lambda text, job_id: cl_path)
+
+        captured = {}
+
+        def fake_submit(job, profile, cover_letter_path="", **kwargs):
+            captured["cover_letter_path"] = cover_letter_path
+            return "submitted"
+
+        monkeypatch.setattr(cli, "submit_external_apply", fake_submit)
+
+        cli._run_external_url(
+            SimpleNamespace(
+                profile=str(profile_file),
+                external_url="https://job-boards.greenhouse.io/oklo/jobs/1",
+                job_title="Mechanical Design Engineer",
+                company="Oklo",
+                proxy=None,
+                dry_run=False,
+            )
+        )
+
+        assert captured.get("cover_letter_path"), (
+            "submit_external_apply was called with no cover_letter_path; a form "
+            "with a required Cover Letter field can never pass validation"
+        )
+        assert str(captured["cover_letter_path"]) == str(cl_path)

@@ -20,7 +20,8 @@ from jobapply.browser import (
     _save_credentials,
     _stealth_playwright,
 )
-from jobapply.config import CREDENTIALS_FILE, DATA_DIR
+from jobapply.config import COVER_LETTER_DIR, CREDENTIALS_FILE, DATA_DIR
+from jobapply.content import _save_cover_letter_docx, ai_generate_cover_letter
 from jobapply.external import submit_external_apply
 from jobapply.profile import ApplicantProfile, JobSearchParams
 from jobapply.queue import (
@@ -421,9 +422,23 @@ def _run_external_url(args) -> None:
     log.info(f"🌐 Applying to external URL: {args.external_url}")
     stats.reset_run_stats()
     stats._apply_start_time = time.time()
+
+    # Generate a cover letter exactly as the batch path does. Without one, any
+    # form with a required Cover Letter field fails validation on every pass,
+    # and the step loop spins until it exhausts its budget ("form stuck N/20").
+    cl_file = ""
+    try:
+        COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
+        cl_file = str(_save_cover_letter_docx(ai_generate_cover_letter(job, profile), job["id"]))
+    except Exception as e:
+        # A cover letter we could not build is not worth aborting the whole
+        # application over; forms that merely prefer one still go through.
+        log.warning("   ⚠️ Cover letter generation failed (%s); continuing without one", e)
+
     status = submit_external_apply(
         job,
         profile,
+        cover_letter_path=cl_file,
         proxy=args.proxy,
         dry_run=args.dry_run,
     )
@@ -437,7 +452,7 @@ def _run_external_url(args) -> None:
         from jobapply.workflow import _build_application_entry
 
         compat = {"match_score": 0.0, "reasoning": "", "deal_breakers": []}
-        entry = _build_application_entry(job, compat, status, "", "", None, None, None)
+        entry = _build_application_entry(job, compat, status, cl_file, "", None, None, None)
         # save_log appends to the existing log, so pass ONLY the new entry.
         # Passing the full log duplicates every existing record.
         save_log([entry])
