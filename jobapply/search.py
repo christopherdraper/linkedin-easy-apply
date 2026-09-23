@@ -625,6 +625,32 @@ def _hydrate_job_list(page, max_steps: int = 15, settle_ms: int = 700) -> int:
     return max(last, 0)
 
 
+def _assert_linkedin_session(context, page) -> None:
+    """Raise "session expired" if LinkedIn is serving this search logged out.
+
+    A revoked session does not redirect job search to the authwall: LinkedIn
+    serves the PUBLIC results page, _parse_job_cards falls back to the guest
+    card layout, and every application then dies on a sign-in wall. On
+    2026-09-23 a batch ran ~an hour like that. Cookie and layout are checked
+    independently so either signal alone stops it.
+
+    Deliberately no auto-login here: logging a revoked session back in hits an
+    SMS challenge, and retrying would text the applicant's phone on every run.
+    """
+    has_li_at = any(
+        c.get("name") == "li_at" for c in context.cookies("https://www.linkedin.com")
+    )
+    guest_view = (
+        page.query_selector("div.job-card-container") is None
+        and page.query_selector("div.job-search-card") is not None
+    )
+    if not has_li_at or guest_view:
+        raise RuntimeError(
+            "LinkedIn session expired: search is being served logged out "
+            f"(li_at={has_li_at}, guest_layout={guest_view}). Re-authenticate and retry."
+        )
+
+
 def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> List[Dict]:
     """
     Search LinkedIn for jobs matching params (Easy Apply and external).
@@ -669,6 +695,7 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
             page.evaluate("window.scrollTo(0, 500)")
             page.wait_for_timeout(2000)
             _hydrate_job_list(page)
+            _assert_linkedin_session(context, page)
 
             # Re-check after scroll — LinkedIn sometimes redirects after a delay
             _ensure_logged_in(page, url)

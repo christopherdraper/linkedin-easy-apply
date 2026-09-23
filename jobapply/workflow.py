@@ -204,6 +204,10 @@ def auto_apply_workflow(  # noqa: C901
     try:
         jobs = _search_source(source, params, proxy)
     except RuntimeError as e:
+        # A dead session must reach cli._run_batch, which stops the whole batch;
+        # swallowing it here sent every remaining title through a logged-out search.
+        if "session expired" in str(e).lower():
+            raise
         log.error(f"❌ Search failed: {e}")
         return {"applications": [], "total": 0, "jobs_found": 0}
 

@@ -249,3 +249,56 @@ class TestHydrateJobList:
         assert "overflowY" in _SCROLL_JOB_PANE_JS
         assert "window.scroll" not in _SCROLL_JOB_PANE_JS
 
+
+# ---------------------------------------------------------------------------
+# _assert_linkedin_session tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeCtx:
+    def __init__(self, names):
+        self._names = names
+
+    def cookies(self, *urls):
+        return [{"name": n, "domain": ".linkedin.com"} for n in self._names]
+
+
+class _FakeSearchPage:
+    def __init__(self, authed_cards, guest_cards):
+        self._sel = {
+            "div.job-card-container": object() if authed_cards else None,
+            "div.job-search-card": object() if guest_cards else None,
+        }
+
+    def query_selector(self, sel):
+        return self._sel.get(sel)
+
+
+class TestAssertLinkedInSession:
+    """A revoked LinkedIn session does not redirect job search to the authwall:
+    LinkedIn serves PUBLIC results, the parser falls back to the guest card
+    layout, and every application then fails on a sign-in wall. On 2026-09-23 a
+    batch ran ~an hour like this. Either signal alone must stop the search.
+    """
+
+    def test_authenticated_session_passes(self):
+        from jobapply.search import _assert_linkedin_session
+
+        _assert_linkedin_session(_FakeCtx(["li_at", "JSESSIONID"]), _FakeSearchPage(True, False))
+
+    def test_missing_li_at_raises_session_expired(self):
+        import pytest
+
+        from jobapply.search import _assert_linkedin_session
+
+        with pytest.raises(RuntimeError, match="session expired"):
+            _assert_linkedin_session(_FakeCtx(["JSESSIONID"]), _FakeSearchPage(True, False))
+
+    def test_public_guest_layout_raises_session_expired(self):
+        import pytest
+
+        from jobapply.search import _assert_linkedin_session
+
+        with pytest.raises(RuntimeError, match="session expired"):
+            _assert_linkedin_session(_FakeCtx(["li_at"]), _FakeSearchPage(False, True))
+

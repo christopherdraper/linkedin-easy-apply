@@ -292,7 +292,19 @@ class TestAutoApplyWorkflow:
         params = JobSearchParams(title="devops engineer")
         with patch(
             "jobapply.workflow._search_source",
-            side_effect=RuntimeError("LinkedIn session expired"),
+            side_effect=RuntimeError("No results found — LinkedIn may have changed layout."),
         ):
             result = auto_apply_workflow(params, profile)
         assert result == {"applications": [], "total": 0, "jobs_found": 0}
+
+    def test_session_expired_propagates_so_the_batch_stops(self, data_dir, profile):
+        """cli._run_batch stops the whole batch on "session expired", but only if
+        the error reaches it. Swallowing it here let a batch run ~an hour logged
+        out on 2026-09-23, searching every remaining title for nothing."""
+        params = JobSearchParams(title="devops engineer")
+        with patch(
+            "jobapply.workflow._search_source",
+            side_effect=RuntimeError("LinkedIn session expired: no li_at cookie"),
+        ):
+            with pytest.raises(RuntimeError, match="session expired"):
+                auto_apply_workflow(params, profile)
