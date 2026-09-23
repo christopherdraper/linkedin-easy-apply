@@ -1099,3 +1099,28 @@ class TestGuestBypassSelectors:
 
         for phrase in ("Continue as guest", "Apply as guest", "as a guest"):
             assert phrase in _GUEST_SELECTORS
+
+
+class _FakeFileInput:
+    def __init__(self, attrs):
+        self._attrs = attrs
+
+    def get_attribute(self, name):
+        return self._attrs.get(name)
+
+
+class TestFileInputSkipMarker:
+    """ATS handlers mark inputs the generic uploader must leave alone (e.g.
+    Ashby's autofill-from-resume pane) with data-jobapply-skip."""
+
+    def test_marked_inputs_are_not_upload_targets(self):
+        from jobapply import external
+
+        autofill = _FakeFileInput({"data-jobapply-skip": "ashby-autofill"})
+        resume = _FakeFileInput({"id": "_systemfield_resume"})
+        page = MagicMock()
+        page.query_selector_all.return_value = [autofill, resume]
+        with patch.object(external, "_get_field_label", return_value=""):
+            found = external._find_file_upload_inputs(page)
+        assert [u["element"] for u in found] == [resume]
+

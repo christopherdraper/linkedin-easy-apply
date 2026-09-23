@@ -97,6 +97,13 @@ class AshbyHandler(BaseATSHandler):
         hydrates and renders the spam banner. The form-step loop gives React
         multiple chances to finish rendering before we declare the form stuck.
         """
+        # Keep the generic uploader off the "Autofill from resume" pane. Its
+        # file input comes first in the DOM with no label or id, so it got the
+        # resume as an "inferred" upload, the resume counted as done, and the
+        # required Resume field (#_systemfield_resume) was skipped. The form
+        # then sat on "Parsing your resume..." with Submit disabled.
+        self._skip_autofill_upload(page)
+
         # Fill react-datepicker date inputs (e.g. "When can you start a new
         # role?"). The generic field handler skips them because the input is
         # disabled until the calendar popup is opened, and AI answers the
@@ -130,6 +137,19 @@ class AshbyHandler(BaseATSHandler):
     def on_submit_clicked(self, page, ctx: dict) -> Optional[str]:
         """Detect spam rejection after clicking submit."""
         return self._check_spam_banner(page, "post-submit")
+
+    @staticmethod
+    def _skip_autofill_upload(page) -> None:
+        """Mark the autofill-from-resume file input so uploads bypass it."""
+        try:
+            page.evaluate(
+                """() => document.querySelectorAll(
+                    '.ashby-application-form-autofill-input-root input[type=file], '
+                    + '.ashby-application-form-autofill-pane input[type=file]'
+                ).forEach(el => el.setAttribute('data-jobapply-skip', 'ashby-autofill'))"""
+            )
+        except Exception as e:
+            log.debug("Ashby: could not mark autofill upload: %s", e)
 
     @staticmethod
     def _check_spam_banner(page, when: str) -> Optional[str]:

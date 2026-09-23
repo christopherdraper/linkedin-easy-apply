@@ -61,6 +61,9 @@ def _find_file_upload_inputs(page) -> list:
     uploads = []
     try:
         for inp in page.query_selector_all("input[type='file']"):
+            # ATS handlers mark inputs the generic uploader must leave alone.
+            if inp.get_attribute("data-jobapply-skip"):
+                continue
             label = _get_field_label(page, inp)
             accept = inp.get_attribute("accept") or ""
             el_id = (inp.get_attribute("id") or "").lower()

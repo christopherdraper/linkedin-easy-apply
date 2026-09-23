@@ -541,6 +541,26 @@ class TestAshbyHandler:
     def test_platform_name(self):
         assert AshbyHandler().platform_name == "Ashby"
 
+    def test_on_step_start_marks_autofill_upload_to_be_skipped(self):
+        """The resume must reach the required Resume field, not the autofill pane.
+
+        Regression driver (2026-09-23): the generic uploader walks file inputs in
+        DOM order. Ashby's "Autofill from resume" input comes first with no
+        label or id, so it got the resume as an "inferred" upload, which marked
+        the resume done; the real required input (#_systemfield_resume) was then
+        skipped. The form sat on "Parsing your resume..." with Resume* empty and
+        Submit disabled until the step budget ran out.
+        """
+        handler = AshbyHandler()
+        page = MagicMock()
+        page.evaluate.return_value = ""
+        handler.on_step_start(page, {})
+        scripts = [c.args[0] for c in page.evaluate.call_args_list if c.args]
+        assert any(
+            "ashby-application-form-autofill" in js and "data-jobapply-skip" in js
+            for js in scripts
+        )
+
     def test_on_submit_detects_spam_filter(self):
         handler = AshbyHandler()
         page = MagicMock()
