@@ -1002,3 +1002,77 @@ class TestLinkedInApplyHrefResolution:
         from jobapply.external import _resolve_linkedin_apply_href
 
         assert _resolve_linkedin_apply_href("https://www.linkedin.com/safety/go/?x=1") == ""
+
+
+class _FlakyNavPage:
+    """A page whose goto raises the given errors in order, then succeeds."""
+
+    def __init__(self, errors):
+        self._errors = list(errors)
+        self.gotos = 0
+        self.waits = []
+
+    def goto(self, url, **kwargs):
+        self.gotos += 1
+        if self._errors:
+            raise Exception(self._errors.pop(0))
+        return "response"
+
+    def wait_for_timeout(self, ms):
+        self.waits.append(ms)
+
+
+class TestResilientNavigation:
+    """Transient proxy failures must not cost an application.
+
+    Regression driver (2026-09-23): the residential exit node intermittently
+    timed out DNS and TCP under batch load (~12 failed proxy connections a
+    minute). Four applications died on a single
+    "Page.goto: net::ERR_SOCKS_CONNECTION_FAILED", yet every one of those URLs
+    loaded fine when retried seconds later.
+    """
+
+    SOCKS = "Page.goto: net::ERR_SOCKS_CONNECTION_FAILED at https://jobs.micro1.ai/post/x"
+
+    def test_retries_transient_proxy_failure_then_succeeds(self):
+        from jobapply.external import _goto_resilient
+
+        page = _FlakyNavPage([self.SOCKS])
+        assert _goto_resilient(page, "https://jobs.micro1.ai/post/x", timeout=30000) == "response"
+        assert page.gotos == 2
+
+    def test_non_transient_error_raises_immediately(self):
+        from jobapply.external import _goto_resilient
+
+        page = _FlakyNavPage(["Page.goto: Timeout 30000ms exceeded."])
+        try:
+            _goto_resilient(page, "https://example.com", timeout=30000)
+        except Exception as e:
+            assert "Timeout 30000ms" in str(e)
+        else:
+            raise AssertionError("expected the non-transient error to propagate")
+        assert page.gotos == 1
+
+    def test_gives_up_after_attempts(self):
+        from jobapply.external import _goto_resilient
+
+        page = _FlakyNavPage([self.SOCKS] * 10)
+        try:
+            _goto_resilient(page, "https://jobs.micro1.ai/post/x", timeout=30000, attempts=3)
+        except Exception as e:
+            assert "ERR_SOCKS_CONNECTION_FAILED" in str(e)
+        else:
+            raise AssertionError("expected failure after exhausting retries")
+        assert page.gotos == 3
+
+    def test_retries_navigation_interrupted_by_chrome_error_page(self):
+        from jobapply.external import _goto_resilient
+
+        interrupted = (
+            'Page.goto: Navigation to "https://x.example/" is interrupted by another '
+            'navigation to "chrome-error://chromewebdata/"'
+        )
+        page = _FlakyNavPage([interrupted])
+        assert _goto_resilient(page, "https://x.example/", timeout=20000) == "response"
+        assert page.gotos == 2
+

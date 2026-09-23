@@ -1956,6 +1956,44 @@ def _filter_benign_alerts(errors):
     return [e for e in errors if not _BENIGN_ALERT_RE.search((e or "").strip())]
 
 
+# Chrome network errors that mean "the path hiccupped", not "this URL is bad".
+# Seen live 2026-09-23: the residential exit node intermittently timed out DNS
+# and TCP under batch load, and the same URLs loaded fine seconds later.
+_TRANSIENT_NET_ERRORS = (
+    "ERR_SOCKS_CONNECTION_FAILED",
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_CONNECTION_TIMED_OUT",
+    "ERR_TIMED_OUT",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_NAME_NOT_RESOLVED",
+    "ERR_NETWORK_CHANGED",
+    "ERR_EMPTY_RESPONSE",
+    # Re-navigating while Chrome is still painting the previous attempt's
+    # error page raises 'interrupted by another navigation to chrome-error://'.
+    "chrome-error://chromewebdata",
+)
+
+
+def _goto_resilient(page, url: str, *, timeout: int, attempts: int = 3, backoff_ms: int = 4000):
+    """page.goto that retries transient proxy/network failures.
+
+    A single dropped connection through the residential proxy used to fail the
+    whole application. Only the network-error codes above are retried; a plain
+    navigation timeout or any other error propagates on the first attempt.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        except Exception as e:
+            code = next((c for c in _TRANSIENT_NET_ERRORS if c in str(e)), None)
+            if code is None or attempt == attempts:
+                raise
+            log.info("   🔁 %s loading %s; retry %d/%d", code, url[:80], attempt, attempts - 1)
+            page.wait_for_timeout(backoff_ms * attempt)
+
+
 def _resolve_linkedin_apply_href(href: str) -> str:
     """Turn a LinkedIn "Apply on company website" href into the real ATS URL.
 
@@ -2345,7 +2383,7 @@ def submit_external_apply(  # noqa: C901
             headed=use_headed,  # type: ignore[arg-type]  # truthy str/None used as bool
         )
         try:
-            page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
+            _goto_resilient(page, job["url"], timeout=20000)
             page.wait_for_timeout(2000)
 
             # If we're still on LinkedIn, find and click the external "Apply" button
@@ -2400,7 +2438,7 @@ def submit_external_apply(  # noqa: C901
 
                 if direct_url:
                     log.info("   \U0001f517 Resolved external apply URL, navigating directly")
-                    page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
+                    _goto_resilient(page, direct_url, timeout=30000)
                     page.wait_for_timeout(2000)
                 else:
                     known = set(context.pages)
