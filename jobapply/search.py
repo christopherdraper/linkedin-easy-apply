@@ -585,6 +585,46 @@ def search_biotech(params: JobSearchParams) -> List[Dict]:
     return all_jobs
 
 
+# Scroll LinkedIn's results pane one step and report how many job cards have
+# rendered. The pane uses obfuscated class names, so it is located by computed
+# overflow: the first scrollable ancestor of a job card.
+_SCROLL_JOB_PANE_JS = """() => {
+  const first = document.querySelector('li.scaffold-layout__list-item, div.job-card-container');
+  let n = first;
+  while (n && n !== document.body) {
+    const s = getComputedStyle(n);
+    if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && n.scrollHeight > n.clientHeight + 10) {
+      n.scrollBy(0, 600);
+      break;
+    }
+    n = n.parentElement;
+  }
+  return document.querySelectorAll('div.job-card-container, div.job-search-card').length;
+}"""
+
+
+def _hydrate_job_list(page, max_steps: int = 15, settle_ms: int = 700) -> int:
+    """Scroll LinkedIn's results pane until every job card has rendered.
+
+    The authenticated results list is virtualized: all ~25 slots exist on load,
+    but only the first ~7 render a card until the list PANE (not the window)
+    scrolls. Scrolling the window, as this used to, left ~72% of every results
+    page unparsed. Stops once the rendered card count holds steady.
+    """
+    last, stable = -1, 0
+    for _ in range(max_steps):
+        count = page.evaluate(_SCROLL_JOB_PANE_JS)
+        page.wait_for_timeout(settle_ms)
+        if count == last:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+        last = count
+    return max(last, 0)
+
+
 def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> List[Dict]:
     """
     Search LinkedIn for jobs matching params (Easy Apply and external).
@@ -628,6 +668,7 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
 
             page.evaluate("window.scrollTo(0, 500)")
             page.wait_for_timeout(2000)
+            _hydrate_job_list(page)
 
             # Re-check after scroll — LinkedIn sometimes redirects after a delay
             _ensure_logged_in(page, url)

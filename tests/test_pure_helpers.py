@@ -191,3 +191,61 @@ class TestExtractResultsCount:
     def test_returns_none_when_selectors_fail(self, make_page):
         page = make_page(body_text="")
         assert _extract_results_count(page) is None
+
+
+# ---------------------------------------------------------------------------
+# _hydrate_job_list tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeResultsPage:
+    """Stands in for a Playwright page whose job list renders as it scrolls."""
+
+    def __init__(self, counts):
+        self._counts = list(counts)
+        self.scripts = []
+        self.waits = 0
+
+    def evaluate(self, script):
+        self.scripts.append(script)
+        # Hold the last value once the sequence is exhausted (list fully rendered).
+        return self._counts.pop(0) if len(self._counts) > 1 else self._counts[0]
+
+    def wait_for_timeout(self, ms):
+        self.waits += 1
+
+
+class TestHydrateJobList:
+    """LinkedIn's authenticated results list is virtualized: all ~25 slots exist
+    on load but only ~7 render a card until the results PANE scrolls.
+
+    Regression driver (2026-09-23): search_linkedin scrolled the window once,
+    so every search parsed 7 of 25 results and silently discarded 72% of them.
+    Live probe: window scroll -> 7 cards; pane scroll -> 25 of 25.
+    """
+
+    def test_scrolls_until_card_count_stops_growing(self):
+        from jobapply.search import _hydrate_job_list
+
+        page = _FakeResultsPage([7, 14, 21, 25, 25, 25, 25])
+        assert _hydrate_job_list(page) == 25
+        # Stops once stable instead of burning every step.
+        assert len(page.scripts) < 15
+
+    def test_gives_up_after_max_steps(self):
+        from jobapply.search import _hydrate_job_list
+
+        page = _FakeResultsPage(list(range(1, 100)))
+        _hydrate_job_list(page, max_steps=5)
+        assert len(page.scripts) == 5
+
+    def test_scrolls_the_results_pane_not_the_window(self):
+        from jobapply.search import _SCROLL_JOB_PANE_JS, _hydrate_job_list
+
+        page = _FakeResultsPage([7, 7, 7])
+        _hydrate_job_list(page)
+        assert page.scripts[0] == _SCROLL_JOB_PANE_JS
+        # The pane's class names are obfuscated, so it must be found by overflow.
+        assert "overflowY" in _SCROLL_JOB_PANE_JS
+        assert "window.scroll" not in _SCROLL_JOB_PANE_JS
+
