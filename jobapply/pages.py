@@ -394,7 +394,11 @@ _PAGE_CLASSIFIER_SYSTEM = (
 
 _GUEST_SELECTORS = (
     "a:has-text('Continue as guest'), a:has-text('Apply without account'), "
-    "a:has-text('Guest'), button:has-text('Continue as guest'), "
+    # Bare "Guest" must be an EXACT match: has-text is a case-insensitive
+    # substring match and hit LinkedIn's own footer link "Guest Controls".
+    "a:text-is('Guest'), button:text-is('Guest'), "
+    "a:has-text('as a guest'), button:has-text('as a guest'), "
+    "button:has-text('Continue as guest'), "
     "button:has-text('Apply without'), a:has-text('continue without'), "
     # Common alternatives
     "a:has-text('Apply as guest'), button:has-text('Apply as guest'), "

@@ -1076,3 +1076,26 @@ class TestResilientNavigation:
         assert _goto_resilient(page, "https://x.example/", timeout=20000) == "response"
         assert page.gotos == 2
 
+
+class TestGuestBypassSelectors:
+    """The guest-bypass selector must not match unrelated links containing "guest".
+
+    Regression driver (2026-09-23): "a:has-text('Guest')" is a case-insensitive
+    SUBSTRING match, so on a LinkedIn job page it matched LinkedIn's own footer
+    link "Guest Controls" (/psettings/guest-controls). The bot clicked it, landed
+    on LinkedIn's privacy settings, and the JTEKT application died as
+    "external form stuck (step 3/20)". Verified live: has-text matched 1 visible
+    link ("Guest Controls"), text-is('Guest') matched 0.
+    """
+
+    def test_bare_guest_is_exact_match_not_substring(self):
+        from jobapply.pages import _GUEST_SELECTORS
+
+        assert "a:has-text('Guest')" not in _GUEST_SELECTORS
+        assert "a:text-is('Guest')" in _GUEST_SELECTORS
+
+    def test_real_guest_phrasings_still_covered(self):
+        from jobapply.pages import _GUEST_SELECTORS
+
+        for phrase in ("Continue as guest", "Apply as guest", "as a guest"):
+            assert phrase in _GUEST_SELECTORS
