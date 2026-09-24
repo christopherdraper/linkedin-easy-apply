@@ -7,7 +7,7 @@ import logging
 import random
 import re
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from jobapply.applog import save_search_log
 from jobapply.browser import (
@@ -651,7 +651,43 @@ def _assert_linkedin_session(context, page) -> None:
         )
 
 
-def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> List[Dict]:
+# Pause between LinkedIn job-page loads. On 2026-09-23, after 348df6f made every
+# search read 25 results, ~25 unpaced page loads per search (repeated across
+# overlapping-title reruns) preceded LinkedIn revoking the session.
+_LINKEDIN_PAGE_GAP_S = (2.0, 5.0)
+
+
+def _fetch_descriptions(
+    context,
+    page,
+    jobs: List[Dict],
+    need_description: Optional[Callable[[Dict], bool]] = None,
+    gap_s: tuple = _LINKEDIN_PAGE_GAP_S,
+) -> int:
+    """Load job pages only for jobs that need a description, pacing the loads.
+
+    Jobs whose outcome is already decided (applied, or cached as below the bar
+    or deal-broken) keep an empty description: re-running overlapping titles
+    used to reload every one of those pages. Returns the number of pages loaded.
+    """
+    for job in jobs:
+        job.setdefault("posted_ago", "")
+    todo = [j for j in jobs if j.get("url") and (need_description is None or need_description(j))]
+    skipped = len(jobs) - len(todo)
+    note = f" (skipping {skipped} already decided)" if skipped else ""
+    log.info(f"   Fetching descriptions for {len(todo)} jobs{note}...")
+    for i, job in enumerate(todo):
+        if i:
+            page.wait_for_timeout(int(random.uniform(*gap_s) * 1000))
+        job["description"], job["posted_ago"] = _fetch_description(context, job["url"])
+    return len(todo)
+
+
+def search_linkedin(
+    params: JobSearchParams,
+    proxy: Optional[str] = None,
+    need_description: Optional[Callable[[Dict], bool]] = None,
+) -> List[Dict]:
     """
     Search LinkedIn for jobs matching params (Easy Apply and external).
     Fetches full job descriptions for AI scoring.
@@ -710,14 +746,9 @@ def search_linkedin(params: JobSearchParams, proxy: Optional[str] = None) -> Lis
                 excl = [kw.lower() for kw in params.keywords_excluded]
                 jobs = [j for j in jobs if not any(kw in j["title"].lower() for kw in excl)]
 
-            # Fetch full descriptions for remaining jobs
+            # Fetch full descriptions, only where the batch will use them.
             if jobs:
-                log.info(f"   Fetching descriptions for {len(jobs)} jobs...")
-                for job in jobs:
-                    if job["url"]:
-                        job["description"], job["posted_ago"] = _fetch_description(
-                            context, job["url"]
-                        )
+                _fetch_descriptions(context, page, jobs, need_description)
 
             if owns_browser:
                 _save_session(context)

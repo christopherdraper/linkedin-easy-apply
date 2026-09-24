@@ -177,7 +177,61 @@ class TestSearchSource:
         params = JobSearchParams(title="sre")
         with patch("jobapply.workflow.search_linkedin", return_value=[{"id": "li_1"}]) as m_li:
             assert _search_source("linkedin", params, "socks5://localhost:1080") == [{"id": "li_1"}]
-        m_li.assert_called_once_with(params, proxy="socks5://localhost:1080")
+        m_li.assert_called_once_with(params, proxy="socks5://localhost:1080", need_description=None)
+
+
+class TestNeedsDescription:
+    """Only jobs the batch will score or apply to need their LinkedIn page loaded.
+
+    Regression driver (2026-09-23): every search re-loaded all 25 job pages,
+    including jobs already applied to or already rejected, across repeated
+    overlapping-title runs. LinkedIn revoked the session within the hour.
+    """
+
+    def _cache(self, job_id, score, deal_breakers=()):
+        from jobapply.workflow import _needs_description  # noqa: F401  (import check)
+
+        cache = {}
+        remember_score(
+            cache,
+            job_id,
+            {"match_score": score, "reasoning": "", "deal_breakers": list(deal_breakers)},
+            True,
+            SCORER_FINGERPRINT,
+        )
+        return cache
+
+    def test_already_applied_needs_no_page(self):
+        from jobapply.workflow import _needs_description
+
+        job = {"id": "li_1", "url": "https://www.linkedin.com/jobs/view/1/?trk=x"}
+        applied = {"https://www.linkedin.com/jobs/view/1/"}
+        assert _needs_description(job, applied, {}, 0.6) is False
+
+    def test_cached_below_bar_needs_no_page(self):
+        from jobapply.workflow import _needs_description
+
+        job = {"id": "li_2", "url": "https://www.linkedin.com/jobs/view/2/"}
+        assert _needs_description(job, set(), self._cache("li_2", 0.35), 0.6) is False
+
+    def test_cached_with_deal_breaker_needs_no_page(self):
+        from jobapply.workflow import _needs_description
+
+        job = {"id": "li_3", "url": "https://www.linkedin.com/jobs/view/3/"}
+        cache = self._cache("li_3", 0.9, ["relocation_required"])
+        assert _needs_description(job, set(), cache, 0.6) is False
+
+    def test_cached_above_bar_still_needs_page_for_cover_letter(self):
+        from jobapply.workflow import _needs_description
+
+        job = {"id": "li_4", "url": "https://www.linkedin.com/jobs/view/4/"}
+        assert _needs_description(job, set(), self._cache("li_4", 0.62), 0.6) is True
+
+    def test_unscored_job_needs_page(self):
+        from jobapply.workflow import _needs_description
+
+        job = {"id": "li_5", "url": "https://www.linkedin.com/jobs/view/5/"}
+        assert _needs_description(job, set(), {}, 0.6) is True
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +341,13 @@ class TestAutoApplyWorkflow:
 
         mocks["score"].assert_not_called()
         mocks["save_score_cache"].assert_not_called()
+
+    def test_passes_a_need_description_filter_to_the_search(self, data_dir, profile):
+        params = JobSearchParams(title="devops engineer")
+        with patch("jobapply.workflow._search_source", return_value=[]) as m_search:
+            auto_apply_workflow(params, profile)
+        need = m_search.call_args.kwargs.get("need_description")
+        assert callable(need)
 
     def test_search_failure_returns_empty_result(self, data_dir, profile):
         params = JobSearchParams(title="devops engineer")

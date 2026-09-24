@@ -302,3 +302,54 @@ class TestAssertLinkedInSession:
         with pytest.raises(RuntimeError, match="session expired"):
             _assert_linkedin_session(_FakeCtx(["li_at"]), _FakeSearchPage(False, True))
 
+
+# ---------------------------------------------------------------------------
+# _fetch_descriptions tests (LinkedIn page-load throttle)
+# ---------------------------------------------------------------------------
+
+
+class _PacingPage:
+    def __init__(self):
+        self.waits = []
+
+    def wait_for_timeout(self, ms):
+        self.waits.append(ms)
+
+
+class TestFetchDescriptionsThrottle:
+    """Skip already-decided jobs and pace the rest. On 2026-09-23 ~25 unpaced
+    LinkedIn job-page loads per search preceded a session revocation."""
+
+    def _jobs(self, n):
+        return [{"id": f"li_{i}", "url": f"https://www.linkedin.com/jobs/view/{i}/", "description": ""}
+                for i in range(n)]
+
+    def test_fetches_only_jobs_that_need_a_description(self, monkeypatch):
+        from jobapply import search
+
+        fetched = []
+        monkeypatch.setattr(search, "_fetch_description",
+                            lambda ctx, url: (fetched.append(url) or ("desc", "1 day ago")))
+        jobs = self._jobs(5)
+        n = search._fetch_descriptions(None, _PacingPage(), jobs,
+                                       need_description=lambda j: j["id"] in ("li_1", "li_3"))
+        assert n == 2
+        assert fetched == [jobs[1]["url"], jobs[3]["url"]]
+        assert jobs[0]["description"] == "" and jobs[0]["posted_ago"] == ""
+        assert jobs[1]["description"] == "desc"
+
+    def test_paces_between_page_loads(self, monkeypatch):
+        from jobapply import search
+
+        monkeypatch.setattr(search, "_fetch_description", lambda ctx, url: ("d", ""))
+        page = _PacingPage()
+        search._fetch_descriptions(None, page, self._jobs(4), gap_s=(2.0, 5.0))
+        assert len(page.waits) == 3  # a gap between each pair, none before the first
+        assert all(2000 <= ms <= 5000 for ms in page.waits)
+
+    def test_no_filter_fetches_everything(self, monkeypatch):
+        from jobapply import search
+
+        monkeypatch.setattr(search, "_fetch_description", lambda ctx, url: ("d", ""))
+        assert search._fetch_descriptions(None, _PacingPage(), self._jobs(3)) == 3
+

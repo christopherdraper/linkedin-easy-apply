@@ -46,7 +46,9 @@ from jobapply.stats import _categorize_failure, _compute_cost_usd, _detect_ats_p
 log = logging.getLogger(__name__)
 
 
-def _search_source(source: str, params: JobSearchParams, proxy: Optional[str]) -> list:
+def _search_source(
+    source: str, params: JobSearchParams, proxy: Optional[str], need_description=None
+) -> list:
     """Dispatch to the search function for the given job source."""
     if source == "remoteok":
         jobs = search_remoteok(params)
@@ -55,8 +57,26 @@ def _search_source(source: str, params: JobSearchParams, proxy: Optional[str]) -
     elif source == "biotech":
         jobs = search_biotech(params)
     else:
-        jobs = search_linkedin(params, proxy=proxy)
+        jobs = search_linkedin(params, proxy=proxy, need_description=need_description)
     return jobs
+
+
+def _needs_description(job: Dict, applied_urls: set, score_cache: Dict, min_match_score: float) -> bool:
+    """True if this batch will score or apply to the job, so it needs its page.
+
+    Mirrors the skip rules in auto_apply_workflow's job loop: already applied,
+    or a fresh cached verdict that is below the bar or has deal-breakers, means
+    the outcome is decided and loading the LinkedIn job page is pure load. A
+    cached verdict above the bar still needs it: the cover letter uses it.
+    """
+    url = job.get("url") or ""
+    canonical = re.sub(r"\?.*$", "", url) if url else ""
+    if url in applied_urls or canonical in applied_urls or job.get("id") in applied_urls:
+        return False
+    compat = cached_score(score_cache, job.get("id", ""), SCORER_FINGERPRINT)
+    if compat is None:
+        return True
+    return compat["match_score"] >= min_match_score and not compat.get("deal_breakers")
 
 
 def _submit_one(
@@ -202,7 +222,14 @@ def auto_apply_workflow(  # noqa: C901
 
     log.info(f"🔍 Searching {label} for '{params.title}'...")
     try:
-        jobs = _search_source(source, params, proxy)
+        jobs = _search_source(
+            source,
+            params,
+            proxy,
+            need_description=lambda j: _needs_description(
+                j, applied_urls, score_cache, min_match_score
+            ),
+        )
     except RuntimeError as e:
         # A dead session must reach cli._run_batch, which stops the whole batch;
         # swallowing it here sent every remaining title through a logged-out search.
