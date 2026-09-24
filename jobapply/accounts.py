@@ -214,6 +214,21 @@ def _get_domain(url: str) -> str:
     return urlparse(url).netloc.lower()
 
 
+# How ATS sign-in pages reject credentials. Workday says "You may have entered
+# the wrong email address or password or your account might be locked.", which
+# the older list ("wrong password", ...) missed, so a stale password logged nothing.
+_LOGIN_REJECTION_PHRASES = (
+    "invalid",
+    "incorrect",
+    "wrong password",
+    "wrong email",
+    "failed",
+    "might be locked",
+    "account is locked",
+    "account has been locked",
+)
+
+
 def _attempt_ats_login(page, domain: str) -> bool:
     """Try to log in using stored ATS credentials. Returns True if login succeeded."""
     accounts = _load_ats_accounts()
@@ -298,8 +313,12 @@ def _attempt_ats_login(page, domain: str) -> bool:
 
             # Check for error messages
             errors = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
-            if any(e in errors for e in ("invalid", "incorrect", "wrong password", "failed")):
-                log.warning("   ⚠️ ATS login failed — credentials may be outdated")
+            if any(e in errors for e in _LOGIN_REJECTION_PHRASES):
+                log.warning(
+                    "   ⚠️ ATS login rejected for %s: stored password is stale or the "
+                    "account is locked. Not retrying; repeated failures can lock it.",
+                    domain,
+                )
                 return False
 
         return False

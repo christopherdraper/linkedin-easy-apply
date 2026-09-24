@@ -603,3 +603,35 @@ class TestExternalUrlCoverLetter:
             "with a required Cover Letter field can never pass validation"
         )
         assert str(captured["cover_letter_path"]) == str(cl_path)
+
+
+class TestAtsLoginRejectionDetection:
+    """A rejected ATS login must be reported, not returned as a silent False.
+
+    Regression driver (2026-09-24): Rolls-Royce's Workday answered the stored
+    login with "You may have entered the wrong email address or password or
+    your account might be locked." The routine only recognised "invalid",
+    "incorrect", "wrong password" and "failed", so it logged nothing and a stale
+    password looked like an unexplained failure.
+    """
+
+    WORKDAY_REJECTION = (
+        "Sign In You may have entered the wrong email address or password "
+        "or your account might be locked. Email Address* Password*"
+    )
+
+    def test_workday_rejection_is_reported(self, data_dir, caplog):
+        import logging
+        from unittest.mock import MagicMock, patch
+
+        from jobapply import accounts
+
+        domain = "rollsroyce.wd3.myworkdayjobs.com"
+        accounts._save_ats_account(domain, "e@example.com", "stale-password")
+        page = MagicMock()
+        page.evaluate.return_value = self.WORKDAY_REJECTION.lower()
+        page.url = f"https://{domain}/en-US/professional/login?redirect=x"
+        with patch.object(accounts, "_safe_click"), caplog.at_level(logging.WARNING):
+            assert accounts._attempt_ats_login(page, domain) is False
+        assert any("rejected" in r.getMessage().lower() for r in caplog.records)
+
