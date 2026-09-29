@@ -159,6 +159,12 @@ class TestFormatPreviousEmployers:
         profile.previous_employers = [{"title": "Dev", "employer": "Co"}]
         assert _format_previous_employers(profile) == "Dev at Co"
 
+    def test_includes_dates_so_the_ai_does_not_guess_them(self, profile):
+        profile.previous_employers = [
+            {"title": "Aero Engineer", "employer": "RR", "industry": "Aerospace", "dates": "Oct 2022 - Mar 2025"}
+        ]
+        assert _format_previous_employers(profile) == "Aero Engineer at RR (Aerospace), Oct 2022 - Mar 2025"
+
 
 class TestProfileSummary:
     def test_contains_key_fields(self, profile):
@@ -175,6 +181,16 @@ class TestProfileSummary:
         summary = _profile_summary(profile)
         assert "GovTech" in summary
         assert "State College" in summary
+
+    def test_employment_status_is_stated_when_on_file(self, profile):
+        profile.screening_answers["current employment status"] = "Not currently employed. Left Acme in March 2026."
+        summary = _profile_summary(profile)
+        assert "Employment status: Not currently employed. Left Acme in March 2026." in summary
+        assert "Most recent employer: Acme Corp" in summary
+
+    def test_no_employment_status_line_without_an_answer(self, profile):
+        profile.screening_answers.pop("current employment status", None)
+        assert "Employment status:" not in _profile_summary(profile)
 
 
 class TestContactValueForLabel:

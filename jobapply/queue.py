@@ -184,8 +184,8 @@ Use your judgment to complete the application. Key facts:
 - Willing to relocate: No
 - Open to remote: Yes
 - Years of experience: {profile.years_experience or 12}
-- Current employer: {profile.current_employer or "N/A"}
-- Current title: {profile.current_title or "N/A"}"""
+- Most recent employer: {profile.current_employer or "N/A"}
+- Most recent title: {profile.current_title or "N/A"}"""
 
 
 def _mark_deep_apply_done(

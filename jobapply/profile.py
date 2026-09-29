@@ -173,6 +173,8 @@ def _format_previous_employers(profile: ApplicantProfile) -> str:
         entry = f"{pe.get('title', 'Unknown')} at {pe.get('employer', 'Unknown')}"
         if pe.get("industry"):
             entry += f" ({pe['industry']})"
+        if pe.get("dates"):
+            entry += f", {pe['dates']}"
         parts.append(entry)
     return "; ".join(parts)
 
@@ -201,14 +203,17 @@ def _profile_summary(profile: ApplicantProfile) -> str:
             clearance = val
             break
 
+    status = profile.screening_answers.get("current employment status")
+    status_line = f"\nEmployment status: {status}" if status else ""
+
     return f"""Name: {profile.full_name}
 Email: {profile.email}
 Phone: {profile.phone}
 Location: {", ".join(location_parts) or "not provided"}{loc_suffix}{country_line}{street_line}
 LinkedIn: {profile.linkedin_url or "not provided"}
 GitHub: {profile.github_url or "not provided"}
-Current title: {profile.current_title or "not provided"}
-Current employer: {profile.current_employer or "not provided"}
+Most recent title: {profile.current_title or "not provided"}
+Most recent employer: {profile.current_employer or "not provided"}{status_line}
 Previous roles: {_format_previous_employers(profile)}
 Total years of experience: {profile.years_experience}
 Specializations: {", ".join(profile.specializations)}
