@@ -218,7 +218,6 @@ def auto_apply_workflow(  # noqa: C901
         log.info(f"   Skipping {len(applied_urls)} already-applied jobs\n")
 
     score_cache = load_score_cache()
-    score_cache_dirty = False
 
     log.info(f"🔍 Searching {label} for '{params.title}'...")
     try:
@@ -277,7 +276,8 @@ def auto_apply_workflow(  # noqa: C901
             remember_score(
                 score_cache, job.get("id", ""), compat, _AI_AVAILABLE, SCORER_FINGERPRINT
             )
-            score_cache_dirty = True
+            # Persist now: a batch stopped mid-run otherwise loses every score it paid for.
+            save_score_cache(score_cache)
 
         if compat["match_score"] < min_match_score:
             reason = f" — {compat['reasoning']}" if compat.get("reasoning") else ""
@@ -322,11 +322,14 @@ def auto_apply_workflow(  # noqa: C901
             except Exception as exc:
                 log.info("   ⚠️  Hiring manager message failed: %s", exc)
 
-        applications.append(
-            _build_application_entry(
-                job, compat, status, cl_file, notes, msg_status, msg_text, msg_poster
-            )
+        entry = _build_application_entry(
+            job, compat, status, cl_file, notes, msg_status, msg_text, msg_poster
         )
+        applications.append(entry)
+        # Log each result as soon as it exists. Saving once at the end lost every
+        # result since the last write when a batch was killed, and the restart
+        # would then have re-applied to jobs it had already submitted.
+        save_log([entry])
         # Deep-apply queue: check if failed high-match app should be re-queued
         if status.startswith("failed"):
             _queued_ids = {q["job_id"] for q in _load_deep_apply_queue()}
@@ -339,11 +342,6 @@ def auto_apply_workflow(  # noqa: C901
             _human_delay(base=8.0, jitter=12.0)  # 8-20s, occasionally 20-35s
         else:
             _human_delay(base=3.0, jitter=5.0)  # 3-8s for external ATS
-
-    if score_cache_dirty:
-        save_score_cache(score_cache)
-
-    save_log(applications)
 
     submitted = _log_run_summary(jobs, applications)
 

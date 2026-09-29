@@ -304,7 +304,50 @@ class TestAutoApplyWorkflow:
         assert result == {"applications": [], "total": 0, "jobs_found": 1}
         mocks["submit"].assert_not_called()
         mocks["cover"].assert_not_called()
-        mocks["save_log"].assert_called_once_with([])
+        mocks["save_log"].assert_not_called()
+
+    def test_new_scores_are_cached_before_the_next_job_starts(
+        self, data_dir, monkeypatch, job, compat, profile
+    ):
+        monkeypatch.setattr(workflow, "COVER_LETTER_DIR", data_dir / "cover-letters")
+        first = dict(job)
+        second = dict(job, id="li_def456", url="https://www.linkedin.com/jobs/view/456/")
+        params = JobSearchParams(title="devops engineer")
+
+        with ExitStack() as stack:
+            mocks = _workflow_seams(stack, [first, second], compat, data_dir / "cl.docx")
+            mocks["submit"].side_effect = ["submitted", KeyboardInterrupt()]
+            try:
+                auto_apply_workflow(params, profile, max_applications=5, min_match_score=0.5)
+            except KeyboardInterrupt:
+                pass
+
+        assert mocks["save_score_cache"].called
+        saved_cache = mocks["save_score_cache"].call_args.args[0]
+        assert "li_abc123" in saved_cache
+
+    def test_each_application_is_logged_before_the_next_one_starts(
+        self, data_dir, monkeypatch, job, compat, profile
+    ):
+        """A batch killed mid-run once lost every result since its last write,
+        and the restart would have re-applied to jobs it had already submitted."""
+        monkeypatch.setattr(workflow, "COVER_LETTER_DIR", data_dir / "cover-letters")
+        first = dict(job)
+        second = dict(job, id="li_def456", url="https://www.linkedin.com/jobs/view/456/")
+        params = JobSearchParams(title="devops engineer")
+
+        with ExitStack() as stack:
+            mocks = _workflow_seams(stack, [first, second], compat, data_dir / "cl.docx")
+            mocks["submit"].side_effect = ["submitted", KeyboardInterrupt()]
+            try:
+                auto_apply_workflow(params, profile, max_applications=5, min_match_score=0.5)
+            except KeyboardInterrupt:
+                pass
+
+        mocks["save_log"].assert_called_once()
+        (saved,) = mocks["save_log"].call_args.args
+        assert [e["job_id"] for e in saved] == ["li_abc123"]
+        assert saved[0]["status"] == "submitted"
 
     def test_rejected_job_is_not_rescored_on_a_later_run(self, data_dir, monkeypatch, job, profile):
         """The waste this cache exists to stop: the same posting surfacing under
