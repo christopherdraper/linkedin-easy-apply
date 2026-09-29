@@ -422,6 +422,7 @@ class TestParseJobCardsApplyType:
         card = MagicMock()
         title_el = MagicMock()
         title_el.inner_text.return_value = title
+        title_el.query_selector.return_value = None
         title_el.evaluate.return_value = f"https://linkedin.com/jobs/{title.replace(' ', '-')}"
         company_el = MagicMock()
         company_el.inner_text.return_value = company

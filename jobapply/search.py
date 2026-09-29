@@ -91,6 +91,19 @@ def _fetch_description(context, url: str) -> tuple:
     return "", ""
 
 
+def _card_title(title_el) -> str:
+    """The visible job title from a logged-in LinkedIn card's title link.
+
+    The link holds the title twice: once in <strong> for display and once in a
+    visually-hidden span for screen readers, which verified postings suffix
+    with " with verification". inner_text() returns both on separate lines.
+    """
+    strong = title_el.query_selector("strong")
+    text = (strong or title_el).inner_text().strip()
+    first_line = text.splitlines()[0].strip() if text else ""
+    return re.sub(r"\s+with verification$", "", first_line)
+
+
 def _parse_job_cards(page) -> List[Dict]:
     """Extract job data from visible job cards on the search results page.
 
@@ -149,7 +162,9 @@ def _parse_job_cards(page) -> List[Dict]:
                 jobs.append(
                     {
                         "id": f"li_{hashlib.sha256((canonical_href or title_el.inner_text()).encode()).hexdigest()[:12]}",
-                        "title": title_el.inner_text().strip(),
+                        "title": (
+                            title_el.inner_text().strip() if is_public else _card_title(title_el)
+                        ),
                         "company": company_el.inner_text().strip(),
                         "location": location_el.inner_text().strip() if location_el else "",
                         "url": href,

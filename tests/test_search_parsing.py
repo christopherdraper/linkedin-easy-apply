@@ -45,6 +45,7 @@ def _http_response(payload):
 def _text_el(text):
     el = MagicMock()
     el.inner_text.return_value = text
+    el.query_selector.return_value = None
     return el
 
 
@@ -123,6 +124,33 @@ class TestParseJobCards:
         jobs = _parse_job_cards(page)
         assert len(jobs) == 1
         assert jobs[0]["company"] == "GoodCo"
+
+    def test_auth_title_reads_the_visible_title_not_the_screen_reader_copy(self):
+        # Real markup: <span aria-hidden><strong>Title</strong>(badge)</span>
+        # <span class="visually-hidden">Title with verification</span>
+        card = _auth_card(
+            "Mechanical Design Engineer II\nMechanical Design Engineer II with verification",
+            "AcmeCo",
+            "https://www.linkedin.com/jobs/view/7",
+        )
+        title_el = card.query_selector("a.job-card-list__title--link")
+        title_el.query_selector.side_effect = lambda s: (
+            _text_el("Mechanical Design Engineer II") if s == "strong" else None
+        )
+        page = MagicMock()
+        page.query_selector_all.return_value = [card]
+        assert _parse_job_cards(page)[0]["title"] == "Mechanical Design Engineer II"
+
+    def test_auth_title_without_strong_drops_the_duplicate_and_badge_text(self):
+        page = MagicMock()
+        page.query_selector_all.return_value = [
+            _auth_card(
+                "Mechanical Engineer\nMechanical Engineer with verification",
+                "AcmeCo",
+                "https://www.linkedin.com/jobs/view/8",
+            )
+        ]
+        assert _parse_job_cards(page)[0]["title"] == "Mechanical Engineer"
 
     def test_selector_failure_raises_session_expired(self):
         page = MagicMock()
