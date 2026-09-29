@@ -620,6 +620,27 @@ class TestAtsLoginRejectionDetection:
         "or your account might be locked. Email Address* Password*"
     )
 
+    def test_rejected_domain_is_not_retried_in_the_same_run(self, data_dir, monkeypatch):
+        """Regression driver (2026-09-29): one Rolls-Royce posting produced two
+        failed sign-ins (Workday handler, then the generic login path), and each
+        later posting would have added two more. Repeated failures lock the
+        account the applicant uses himself."""
+        from unittest.mock import MagicMock, patch
+
+        from jobapply import accounts
+
+        monkeypatch.setattr(accounts, "_REJECTED_LOGIN_DOMAINS", set())
+        domain = "rollsroyce.wd3.myworkdayjobs.com"
+        accounts._save_ats_account(domain, "e@example.com", "stale-password")
+        page = MagicMock()
+        page.evaluate.return_value = self.WORKDAY_REJECTION.lower()
+        page.url = f"https://{domain}/en-US/professional/login?redirect=x"
+        with patch.object(accounts, "_safe_click"):
+            assert accounts._attempt_ats_login(page, domain) is False
+            page.reset_mock()
+            assert accounts._attempt_ats_login(page, domain) is False
+        page.query_selector.assert_not_called()
+
     def test_workday_rejection_is_reported(self, data_dir, caplog):
         import logging
         from unittest.mock import MagicMock, patch

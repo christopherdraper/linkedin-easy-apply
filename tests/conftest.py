@@ -254,3 +254,13 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "INTERVIEWS_FILE", tmp_path / "interviews.json")
     monkeypatch.setattr(dashboard, "DATA_DIR", tmp_path)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _clear_rejected_login_domains():
+    """The run-level record of ATS logins that failed must not leak between tests."""
+    from jobapply import accounts
+
+    accounts._REJECTED_LOGIN_DOMAINS.clear()
+    yield
+    accounts._REJECTED_LOGIN_DOMAINS.clear()

@@ -228,9 +228,18 @@ _LOGIN_REJECTION_PHRASES = (
     "account has been locked",
 )
 
+# Domains that rejected the stored login during this run. More than one code
+# path tries the stored login on the same page, and each later posting on the
+# same ATS would try again; every failure brings a lockout closer on an account
+# the applicant may also use by hand.
+_REJECTED_LOGIN_DOMAINS: set = set()
+
 
 def _attempt_ats_login(page, domain: str) -> bool:
     """Try to log in using stored ATS credentials. Returns True if login succeeded."""
+    if domain in _REJECTED_LOGIN_DOMAINS:
+        log.info("   🔑 Skipping login for %s: it rejected the stored password earlier this run", domain)
+        return False
     accounts = _load_ats_accounts()
     if domain not in accounts:
         return False
@@ -319,6 +328,7 @@ def _attempt_ats_login(page, domain: str) -> bool:
                     "account is locked. Not retrying; repeated failures can lock it.",
                     domain,
                 )
+                _REJECTED_LOGIN_DOMAINS.add(domain)
                 return False
 
         return False
