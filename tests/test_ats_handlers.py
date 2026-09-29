@@ -1467,11 +1467,24 @@ class TestWorkdayReviewStop:
         with patch.object(WorkdayHandler, "_is_review_page", return_value=is_review):
             return handler, page
 
-    def test_on_step_start_parks_on_review_page(self):
+    def test_on_step_start_parks_on_review_page_when_kill_switch_set(self, monkeypatch):
+        monkeypatch.setenv("JOBAPPLY_WORKDAY_PARK", "1")
         handler, page = self._handler_page(is_review=True)
         with patch.object(WorkdayHandler, "_is_review_page", return_value=True):
             result = handler.on_step_start(page, {})
         assert result == WD_REVIEW_PARKED_STATUS
+
+    def test_on_step_start_submits_on_review_page_by_default(self, monkeypatch):
+        """2026-09-24: the owner switched Workday from park-at-Review to submit."""
+        monkeypatch.delenv("JOBAPPLY_WORKDAY_PARK", raising=False)
+        handler, page = self._handler_page(is_review=True)
+        with (
+            patch.object(WorkdayHandler, "_is_review_page", return_value=True),
+            patch.object(WorkdayHandler, "_submit_review", return_value="submitted") as sub,
+        ):
+            result = handler.on_step_start(page, {})
+        assert result == "submitted"
+        sub.assert_called_once()
 
     def test_on_step_start_returns_none_off_review_page(self):
         handler = WorkdayHandler()
@@ -1485,11 +1498,12 @@ class TestWorkdayReviewStop:
             result = handler.on_step_start(page, {})
         assert result is None
 
-    def test_on_step_start_parks_on_terminal_submit_backstop_alone(self):
+    def test_on_step_start_parks_on_terminal_submit_backstop_alone(self, monkeypatch):
         """FINDING #1: even when _is_review_page's selector guess is wrong
         (returns False), the selector-independent Submit-only backstop must
         still park -- the 'never auto-submit Workday' invariant cannot depend
         on a single unvalidated selector."""
+        monkeypatch.setenv("JOBAPPLY_WORKDAY_PARK", "1")
         handler = WorkdayHandler()
         page = MagicMock()
         page.query_selector.return_value = None
@@ -2050,3 +2064,52 @@ class TestCornerstoneConfirmationDetection:
     def test_form_page_is_not_a_confirmation(self):
         page = self._page("Step 2 of 2 Submit Application Cancel Save Back")
         assert CornerstoneHandler._is_confirmation(page) is False
+
+
+class _SubmitBtn:
+    def __init__(self, text="Submit", visible=True):
+        self._t, self._v = text, visible
+
+    def inner_text(self):
+        return self._t
+
+    def is_visible(self):
+        return self._v
+
+
+class TestWorkdaySubmitReview:
+    """Submitting from the Review page must only report success on evidence."""
+
+    def _page(self, states, buttons=None):
+        page = MagicMock()
+        page.query_selector_all.return_value = [_SubmitBtn()] if buttons is None else buttons
+        page.evaluate.side_effect = list(states) + [states[-1]] * 20
+        return page
+
+    def _run(self, page):
+        with patch("ats_handlers.workday._click_workday_button"):
+            return WorkdayHandler()._submit_review(page)
+
+    def test_confirmation_is_submitted(self):
+        page = self._page([{"text": "review ...", "errors": []},
+                           {"text": "congratulations! your application has been submitted.", "errors": []}])
+        assert self._run(page) == "submitted"
+
+    def test_validation_error_is_a_failure(self):
+        page = self._page([{"text": "review", "errors": ["Errors Found: Phone Number is required"]}])
+        result = self._run(page)
+        assert result.startswith("failed") and "Phone Number is required" in result
+
+    def test_no_confirmation_is_flagged_unconfirmed_not_success(self):
+        page = self._page([{"text": "review page still here", "errors": []}])
+        result = self._run(page)
+        assert result != "submitted"
+        assert result.startswith("submitted: unconfirmed")
+
+    def test_missing_submit_button_fails_without_clicking(self):
+        page = self._page([{"text": "review", "errors": []}], buttons=[_SubmitBtn("Next")])
+        with patch("ats_handlers.workday._click_workday_button") as click:
+            result = WorkdayHandler()._submit_review(page)
+        click.assert_not_called()
+        assert result.startswith("failed")
+

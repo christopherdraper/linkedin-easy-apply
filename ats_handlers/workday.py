@@ -8,6 +8,8 @@ Handles Workday-specific quirks:
 """
 
 import logging
+import os
+import re
 
 from ats_handlers._base import BaseATSHandler
 from ats_handlers._registry import register
@@ -15,6 +17,36 @@ from ats_handlers._registry import register
 log = logging.getLogger("job_apply")
 
 WD_REVIEW_PARKED_STATUS = "review_parked: manual submit required"
+WD_SUBMIT_UNCONFIRMED_STATUS = (
+    "submitted: unconfirmed (Submit clicked, no confirmation seen; check Candidate Home)"
+)
+
+# Evidence that Workday accepted the application. Deliberately excludes the
+# generic "thank you for your interest" that Candidate Home shows regardless.
+_WD_CONFIRMED_RE = re.compile(
+    r"application (has been |was )?(successfully )?submitted|congratulations|"
+    r"thank(s| you) for (applying|your application)|"
+    r"(we('ve| have)|has been) received your application",
+    re.I,
+)
+_WD_PAGE_STATE_JS = r"""() => ({
+  text: (document.body.innerText || '').slice(0, 6000),
+  errors: [...document.querySelectorAll(
+      "[data-automation-id='errorMessage'], [data-automation-id='errorBanner'], "
+      + "[data-automation-id='errorWidgetBar']")]
+      .map(e => (e.innerText || '').trim()).filter(Boolean).slice(0, 3),
+})"""
+
+
+def _park_workday_at_review() -> bool:
+    """Kill switch: JOBAPPLY_WORKDAY_PARK=1 restores park-at-Review (no submit)."""
+    return os.environ.get("JOBAPPLY_WORKDAY_PARK") == "1"
+
+
+def _click_workday_button(element, page) -> None:
+    from job_search_apply import _safe_click
+
+    _safe_click(element, page)
 _WD_MAX_VISION_PASSES = 3  # per-application cap; each pass drives the whole form (120 actions)
 _WD_MAX_ERROR_RELOADS = 2  # per-application cap on "Something went wrong" reloads
 
@@ -85,8 +117,12 @@ class WorkdayHandler(BaseATSHandler):
             return None
 
         if self._is_review_page(page) or self._at_terminal_submit(page):
-            log.info("   Workday: Review page reached -- parking (no auto-submit)")
-            return WD_REVIEW_PARKED_STATUS
+            # Owner switched Workday from park-at-Review to submit on 2026-09-24.
+            if _park_workday_at_review():
+                log.info("   Workday: Review page reached -- parking (JOBAPPLY_WORKDAY_PARK=1)")
+                return WD_REVIEW_PARKED_STATUS
+            log.info("   Workday: Review page reached -- submitting")
+            return self._submit_review(page)
 
         # Workday form pages: the generic deterministic dropdown handling corrupts
         # Workday's searchable dropdowns (it reads merged option lists and fills
@@ -108,6 +144,59 @@ class WorkdayHandler(BaseATSHandler):
                 ctx["skip_step"] = True  # bypass the corrupting deterministic fill
 
         return None
+
+    @staticmethod
+    def _submit_review(page) -> str:
+        """Click Submit on the Review page and report only what Workday confirms.
+
+        Returns "submitted" on an explicit confirmation, "failed: ..." when the
+        page shows errors (before or after the click), and an unconfirmed
+        "submitted: ..." status when Submit was clicked but no confirmation
+        appeared: never a plain success without evidence, and never a
+        "failed" that could get the same requisition submitted twice.
+        """
+        def state():
+            st = page.evaluate(_WD_PAGE_STATE_JS)
+            return st if isinstance(st, dict) else {}
+
+        try:
+            before = state()
+        except Exception as e:  # noqa: BLE001  (nothing clicked yet: safe to fail)
+            return f"failed: could not read Workday Review page: {str(e)[:120]}"
+        if before.get("errors"):
+            return f"failed: Workday Review page reports errors: {before['errors'][0][:150]}"
+        already_confirmed = bool(_WD_CONFIRMED_RE.search(before.get("text", "")))
+
+        submit = None
+        for el in page.query_selector_all(
+            "[data-automation-id='pageFooterNextButton'], button, [role='button']"
+        ):
+            try:
+                if el.is_visible() and re.match(r"^\s*submit\b", el.inner_text() or "", re.I):
+                    submit = el
+                    break
+            except Exception:  # noqa: BLE001, S112
+                continue
+        if submit is None:
+            return "failed: Workday Submit button not found on Review page"
+
+        _click_workday_button(submit, page)
+        # From here on Submit may have gone through: an error must NOT become a
+        # "failed" status, which could get the same requisition submitted again.
+        for _ in range(10):
+            try:
+                page.wait_for_timeout(2000)
+                after = state()
+            except Exception as e:  # noqa: BLE001
+                log.warning("   ⚠️ Workday: lost the page after Submit (%s)", str(e)[:80])
+                return WD_SUBMIT_UNCONFIRMED_STATUS
+            if after.get("errors"):
+                return f"failed: Workday rejected the submission: {after['errors'][0][:150]}"
+            if not already_confirmed and _WD_CONFIRMED_RE.search(after.get("text", "")):
+                log.info("   ✅ Workday: submission confirmed")
+                return "submitted"
+        log.warning("   ⚠️ Workday: Submit clicked but no confirmation seen")
+        return WD_SUBMIT_UNCONFIRMED_STATUS
 
     def resolve_login_wall(self, page, ctx: dict) -> bool:
         """Handle Workday login/registration pages.
