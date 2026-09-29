@@ -519,10 +519,22 @@ def vision_complete_page(page, profile, *, client=None, max_actions=120) -> bool
             )
     except Exception:  # noqa: BLE001
         eeo = ""
+    screening = ""
+    try:
+        sa = getattr(profile, "screening_answers", {}) or {}
+        pairs = [(k, v) for k, v in sa.items() if str(v).strip()]
+        if pairs:
+            screening = (
+                "\nScreening answers (authoritative -- when a form question matches one of "
+                "these, use the stated answer verbatim; do not infer your own):\n"
+                + "\n".join(f"- {k}: {v}" for k, v in pairs)
+            )
+    except Exception:  # noqa: BLE001
+        screening = ""
     user = (
         "Complete this Workday application page by page, clicking Save and Continue to "
         "advance, until you reach the Review page. Do NOT submit. "
-        f"Applicant:\n{summary}{eeo}\nCurrent screen:"
+        f"Applicant:\n{summary}{screening}{eeo}\nCurrent screen:"
     )
     log.info("   Workday vision: driving form to Review (budget %d actions)", max_actions)
     return _run_act_loop(page, client, _PAGE_SYSTEM, user, max_actions, resume_path=resume_path)
