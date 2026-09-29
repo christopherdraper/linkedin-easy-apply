@@ -13,7 +13,7 @@ import logging
 
 log = logging.getLogger("job_apply")
 
-MODEL = "claude-sonnet-5"
+MODEL = "claude-sonnet-5-5"
 W, H = 1360, 900
 
 KEYMAP = {
@@ -312,13 +312,16 @@ def _run_act_loop(
     _autofill_resume(page, resume_path)
     messages = [{"role": "user", "content": [{"type": "text", "text": user_text}] + _screen(page)}]
     recent_sigs = []
+    text_only_turns = 0
     for _i in range(max_actions):
+        # Sonnet 5.5 rejects forced tool use ("any"/"tool"), so the tool is
+        # offered and a text-only reply is nudged back to it below.
         r = client.messages.create(
             model=MODEL,
             max_tokens=700,
             system=sys_cached,
             tools=[ACT_TOOL],
-            tool_choice={"type": "any"},
+            tool_choice={"type": "auto"},
             messages=messages,
         )
         try:
@@ -328,7 +331,19 @@ def _run_act_loop(
         messages.append({"role": "assistant", "content": r.content})
         tus = [b for b in r.content if getattr(b, "type", None) == "tool_use"]
         if not tus:
-            return False
+            text_only_turns += 1
+            if text_only_turns >= 2:
+                return False
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Respond by calling the act tool with your next action."}
+                    ],
+                }
+            )
+            continue
+        text_only_turns = 0
         tu = tus[0]
         inp = tu.input
         act = inp.get("action")

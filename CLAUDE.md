@@ -251,7 +251,7 @@ pytest                 # run test suite
 - `_ai_analyze_page` (Q2): full page analysis, `max_tokens=2048`, returns JSON array of actions
 - `_ai_answer_field` (Q2): single-field fallback
 - `_ai_draft_hiring_message`: hiring manager DMs, `max_tokens=200`
-- `assisted_apply_mcp.py` uses `claude-sonnet-5` (thinking disabled) for page-level form reasoning
+- `assisted_apply_mcp.py` uses `claude-sonnet-5-5` (lowest thinking setting, between_tools) for page-level form reasoning
 
 ## Lessons Learned / Known Issues
 

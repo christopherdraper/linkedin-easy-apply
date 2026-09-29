@@ -98,8 +98,8 @@ Guidelines:
 - NO subject line, NO sign-off"""
 
         response = client.messages.create(
-            model="claude-sonnet-5",
-            thinking={"type": "disabled"},
+            model="claude-sonnet-5-5",
+            thinking={"type": "between_tools"},
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )

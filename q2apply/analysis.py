@@ -76,7 +76,7 @@ Analyze the form fields on this page and return a JSON array of actions to compl
 
     response = client.messages.create(
         model=MODEL,
-        thinking={"type": "disabled"},
+        thinking={"type": "between_tools"},
         max_tokens=2048,
         system=_PAGE_ANALYSIS_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
@@ -159,7 +159,7 @@ Rules:
 
     response = client.messages.create(
         model=MODEL,
-        thinking={"type": "disabled"},
+        thinking={"type": "between_tools"},
         max_tokens=50,
         system="You fill job application forms. Output ONLY the answer value, nothing else.",
         messages=[{"role": "user", "content": prompt}],

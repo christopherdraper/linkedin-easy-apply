@@ -1401,8 +1401,8 @@ def _ai_find_navigation_button(page):
 
         client = _get_ai_client()
         response = client.messages.create(
-            model="claude-sonnet-5",
-            thinking={"type": "disabled"},
+            model="claude-sonnet-5-5",
+            thinking={"type": "between_tools"},
             max_tokens=150,
             messages=[
                 {

@@ -250,8 +250,8 @@ Fill in every {{PLACEHOLDER}} in the template using the job description and cand
 IMPORTANT: Never use em dashes (—) or double dashes (--). Use commas, periods, or rewrite the sentence instead."""
 
         response = client.messages.create(
-            model="claude-sonnet-5",
-            thinking={"type": "disabled"},
+            model="claude-sonnet-5-5",
+            thinking={"type": "between_tools"},
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )

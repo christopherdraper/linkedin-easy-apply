@@ -188,8 +188,8 @@ Rules:
 - Output ONLY the JSON."""
 
             response = client.messages.create(
-                model="claude-sonnet-5",
-                thinking={"type": "disabled"},
+                model="claude-sonnet-5-5",
+                thinking={"type": "between_tools"},
                 max_tokens=3000,
                 messages=[{"role": "user", "content": parse_prompt}],
             )
