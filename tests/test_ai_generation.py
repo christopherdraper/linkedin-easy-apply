@@ -258,6 +258,22 @@ class TestAiGenerateCoverLetter:
             result = ai_generate_cover_letter(job, profile)
         assert result == _basic_cover_letter(job, profile)
 
+    def test_fallback_never_sends_unfilled_placeholders(self, ai_client, profile, job):
+        # A body-only template has nothing to send without the AI.
+        profile.cover_letter_template = TEMPLATE
+        with ai_client("ignored") as mock_client:
+            mock_client.return_value.messages.create.side_effect = Exception("API down")
+            result = ai_generate_cover_letter(job, profile)
+        assert "{" not in result and "}" not in result
+        assert "TechCo" in result
+
+    def test_ai_output_with_leftover_placeholder_falls_back(self, ai_client, profile, job):
+        profile.cover_letter_template = TEMPLATE
+        with ai_client("TechCo\nDear team,\n{OPENING_PARAGRAPH}"):
+            result = ai_generate_cover_letter(job, profile)
+        assert "{OPENING_PARAGRAPH}" not in result
+        assert "TechCo" in result
+
     def test_em_dashes_stripped_from_output(self, ai_client, profile, job):
         profile.cover_letter_template = TEMPLATE
         with ai_client("Great fit \u2014 strong match -- really\u2014yes"):

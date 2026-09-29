@@ -202,6 +202,10 @@ def _ensure_cover_letter_docx(cl_path: str) -> str:
     return str(out)
 
 
+# A {PLACEHOLDER} left in a letter means the template was not filled in.
+_UNFILLED_PLACEHOLDER_RE = re.compile(r"\{[A-Z][A-Z_]*\}")
+
+
 def ai_generate_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
     """
     Generate a personalized cover letter using Claude, guided by the template and its instructions.
@@ -257,6 +261,9 @@ IMPORTANT: Never use em dashes (—) or double dashes (--). Use commas, periods,
         text = (
             text.replace(" — ", ", ").replace(" -- ", ", ").replace("—", ", ").replace("--", ", ")
         )
+        if _UNFILLED_PLACEHOLDER_RE.search(text):
+            log.warning("   AI cover letter left a placeholder unfilled, using basic template")
+            return _basic_cover_letter(job, profile)
         return text
     except Exception as e:
         log.warning(f"   AI cover letter failed, using basic template: {e}")
@@ -273,7 +280,10 @@ def _basic_cover_letter(job: Dict, profile: ApplicantProfile) -> str:
         template = template.replace("{COMPANY}", job.get("company", "the company"))
         template = template.replace("{JOB_TITLE}", job.get("title", "the role"))
         template = template.replace("{HIRING_MANAGER_NAME}", "there")
-        return template
+        # Templates whose body only the AI can write fall through to the
+        # generic letter rather than going out with raw placeholders.
+        if not _UNFILLED_PLACEHOLDER_RE.search(template):
+            return template
     specialization = (
         ", ".join(profile.specializations[:2]) if profile.specializations else "engineering"
     )
