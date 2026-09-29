@@ -351,6 +351,37 @@ class TestAiDraftHiringMessage:
             assert _ai_draft_hiring_message(job, profile, "Jane Doe") is None
 
 
+class TestFormPromptKnownAnswers:
+    def _prompt(self, ai_client, profile, question="Describe your Kubernetes experience."):
+        with ai_client("answer") as mock_client:
+            _ai_answer_question(question, profile, "textarea")
+        return mock_client.return_value.messages.create.call_args.kwargs["messages"][0]["content"]
+
+    def test_stored_answers_are_given_to_the_model(self, ai_client, profile):
+        prompt = self._prompt(ai_client, profile)
+        assert "years of experience with kubernetes: 5" in prompt
+
+    def test_no_hardcoded_applicant_numbers(self, ai_client, profile):
+        # The rules once hardcoded one applicant's years ("DevOps=12") into
+        # every tenant's prompt.
+        profile.screening_answers = {}
+        prompt = self._prompt(ai_client, profile)
+        assert "DevOps=12" not in prompt and "=12" not in prompt
+
+    def test_rule_does_not_borrow_years_for_unlisted_named_tools(self, ai_client, profile):
+        prompt = self._prompt(ai_client, profile)
+        assert "specific named tool or product" in prompt and "use 0" in prompt
+
+    def test_location_rule_uses_the_profile_city(self, ai_client, profile):
+        profile.city, profile.state = "Dayton", "OH"
+        assert '"Dayton, OH"' in self._prompt(ai_client, profile)
+
+    def test_blank_answers_are_left_out(self, ai_client, profile):
+        profile.screening_answers = {"gender": "", "salary": "150000"}
+        prompt = self._prompt(ai_client, profile)
+        assert "- gender:" not in prompt and "- salary: 150000" in prompt
+
+
 class TestAiAnswerQuestion:
     def test_normal_answer(self, ai_client, profile):
         with ai_client("150000") as mock_client:

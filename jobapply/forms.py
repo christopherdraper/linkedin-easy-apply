@@ -955,17 +955,26 @@ def _build_form_prompt(
         parts = [p for p in [job_title, company] if p]
         job_context = f"\nApplying for: {' at '.join(parts)}\n"
 
+    known = [(k, v) for k, v in profile.screening_answers.items() if str(v).strip()]
+    known_block = (
+        "\nKnown answers (authoritative: use the matching one verbatim, and never contradict "
+        "one in a longer answer):\n" + "\n".join(f"- {k}: {v}" for k, v in known) + "\n"
+        if known
+        else ""
+    )
+    home = ", ".join(p for p in [profile.city, profile.state] if p) or "not provided"
+
     return f"""Applicant profile:
 {_profile_summary(profile)}
-{job_context}
+{known_block}{job_context}
 Field label: "{question}"
 
 Rules:
-- "years of experience with X": single whole number. Use total years for related skills (DevOps=12, cloud=5, Linux=12, SRE=12, infrastructure=12, CI/CD=12). Use 0 for unknown tools.
+- "years of experience with X": single whole number. Use the matching known answer. If there is none and X is a broad skill area (e.g. cloud, CFD, mechanical design), use the closest related known answer. If X is a specific named tool or product that is neither a known answer nor in the profile's skills, use 0.
 - "salary" / "desired salary" / "compensation": just the number (e.g. "150000")
 - "travel" / "willing to travel" / "percentage": just a number (e.g. "10")
 - Yes/No questions: just "Yes" or "No"
-- "address" / "location" / "city": "Indianapolis, IN"
+- "address" / "location" / "city": "{home}"
 - "how did you hear": "LinkedIn"
 - Output ONLY the value. No quotes, no units, no explanation, no sentences."""
 
