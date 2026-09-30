@@ -2,6 +2,7 @@
 and the LinkedIn market snapshot scan."""
 
 import hashlib
+import html
 import json
 import logging
 import random
@@ -555,10 +556,7 @@ def search_biotech(params: JobSearchParams) -> List[Dict]:
 
             if detail:
                 info = detail.get("jobPostingInfo", {})
-                description = info.get("jobDescription", "")
-                # Clean HTML tags
-                description = re.sub(r"<[^>]+>", " ", description)
-                description = re.sub(r"\s+", " ", description).strip()
+                description = _html_to_text(info.get("jobDescription", ""))
 
                 remote_type = (info.get("remoteType") or "").lower()
                 detail_location = info.get("location", location_text)
@@ -591,7 +589,7 @@ def search_biotech(params: JobSearchParams) -> List[Dict]:
                     "listing_url": apply_url,
                     "title": title,
                     "company": display_name,
-                    "description": _sanitize_description(description[:5000]),
+                    "description": _sanitize_description(description)[:5000],
                     "location": detail_location,
                     "easy_apply": False,
                     "apply_type": "external",
@@ -603,6 +601,20 @@ def search_biotech(params: JobSearchParams) -> List[Dict]:
         time.sleep(random.uniform(0.5, 1.5))
 
     return all_jobs
+
+
+def _html_to_text(markup: str) -> str:
+    """A Workday job description as plain text, one paragraph or bullet per line.
+
+    Lines matter: _sanitize_description drops whole lines that look like prompt
+    injection. Descriptions used to be flattened to ONE line first, so a single
+    phrase (GM's "system prompt", 2026-09-30) erased the entire description and
+    the scorer judged the job on its title alone.
+    """
+    text = re.sub(r"(?i)<br\s*/?>|</(?:p|li|div|h[1-6]|tr|ul|ol)>", "\n", markup or "")
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
 
 
 def _posted_within(posted_on: str, max_age_days: Optional[int]) -> bool:
@@ -654,9 +666,7 @@ def search_workday_sites(params: JobSearchParams) -> List[Dict]:
             if not (remote or local):
                 continue
             url = f"https://{tenant}.{wd}.myworkdayjobs.com/{site}{path}"
-            description = re.sub(
-                r"\s+", " ", re.sub(r"<[^>]+>", " ", info.get("jobDescription", ""))
-            )
+            description = _html_to_text(info.get("jobDescription", ""))
             jobs.append(
                 {
                     "id": f"wd_{tenant}_{hashlib.sha256(url.encode()).hexdigest()[:12]}",
@@ -664,7 +674,7 @@ def search_workday_sites(params: JobSearchParams) -> List[Dict]:
                     "listing_url": url,
                     "title": title,
                     "company": name,
-                    "description": _sanitize_description(description.strip()[:5000]),
+                    "description": _sanitize_description(description)[:5000],
                     "location": "Remote" if remote and not local else location,
                     "posted_ago": posting.get("postedOn", ""),
                     "easy_apply": False,

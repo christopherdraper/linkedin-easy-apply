@@ -86,3 +86,25 @@ def test_posted_within():
     assert not _posted_within("Posted 15 Days Ago", 14)
     assert not _posted_within("Posted 30+ Days Ago", 14)
     assert _posted_within("", 14)
+
+
+def test_one_flagged_phrase_removes_one_line_not_the_description():
+    """GM's description mentions a design "system prompt"; flattened to one line,
+    the injection filter used to erase all of it (2026-09-30)."""
+    from jobapply.safety import _sanitize_description
+    from jobapply.search import _html_to_text
+
+    markup = (
+        "<p>We&#39;re hiring a design engineer.</p><ul><li>Build components</li>"
+        "<li>Set the system prompt standards for AI tools</li></ul><p>Austin, TX</p>"
+    )
+    text = _html_to_text(markup)
+    assert text.splitlines() == [
+        "We're hiring a design engineer.",
+        "Build components",
+        "Set the system prompt standards for AI tools",
+        "Austin, TX",
+    ]
+    clean = _sanitize_description(text)
+    assert "We're hiring a design engineer." in clean and "Austin, TX" in clean
+    assert "system prompt" not in clean
