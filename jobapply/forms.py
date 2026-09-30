@@ -728,12 +728,15 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
 # "honeypot", tabindex=-1, inside an aria-hidden wrapper, and on 2026-09-30 the
 # AI filler answered it "N/A".
 _TRAP_FIELD_RE = re.compile(
-    r"honey|hpot|bot[-_ ]?trap|leave (?:this )?(?:field )?(?:blank|empty)", re.I
+    r"honey|hpot|bot[-_ ]?trap|beecatcher|robots only|if you(?:'| a)re (?:a )?human"
+    r"|leave (?:this )?(?:field )?(?:blank|empty)",
+    re.I,
 )
 
 _TRAP_FIELD_JS = """el => {
-    const ids = [el.name, el.id, el.getAttribute('aria-label') || ''].join(' ');
-    if (/honey|hpot|bot[-_ ]?trap/i.test(ids)) return true;
+    const ids = [el.name, el.id, el.getAttribute('aria-label') || '',
+                 el.getAttribute('data-automation-id') || ''].join(' ');
+    if (/honey|hpot|bot[-_ ]?trap|beecatcher/i.test(ids)) return true;
     return el.getAttribute('tabindex') === '-1' && !!el.closest('[aria-hidden="true"]');
 }"""
 

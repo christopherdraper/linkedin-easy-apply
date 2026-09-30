@@ -383,6 +383,9 @@ def _show_ats_credentials() -> None:
         print(f"  {domain}")
         print(f"      email:    {acct.get('email', '(unknown)')}")
         print(f"      password: {acct.get('password', '(none stored)')}")
+        if acct.get("pending_password"):
+            print(f"      unconfirmed registration password: {acct['pending_password']}")
+            print("          (try this one if the password above is rejected)")
         print()
 
 
@@ -443,13 +446,17 @@ def _run_external_url(args) -> None:
         # application over; forms that merely prefer one still go through.
         log.warning("   ⚠️ Cover letter generation failed (%s); continuing without one", e)
 
-    status = submit_external_apply(
-        job,
-        profile,
-        cover_letter_path=cl_file,
-        proxy=args.proxy,
-        dry_run=args.dry_run,
-    )
+    watchdog.start()
+    try:
+        status = submit_external_apply(
+            job,
+            profile,
+            cover_letter_path=cl_file,
+            proxy=args.proxy,
+            dry_run=args.dry_run,
+        )
+    finally:
+        watchdog.stop()
     log.info(f"Result: {status}")
 
     # Log to applications.json so single-URL runs (e.g. a Workday req driven to

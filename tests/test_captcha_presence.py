@@ -88,6 +88,17 @@ class TestTrapFields:
         assert _is_trap_field(el)
         assert _get_field_label(browser_page, el) == ""
 
+    def test_workday_beecatcher_is_a_trap(self, browser_page):
+        # Curtiss-Wright's Workday sign-in page, 2026-09-30
+        browser_page.set_content(
+            '<label for="b">Enter website. This input is for robots only, do not enter if '
+            "you're human.</label>"
+            '<input id="b" name="website" data-automation-id="beecatcher">'
+        )
+        el = browser_page.query_selector("#b")
+        assert _is_trap_field(el)
+        assert _get_field_label(browser_page, el) == ""
+
     def test_leave_blank_label_is_a_trap(self, browser_page):
         browser_page.set_content('<label for="w">Leave this field blank</label><input id="w">')
         el = browser_page.query_selector("#w")
@@ -98,3 +109,35 @@ class TestTrapFields:
         el = browser_page.query_selector("#c")
         assert not _is_trap_field(el)
         assert _get_field_label(browser_page, el) == "city"
+
+
+class TestHttpErrorPage:
+    """careers.gov2x.com answered with a bare nginx 403 and the loop spent two
+    steps and two AI vision calls on it before failing as "form stuck"."""
+
+    def _check(self, page, html):
+        from jobapply.external import _http_error_page
+
+        page.set_content(html)
+        return _http_error_page(page)
+
+    def test_nginx_403(self, browser_page):
+        html = (
+            "<html><head><title>403 Forbidden</title></head><body>"
+            "<center><h1>403 Forbidden</h1></center></body></html>"
+        )
+        assert self._check(browser_page, html) == "403 Forbidden"
+
+    def test_access_denied(self, browser_page):
+        html = (
+            "<title>Access Denied</title><h1>Access Denied</h1>"
+            "<p>You don't have permission to access this server.</p>"
+        )
+        assert self._check(browser_page, html) == "Access Denied"
+
+    def test_short_page_with_a_form_is_not_an_error(self, browser_page):
+        html = "<title>404 help</title><h1>Apply</h1><input name=email>"
+        assert self._check(browser_page, html) is None
+
+    def test_ordinary_page_is_not_an_error(self, browser_page):
+        assert self._check(browser_page, "<title>Careers</title><h1>Apply now</h1>") is None

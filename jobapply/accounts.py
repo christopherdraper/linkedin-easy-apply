@@ -1,6 +1,7 @@
 """Gmail IMAP verification-code fetching and ATS account management
 (create/store/reuse accounts on external job sites)."""
 
+import html
 import json
 import logging
 import os
@@ -36,6 +37,87 @@ def _extract_code_from_email_body(body: str) -> Optional[str]:
                     continue
             return token
     return None
+
+
+def _email_body(msg) -> str:
+    """Plain-text body of an email message, falling back to HTML with tags stripped."""
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            if ct == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    # decode=True always yields bytes here
+                    body = payload.decode("utf-8", errors="replace")  # type: ignore[union-attr]
+                    break
+            elif ct == "text/html" and not body:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    # decode=True always yields bytes here
+                    body = re.sub(
+                        r"<[^>]+>",
+                        " ",
+                        payload.decode("utf-8", errors="replace"),  # type: ignore[union-attr]
+                    )
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            # decode=True always yields bytes here
+            body = payload.decode("utf-8", errors="replace")  # type: ignore[union-attr]
+    return body
+
+
+def _extract_activation_link(body: str, domain: str) -> Optional[str]:
+    """The account-activation link for *domain* in an email body, if there is one."""
+    m = re.search(
+        rf"https://{re.escape(domain)}/[^\s\"'<>]*/activate/[^\s\"'<>]+", html.unescape(body)
+    )
+    return m.group(0) if m else None
+
+
+def _fetch_activation_link_from_gmail(
+    email_addr: str, app_password: str, domain: str, max_wait: int = 60, max_age: int = 600
+) -> Optional[str]:
+    """Poll Gmail for an account-activation link for *domain*.
+
+    Some Workday tenants (Curtiss-Wright, 2026-09-29) do not send a code: they
+    email a "Verify your candidate account" link, and sign-in is refused until
+    it is opened. Only mail sent within *max_age* seconds counts.
+    """
+    import email as email_mod
+    import email.utils
+    import imaplib
+
+    deadline = time.time() + max_wait
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            imap = imaplib.IMAP4_SSL("imap.gmail.com")
+            imap.login(email_addr, app_password)
+            imap.select("INBOX")
+            _status, msg_ids = imap.search(None, '(OR SUBJECT "verify" SUBJECT "activate")')
+            for mid in reversed((msg_ids[0] or b"").split()[-20:]):
+                _status, msg_data = imap.fetch(mid, "(BODY.PEEK[])")
+                if not msg_data or not isinstance(msg_data[0], tuple):
+                    continue
+                msg = email_mod.message_from_bytes(msg_data[0][1])
+                sent = email.utils.parsedate_to_datetime(msg.get("Date", ""))
+                if time.time() - sent.timestamp() > max_age:
+                    continue
+                link = _extract_activation_link(_email_body(msg), domain)
+                if link:
+                    imap.store(mid, "+FLAGS", "\\Seen")
+                    imap.logout()
+                    log.info("   📧 Found the account activation email for %s", domain)
+                    return link
+            imap.logout()
+        except Exception as exc:
+            log.debug("Gmail IMAP activation-link attempt %d failed: %s", attempt, exc)
+        if time.time() >= deadline:
+            return None
+        time.sleep(5)
 
 
 def _fetch_verification_code_from_gmail(  # noqa: C901
@@ -94,32 +176,7 @@ def _fetch_verification_code_from_gmail(  # noqa: C901
                         if age > 300:  # older than 5 min
                             continue
 
-                    # Extract body (prefer plain text, fall back to stripped HTML)
-                    body = ""
-                    if msg.is_multipart():
-                        for part in msg.walk():
-                            ct = part.get_content_type()
-                            if ct == "text/plain":
-                                payload = part.get_payload(decode=True)
-                                if payload:
-                                    # decode=True always yields bytes here
-                                    body = payload.decode("utf-8", errors="replace")  # type: ignore[union-attr]
-                                    break
-                            elif ct == "text/html" and not body:
-                                payload = part.get_payload(decode=True)
-                                if payload:
-                                    # decode=True always yields bytes here
-                                    body = re.sub(
-                                        r"<[^>]+>",
-                                        " ",
-                                        payload.decode("utf-8", errors="replace"),  # type: ignore[union-attr]
-                                    )
-                    else:
-                        payload = msg.get_payload(decode=True)
-                        if payload:
-                            # decode=True always yields bytes here
-                            body = payload.decode("utf-8", errors="replace")  # type: ignore[union-attr]
-
+                    body = _email_body(msg)
                     if not body:
                         continue
 
@@ -166,11 +223,9 @@ def _save_ats_account(domain: str, email: str, password: str) -> None:
     `--show-credentials` prints it on demand.
     """
     accounts = _load_ats_accounts()
-    is_new = domain not in accounts
+    is_new = not (accounts.get(domain) or {}).get("password")
     accounts[domain] = {"email": email, "password": password}
-    ATS_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ATS_ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
-    os.chmod(ATS_ACCOUNTS_FILE, 0o600)
+    _write_ats_accounts(accounts)
 
     if is_new:
         log.info("")
@@ -242,18 +297,43 @@ def _attempt_ats_login(page, domain: str) -> bool:
             "   🔑 Skipping login for %s: it rejected the stored password earlier this run", domain
         )
         return False
-    accounts = _load_ats_accounts()
-    if domain not in accounts:
+    acct = _load_ats_accounts().get(domain) or {}
+    candidates = [pw for pw in (acct.get("password"), acct.get("pending_password")) if pw]
+    if not candidates:
         return False
 
-    acct = accounts[domain]
     log.info(f"   🔑 Found stored account for {domain}, attempting login")
+    for i, password in enumerate(candidates):
+        result = _submit_ats_login(page, acct["email"], password, switch_to_sign_in=(i == 0))
+        if result == "ok":
+            if password == acct.get("pending_password"):
+                _promote_pending_password(domain)
+            return True
+        if result != "rejected":
+            return False
+        if i + 1 < len(candidates):
+            log.info("   🔑 Stored password rejected; trying the unconfirmed registration password")
+    log.warning(
+        "   ⚠️ ATS login rejected for %s: stored password is stale or the "
+        "account is locked. Not retrying; repeated failures can lock it.",
+        domain,
+    )
+    _REJECTED_LOGIN_DOMAINS.add(domain)
+    return False
+
+
+def _submit_ats_login(page, email: str, password: str, switch_to_sign_in: bool = True) -> str:
+    """Fill and submit one login attempt. Returns "ok", "rejected", or "unknown"."""
 
     try:
         # If on a Create Account page, navigate to Sign In first
         # (e.g. Workday shows "Already have an account? Sign In")
         body_text = page.evaluate("document.body?.innerText?.slice(0, 3000) || ''").lower()
-        if "create account" in body_text and "already have an account" in body_text:
+        if (
+            switch_to_sign_in
+            and "create account" in body_text
+            and "already have an account" in body_text
+        ):
             # Find the "Sign In" link adjacent to "Already have an account?" text.
             # Must NOT match the header Sign In button (which opens a modal instead).
             signin_link = page.evaluate_handle("""() => {
@@ -282,15 +362,15 @@ def _attempt_ats_login(page, domain: str) -> bool:
         )
         if not email_field:
             log.debug("No email/username field found for ATS login (title=%s)", page.title())
-            return False
-        email_field.fill(acct["email"])
+            return "unknown"
+        email_field.fill(email)
 
         # Find and fill password field
         pass_field = page.query_selector("input[type='password']")
         if not pass_field:
             log.debug("No password field found for ATS login")
-            return False
-        pass_field.fill(acct["password"])
+            return "unknown"
+        pass_field.fill(password)
 
         # Find and click login/sign-in button.
         # Workday uses click_filter overlay divs that intercept pointer events;
@@ -320,22 +400,52 @@ def _attempt_ats_login(page, domain: str) -> bool:
                 p in page.url.lower() for p in ("login", "signin", "sign-in", "/auth")
             ):
                 log.info("   ✅ ATS login succeeded")
-                return True
+                return "ok"
 
             # Check for error messages
             errors = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
             if any(e in errors for e in _LOGIN_REJECTION_PHRASES):
-                log.warning(
-                    "   ⚠️ ATS login rejected for %s: stored password is stale or the "
-                    "account is locked. Not retrying; repeated failures can lock it.",
-                    domain,
-                )
-                _REJECTED_LOGIN_DOMAINS.add(domain)
-                return False
+                return "rejected"
 
-        return False
+        return "unknown"
     except Exception as exc:
         log.debug("ATS login attempt failed: %s", exc)
+        return "unknown"
+
+
+def _write_ats_accounts(accounts: Dict[str, Dict[str, str]]) -> None:
+    ATS_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ATS_ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
+    os.chmod(ATS_ACCOUNTS_FILE, 0o600)
+
+
+def _save_pending_ats_password(domain: str, email: str, password: str) -> None:
+    """Keep a password sent in a registration whose outcome is not yet known.
+
+    Stored beside, never over, a confirmed password. Overwriting it was how a
+    failed or misread registration cost the applicant a working login: the
+    site still had the old password and the bot only knew the new one.
+    _attempt_ats_login tries the confirmed password first, then this one, and
+    promotes it if it works.
+    """
+    accounts = _load_ats_accounts()
+    entry = accounts.setdefault(domain, {"email": email})
+    entry["pending_password"] = password
+    _write_ats_accounts(accounts)
+    log.info("   🔑 Kept the registration password for %s as unconfirmed", domain)
+
+
+def _promote_pending_password(domain: str) -> None:
+    accounts = _load_ats_accounts()
+    entry = accounts.get(domain) or {}
+    if entry.get("pending_password"):
+        _save_ats_account(domain, entry["email"], entry["pending_password"])
+
+
+def _password_field_visible(page) -> bool:
+    try:
+        return any(pf.is_visible() for pf in page.query_selector_all("input[type='password']"))
+    except Exception:
         return False
 
 
@@ -404,6 +514,22 @@ def _fill_registration_form(page, profile: "ApplicantProfile", password: str) ->
     return filled
 
 
+def _open_activation_link(page, profile: "ApplicantProfile", max_wait: int = 45) -> bool:
+    """Open the emailed account-activation link for the current site, if one arrives."""
+    if not profile.gmail_app_password:
+        return False
+    domain = _get_domain(page.url)
+    link = _fetch_activation_link_from_gmail(
+        profile.email, profile.gmail_app_password, domain, max_wait=max_wait
+    )
+    if not link:
+        return False
+    page.goto(link, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(4000)
+    log.info("   ✅ Opened the account activation link for %s", domain)
+    return True
+
+
 def _handle_registration_verification(page, profile: "ApplicantProfile") -> bool:
     """Handle email verification after registration. Returns False if blocked."""
     try:
@@ -442,7 +568,9 @@ def _handle_registration_verification(page, profile: "ApplicantProfile") -> bool
                     page.wait_for_timeout(3000)
             return True
 
-        # No code found — check if it's a link-click verification
+        # No code: some sites email an activation link instead.
+        if _open_activation_link(page, profile, max_wait=20):
+            return True
         page.wait_for_timeout(5000)
         body_text = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 3000) || ''")
         if any(w in body_text for w in ("click the link", "follow the link")):
@@ -473,6 +601,39 @@ def _recover_existing_account(page, domain: str, email: str) -> bool:
     return False
 
 
+def _registration_outcome(page, domain: str, email: str) -> Optional[bool]:
+    """Read the page after a registration submit.
+
+    Returns None when registration looks successful, or the final result when
+    it does not: the login result for an "already exists" account, else False.
+    Uses both URL and page content to detect failure.
+    """
+    page.wait_for_timeout(2000)
+    body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
+    still_login = any(
+        p in page.url.lower() for p in ("login", "signin", "sign-in", "register", "/auth")
+    )
+    # Also check page content for signs we're still on a login/registration page
+    has_password_field = bool(page.query_selector("input[type='password']:visible"))
+    if not (still_login or has_password_field):
+        return None
+    if any(
+        s in body
+        for s in (
+            "already exists",
+            "already registered",
+            "account with that email",
+            "email is already",
+        )
+    ):
+        return _recover_existing_account(page, domain, email)
+    if not any(s in body for s in ("account created", "registration successful", "welcome")):
+        log.info("   ⚠️ Registration may not have succeeded (password field still visible)")
+        return False
+    page.wait_for_timeout(3000)
+    return None
+
+
 def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
     """Try to create an account on the current ATS page.
 
@@ -501,6 +662,7 @@ def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
 
     # Step 2: Fill and submit registration form
     password = _generate_ats_password()
+    password_sent = _password_field_visible(page)
     fields_filled = _fill_registration_form(page, profile, password)
 
     # Find submit/continue button
@@ -523,6 +685,7 @@ def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
         # After Continue, we may get a password creation page
         pw_fields = page.query_selector_all("input[type='password']")
         if pw_fields:
+            password_sent = password_sent or _password_field_visible(page)
             for pf in pw_fields:
                 if pf.is_visible():
                     pf.fill(password)
@@ -547,44 +710,28 @@ def _attempt_account_creation(page, profile: "ApplicantProfile") -> bool:
         _safe_click(submit_btn, page)
         page.wait_for_timeout(3000)
 
-    # Persist the credential NOW, before any outcome heuristic runs.
-    # Registration can genuinely succeed while the checks below misread the
-    # page (UltiPro/Auth0 leaves the password field mounted), and a password
-    # that is generated, submitted, then discarded leaves an account nobody
-    # can log into: every retry re-registers and hits "user already exists",
-    # which is unrecoverable without a password reset. Saving early is safe --
-    # a stale entry for a failed registration merely fails a later login and
-    # is overwritten on the next attempt.
-    _save_ats_account(domain, profile.email, password)
+    # Keep the password NOW, before any outcome heuristic runs. Registration
+    # can genuinely succeed while the checks below misread the page
+    # (UltiPro/Auth0 leaves the password field mounted), and a password that
+    # was submitted then discarded leaves an account nobody can log into. It
+    # is kept as unconfirmed, beside any confirmed password: saving it over
+    # one cost a working login whenever the registration had in fact failed.
+    # A form that never showed a password field sent no password to keep.
+    if password_sent:
+        _save_pending_ats_password(domain, profile.email, password)
 
     # Step 3: Handle email verification
     if not _handle_registration_verification(page, profile):
         return False
 
-    # Step 4: Check outcome — use both URL and page content to detect failure
-    page.wait_for_timeout(2000)
-    body = page.evaluate("document.body?.innerText?.toLowerCase()?.slice(0, 2000) || ''")
-    still_login = any(
-        p in page.url.lower() for p in ("login", "signin", "sign-in", "register", "/auth")
-    )
-    # Also check page content for signs we're still on a login/registration page
-    has_password_field = bool(page.query_selector("input[type='password']:visible"))
-    if still_login or has_password_field:
-        if any(
-            s in body
-            for s in (
-                "already exists",
-                "already registered",
-                "account with that email",
-                "email is already",
-            )
-        ):
-            return _recover_existing_account(page, domain, profile.email)
-        if not any(s in body for s in ("account created", "registration successful", "welcome")):
-            log.info("   ⚠️ Registration may not have succeeded (password field still visible)")
-            return False
-        page.wait_for_timeout(3000)
+    # Step 4: Check outcome
+    outcome = _registration_outcome(page, domain, profile.email)
+    if outcome is not None:
+        return outcome
 
+    if not password_sent:
+        log.info(f"   ✅ Past the sign-in step on {domain} (no password was set)")
+        return True
     _save_ats_account(domain, profile.email, password)
     log.info(f"   ✅ Account created on {domain}")
     return True

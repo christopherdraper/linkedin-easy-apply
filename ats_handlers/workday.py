@@ -10,6 +10,7 @@ Handles Workday-specific quirks:
 import logging
 import os
 import re
+from typing import Optional
 
 from ats_handlers._base import BaseATSHandler
 from ats_handlers._registry import register
@@ -49,6 +50,53 @@ def _click_workday_button(element, page) -> None:
     _safe_click(element, page)
 
 
+_US_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america"}
+_WD_JOB_URL_RE = re.compile(
+    r"https://([^./]+)\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z]{2}-[A-Z]{2}/)?([^/]+)(/job/[^/?#]+/[^/?#]+)"
+)
+
+
+def _normalize_country(name: str) -> str:
+    n = (name or "").strip().lower()
+    return "us" if n in _US_NAMES else n
+
+
+def _workday_job_country(url: str) -> Optional[str]:
+    """The posting's country from Workday's public job API, or None if unknown."""
+    m = _WD_JOB_URL_RE.match(url) if isinstance(url, str) else None
+    if not m:
+        return None
+    from jobapply.search import _workday_job_detail
+
+    tenant, wd, site, path = m.groups()
+    info = _workday_job_detail(tenant, wd, site, path).get("jobPostingInfo") or {}
+    return (info.get("country") or {}).get("descriptor")
+
+
+def _wrong_country_status(url: str, profile) -> Optional[str]:
+    """Skip a posting outside the applicant's country before any account is made.
+
+    LinkedIn listed Curtiss-Wright's Bangalore req as "Indiana, United States"
+    and nothing in its description said otherwise, so it scored as a local job;
+    the bot then created a Workday account for it (2026-09-29). Workday's own
+    job API has the real country.
+    """
+    country = _workday_job_country(url)
+    home = (getattr(profile, "country", None) or "United States") if profile else "United States"
+    if country and _normalize_country(country) != _normalize_country(home):
+        log.info("   Workday: posting is in %s, not %s; skipping", country, home)
+        return f"skipped: job is in {country}"
+    return None
+
+
+_WD_ACTIVATION_HINTS = (
+    "verify",
+    "verification",
+    "activate",
+    "email has been sent",
+    "check your email",
+)
+
 _WD_MAX_VISION_PASSES = 3  # per-application cap; each pass drives the whole form (120 actions)
 _WD_MAX_ERROR_RELOADS = 2  # per-application cap on "Something went wrong" reloads
 
@@ -60,7 +108,7 @@ class WorkdayHandler(BaseATSHandler):
 
     def pre_flight(self, page, ctx):
         self._dismiss_cookie_banner(page)
-        return None
+        return _wrong_country_status(page.url, ctx.get("profile"))
 
     def on_step_start(self, page, ctx):
         # Close blocking Workday confirmation modals BEFORE anything else --
@@ -295,6 +343,7 @@ class WorkdayHandler(BaseATSHandler):
             _safe_click,
             _save_ats_account,
         )
+        from jobapply.accounts import _password_field_visible, _save_pending_ats_password
 
         # Step 1: Navigate to registration form
         try:
@@ -316,6 +365,7 @@ class WorkdayHandler(BaseATSHandler):
         # Step 2: Fill basic registration fields (generic function handles
         # email, password, name -- these work fine on Workday)
         password = _generate_ats_password()
+        password_sent = _password_field_visible(page)
         fields_filled = _fill_registration_form(page, profile, password)
 
         if fields_filled < 2:
@@ -331,6 +381,13 @@ class WorkdayHandler(BaseATSHandler):
         if not self._click_submit_button(page):
             log.info("   Workday: could not click Create Account button")
             return False
+        # Keep this password even if the outcome below reads as a failure.
+        # Re-registering an unconfirmed Workday account resets its password:
+        # Curtiss-Wright's second attempt did (2026-09-29), that password was
+        # discarded as a failure, and the activated account cannot be signed
+        # into. Kept as unconfirmed, login tries it after the stored one.
+        if password_sent:
+            _save_pending_ats_password(_get_domain(page.url), profile.email, password)
 
         page.wait_for_timeout(4000)
         try:
@@ -360,6 +417,13 @@ class WorkdayHandler(BaseATSHandler):
         domain = _get_domain(page.url)
         _save_ats_account(domain, profile.email, password)
         log.info("   Workday: account created on %s", domain)
+        # Some tenants refuse sign-in until an emailed activation link is
+        # opened. Curtiss-Wright did (2026-09-29): the new account was
+        # rejected at login, and the bot then registered a second time.
+        if any(w in body for w in _WD_ACTIVATION_HINTS):
+            from jobapply.accounts import _open_activation_link
+
+            _open_activation_link(page, profile, max_wait=60)
         return True
 
     @staticmethod

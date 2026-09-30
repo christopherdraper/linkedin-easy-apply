@@ -1533,6 +1533,7 @@ def _handle_captcha_step(page, profile, job, captcha_solved_urls):
     captcha_info = _detect_captcha(page)
     if captcha_info and page.url not in captcha_solved_urls:
         if profile.captcha_api_key:
+            url_before = page.url
             solved = False
             for captcha_attempt in range(2):
                 solved = _solve_captcha(
@@ -1547,19 +1548,27 @@ def _handle_captcha_step(page, profile, job, captcha_solved_urls):
                     if not captcha_info:
                         break
             if solved:
-                captcha_solved_urls.add(page.url)
+                captcha_solved_urls.add(url_before)
                 # Only auto-click a navigation button if this looks like a
                 # captcha-GATE page (no form fields underneath). On forms
                 # with inline captchas (Ashby, Workable, Lever, ...), the
                 # nav button IS the form's Submit -- clicking it now would
                 # submit an empty form right after the captcha token,
                 # which Ashby's spam filter (and similar) flag as bot.
-                visible_form_fields = page.query_selector_all(
-                    "input[type='text']:visible, input[type='email']:visible, "
-                    "input[type='tel']:visible, input[type='url']:visible, "
-                    "input[type='number']:visible, textarea:visible"
-                )
-                if len(visible_form_fields) < 3:
+                try:
+                    visible_form_fields = page.query_selector_all(
+                        "input[type='text']:visible, input[type='email']:visible, "
+                        "input[type='tel']:visible, input[type='url']:visible, "
+                        "input[type='number']:visible, textarea:visible"
+                    )
+                except Exception:
+                    # The solve submitted the form and the page is navigating
+                    # (invisible hCaptcha); the next step reads the new page.
+                    log.info("   🧩 CAPTCHA solved, the form moved on")
+                    return "continue"
+                # A solve that already submitted the form (invisible hCaptcha)
+                # has moved on; clicking now would press the NEXT page's button.
+                if len(visible_form_fields) < 3 and page.url == url_before:
                     _btn_role, _btn_el = _find_navigation_button(page)
                     if _btn_el:
                         _safe_click(_btn_el, page)
@@ -1609,6 +1618,31 @@ def _recover_from_stall(page, profile, job, stalled, fields_filled_total, step):
                 fields_filled_total,
             )
     return None, stalled, fields_filled_total
+
+
+_APPLY_LINKS_JS = """() => [...document.querySelectorAll('a[href]')]
+    .filter(a => /^\\s*apply(\\s+now|\\s+online|\\s+for this job)?\\s*$/i.test(a.innerText || '')
+                 && a.getBoundingClientRect().width > 0)
+    .map(a => a.href)"""
+
+
+def _ats_apply_link(page) -> Optional[str]:
+    """A visible Apply link to a known ATS on another site, or None."""
+    try:
+        here = urlparse(page.url)
+        links = page.evaluate(_APPLY_LINKS_JS)
+    except Exception:
+        return None
+    here_platform = stats._detect_ats_platform(page.url)
+    for href in links if isinstance(links, list) else []:
+        platform = stats._detect_ats_platform(href)
+        if (
+            platform != "unknown"
+            and platform != here_platform
+            and urlparse(href).netloc not in ("", here.netloc)
+        ):
+            return href
+    return None
 
 
 def _classify_and_route_page(page, job, snapshot, handler, handler_ctx):  # noqa: C901
@@ -2153,6 +2187,45 @@ def _handle_post_submit_click(  # noqa: C901
     return "proceed", None, login_resolved, stalled, fields_filled_total
 
 
+# A server error page, not a form. careers.gov2x.com answered one req with a
+# bare nginx "403 Forbidden" and the loop spent two steps and two AI vision
+# calls looking for a button on it before failing as "form stuck" (2026-09-29).
+_HTTP_ERROR_RE = re.compile(
+    r"^\s*(?:(4(?:00|01|03|04|05|10|29)|5\d\d)\b[\s:-]*([A-Za-z][A-Za-z ]{0,40})?|(access denied))",
+    re.I,
+)
+_HTTP_ERROR_JS = """() => {
+    const text = (document.body && document.body.innerText || '').trim();
+    const h1 = document.querySelector('h1');
+    return {title: document.title || '', h1: h1 ? h1.innerText : '', len: text.length,
+            inputs: document.querySelectorAll('input:not([type=hidden]), textarea, select').length};
+}"""
+
+
+def _http_error_page(page) -> Optional[str]:
+    """Describe a bare HTTP error page ("403 Forbidden"), or None for a real page."""
+    try:
+        info = page.evaluate(_HTTP_ERROR_JS)
+    except Exception:
+        return None
+    if not isinstance(info, dict) or info.get("inputs") or info.get("len", 0) > 600:
+        return None
+    for text in (info.get("title", ""), info.get("h1", "")):
+        m = _HTTP_ERROR_RE.match(text or "")
+        if m:
+            return " ".join(text.split())[:60]
+    return None
+
+
+def _is_frame(page) -> bool:
+    """True if the form loop is working in a Playwright Frame rather than a Page."""
+    try:
+        from playwright.sync_api import Frame
+    except ImportError:
+        return False
+    return isinstance(page, Frame)
+
+
 def _navigate_external_form(  # noqa: C901
     page,
     profile: ApplicantProfile,
@@ -2177,10 +2250,22 @@ def _navigate_external_form(  # noqa: C901
     page = (handler.form_frame(page) if handler else None) or _switch_to_form_iframe(page)
 
     for step in range(_MAX_EXTERNAL_STEPS):
-        page.wait_for_timeout(1500)
+        # The loop may be working in a frame (iCIMS, SmartRecruiters). If a
+        # submit took the whole tab elsewhere, the frame is gone, and calls on
+        # a detached frame never return: a CHA run hung 20 minutes that way
+        # (2026-09-30). Carry on in the tab.
+        (page.page if _is_frame(page) else page).wait_for_timeout(1500)
+        if _is_frame(page) and page.is_detached():
+            log.info("   ↩️  The form frame closed; continuing in the page")
+            page = page.page
 
         # Keep ATS URL updated as page may redirect during form flow
         stats._final_ats_url = page.url
+
+        http_error = _http_error_page(page)
+        if http_error:
+            log.info(f"   ⛔ {urlparse(page.url).netloc} returned {http_error}")
+            return f"failed: {urlparse(page.url).netloc} returned {http_error}"
 
         # Handler: per-step hook
         if handler and handler_ctx:
@@ -2469,6 +2554,18 @@ def submit_external_apply(  # noqa: C901
 
             # Wait for JS rendering and dismiss cookie banners
             _wait_and_dismiss_cookies(page)
+
+            # A job page whose Apply link leads to the employer's real ATS on
+            # another site: follow it before picking the handler, even when
+            # this page has a form of its own. Cardinal Health's job page has a
+            # talent-community signup ("Interest Picker"), which the loop
+            # filled and failed on instead of following Apply to Workday
+            # (2026-09-29).
+            ats_link = _ats_apply_link(page)
+            if ats_link:
+                log.info(f"   🔗 Apply leads to {urlparse(ats_link).netloc}; following it")
+                _goto_resilient(page, ats_link, timeout=30000)
+                _wait_and_dismiss_cookies(page)
 
             # Capture the final ATS URL for platform detection
             stats._final_ats_url = page.url

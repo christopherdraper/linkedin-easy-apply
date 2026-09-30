@@ -376,16 +376,29 @@ def _inject_captcha_token(page, ctype: str, token: str) -> bool:
                 token,
             )
         elif ctype == "hcaptcha":
-            page.evaluate(
+            # An invisible hCaptcha hands its token to a site callback that
+            # submits the form (iCIMS: form.submit() after appending the
+            # token). The callback is out of reach, so do what it does: a
+            # native submit, which skips the listener that would re-run the
+            # challenge. Without it the token sat in the textarea and iCIMS
+            # never left its email step (2026-09-30).
+            submitted = page.evaluate(
                 """(token) => {
                 const ta = document.querySelector('[name="h-captcha-response"], '
                     + 'textarea[name="g-recaptcha-response"]');
                 if (ta) { ta.style.display = 'block'; ta.value = token; }
                 document.querySelectorAll('textarea[name*="captcha"]')
                     .forEach(el => { el.value = token; });
+                const widget = document.querySelector('.h-captcha[data-size="invisible"]');
+                const form = widget && widget.closest('form');
+                if (!form) return false;
+                form.submit();
+                return true;
             }""",
                 token,
             )
+            if submitted:
+                log.info("   🧩 Submitted the form the invisible hCaptcha guards")
         elif ctype == "turnstile":
             page.evaluate(
                 """(token) => {
