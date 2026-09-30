@@ -427,9 +427,10 @@ def _determine_radio_answer(question: str, profile: ApplicantProfile) -> str:
         "drug test",
         "relocate",
         "commute",
-        "supported customers",
-        "devops environment",
     ]
+    # Experience questions ("worked in a DevOps environment?") are not here:
+    # the answer depends on the applicant, so they fall through to the AI,
+    # which reads the profile. A fixed "yes" was true for one applicant only.
     if any(p in q for p in yes_patterns):
         return "yes"
 

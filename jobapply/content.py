@@ -75,7 +75,6 @@ DEAL-BREAKERS ARE HARD BLOCKERS ONLY. A deal_breaker means the candidate is cate
 Missing skills, missing tools, too few years of experience, unfamiliar domains, and "no demonstrated X" gaps are NOT deal-breakers — express those by lowering the score. Contract, freelance, and hourly roles are NOT deal-breakers either.
 CORE VS PERIPHERAL: Weight the candidate's core domain competencies most heavily. When the core matches, peripheral gaps are a MODEST deduction, not a near-miss verdict. Specifically: a tool in the same class as one they already use counts as a MATCH, not a gap (e.g. Siemens NX for SolidWorks/CATIA, STAR-CCM+ for Fluent/ANSYS CFX — CAD is CAD and CFD is CFD, the tool name is trainable). Narrowly missing a preferred years-of-experience figure (such as 4 years against "5+ years") is a small deduction when the relevant domain experience is real. Reserve low scores for candidates who lack the CORE discipline of the role, not for those missing a brand name or one year.
 GEOGRAPHY: Compare "Job location" against "Candidate home location" above. A job in the candidate's own metro area — a suburb, enclave, or neighbouring town within normal commuting distance — is a LOCAL job, not a relocation, even when the town name differs from the candidate's listed city. Do NOT add relocation_required and do NOT lower the score for such jobs. Only use relocation_required when the job would genuinely require moving household to a different metro area. "Remote" is never a relocation.
-BACKEND/SOFTWARE ENGINEERING: The candidate is open to backend software engineering roles, especially Python-heavy ones. Do NOT penalize a match just because the candidate's current title is SRE — they have strong Python skills, API development experience, and have built production automation and agentic AI systems. Score Python/backend roles based on actual skill overlap, not title mismatch.
 STAFFING AGENCIES: If the company is a staffing agency, recruiting firm, or talent consultancy (not the actual employer), add "staffing_agency" to deal_breakers. Signs: company name includes words like Solutions, Staffing, Talent, Consulting, Search, Partners, Recruiting, Group; the description says "our client" or "on behalf of"; vague about the actual employer. Direct employers only — no middlemen."""
 
 # Identifies the scoring logic that produced a verdict. Derived from the rules
@@ -99,6 +98,15 @@ _SCORE_SCHEMA = {
 }
 
 
+def _scoring_notes_block(profile: ApplicantProfile) -> str:
+    """The applicant's own scoring guidance, or "" when there is none."""
+    notes = [n.strip() for n in profile.scoring_notes if n and n.strip()]
+    if not notes:
+        return ""
+    lines = "\n".join(f"- {n}" for n in notes)
+    return f"Notes about this candidate (apply them when scoring):\n{lines}\n\n"
+
+
 def ai_score_job(job: Dict, profile: ApplicantProfile) -> Dict:
     """
     Score a job against the applicant profile using Claude.
@@ -120,7 +128,7 @@ Candidate home location: {_home_location(profile)}
 Job description:
 {description}
 
-Rate how well this job matches the candidate. Respond with ONLY valid JSON, no other text:
+{_scoring_notes_block(profile)}Rate how well this job matches the candidate. Respond with ONLY valid JSON, no other text:
 {{
   "score": <0.0 to 1.0>,
   "reasoning": "<1-2 sentences: why this is or isn't a good match>",

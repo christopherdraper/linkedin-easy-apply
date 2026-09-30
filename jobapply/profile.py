@@ -55,6 +55,10 @@ class ApplicantProfile:
     # Only consumed where a form requires them (e.g. Workday self-ID pages); left
     # empty means "decline / prefer not to say".
     self_identification: Dict[str, str] = field(default_factory=dict)
+    # Candidate-specific guidance for the job scorer (e.g. "open to backend
+    # Python roles despite an SRE title"). Kept in the profile: a rule written
+    # for one applicant in the shared prompt is applied to every applicant.
+    scoring_notes: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "ApplicantProfile":
@@ -129,6 +133,7 @@ class ApplicantProfile:
             captcha_service=p.get("application_settings", {}).get("captcha_service", "2captcha"),
             proxy_rules=p.get("application_settings", {}).get("proxy_rules", {}),
             self_identification=p.get("self_identification", {}),
+            scoring_notes=p.get("scoring_notes", []),
         )
 
     @classmethod
