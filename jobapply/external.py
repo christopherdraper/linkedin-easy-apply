@@ -2174,7 +2174,7 @@ def _navigate_external_form(  # noqa: C901
     uploaded_files: set = set()  # track file uploads across steps to prevent re-uploads
     login_resolved = False  # set True after login/account creation succeeds once
 
-    page = _switch_to_form_iframe(page)
+    page = (handler.form_frame(page) if handler else None) or _switch_to_form_iframe(page)
 
     for step in range(_MAX_EXTERNAL_STEPS):
         page.wait_for_timeout(1500)

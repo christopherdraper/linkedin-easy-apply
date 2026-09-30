@@ -47,6 +47,8 @@ def _click_workday_button(element, page) -> None:
     from job_search_apply import _safe_click
 
     _safe_click(element, page)
+
+
 _WD_MAX_VISION_PASSES = 3  # per-application cap; each pass drives the whole form (120 actions)
 _WD_MAX_ERROR_RELOADS = 2  # per-application cap on "Something went wrong" reloads
 
@@ -155,6 +157,7 @@ class WorkdayHandler(BaseATSHandler):
         appeared: never a plain success without evidence, and never a
         "failed" that could get the same requisition submitted twice.
         """
+
         def state():
             st = page.evaluate(_WD_PAGE_STATE_JS)
             return st if isinstance(st, dict) else {}

@@ -125,6 +125,15 @@ class BaseATSHandler(ABC):
         """
         return None
 
+    def form_frame(self, page):
+        """Return the frame that holds this platform's application form, or None.
+
+        Called once before the Q1 form-step loop, which then works in the
+        returned frame. None falls back to the generic iframe detection, which
+        only switches when the top page has no inputs of its own.
+        """
+        return None
+
     def on_step_start(self, page, ctx: dict) -> Optional[str]:
         """Called at the top of each Q1 form-step iteration.
 

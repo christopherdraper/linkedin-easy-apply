@@ -722,8 +722,36 @@ def _fill_input_field(inp, label_text: str, page, profile: ApplicantProfile) -> 
             stats._field_fills.append({"field": label_text, "value": answer, "source": "ai"})
 
 
+# Spam traps: fields a human never sees, which a bot that fills them flags
+# itself with. Honeywell's Oracle page has <input name="honey-pot"> labelled
+# "honeypot", tabindex=-1, inside an aria-hidden wrapper, and on 2026-09-30 the
+# AI filler answered it "N/A".
+_TRAP_FIELD_RE = re.compile(
+    r"honey|hpot|bot[-_ ]?trap|leave (?:this )?(?:field )?(?:blank|empty)", re.I
+)
+
+_TRAP_FIELD_JS = """el => {
+    const ids = [el.name, el.id, el.getAttribute('aria-label') || ''].join(' ');
+    if (/honey|hpot|bot[-_ ]?trap/i.test(ids)) return true;
+    return el.getAttribute('tabindex') === '-1' && !!el.closest('[aria-hidden="true"]');
+}"""
+
+
+def _is_trap_field(element, label_text: str = "") -> bool:
+    """True if the field is a spam trap that must stay empty."""
+    if label_text and _TRAP_FIELD_RE.search(label_text):
+        return True
+    try:
+        return element.evaluate(_TRAP_FIELD_JS) is True
+    except Exception:
+        return False
+
+
 def _get_field_label(page, element) -> str:
-    """Get the label text for a form field element."""
+    """Get the label text for a form field element.
+
+    Returns "" for spam-trap fields, which every caller then skips.
+    """
     # Try multiple strategies to find the label text
     label_text = element.evaluate("""el => {
         // Use getRootNode() to pierce Shadow DOM when looking up labels
@@ -756,6 +784,9 @@ def _get_field_label(page, element) -> str:
             return prev.innerText;
         return '';
     }""")
+    if _is_trap_field(element, label_text or ""):
+        log.info("   🍯 Leaving spam-trap field empty: %r", (label_text or "").strip()[:40])
+        return ""
     if label_text:
         text = " ".join(label_text.strip().lower().split())
         return text

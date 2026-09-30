@@ -4,6 +4,7 @@
 import ats_handlers.ashby  # noqa: F401
 import ats_handlers.csod  # noqa: F401
 import ats_handlers.greenhouse  # noqa: F401
+import ats_handlers.icims  # noqa: F401
 import ats_handlers.lever  # noqa: F401
 import ats_handlers.paylocity  # noqa: F401
 import ats_handlers.smartrecruiters  # noqa: F401

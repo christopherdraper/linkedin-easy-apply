@@ -20,10 +20,39 @@ log = logging.getLogger(__name__)
 def _detect_captcha(page) -> Optional[Dict[str, str]]:
     """Detect CAPTCHA on page. Returns dict with type/sitekey/url, or None."""
     try:
-        info = page.evaluate("""() => {
+        info = page.evaluate(_DETECT_CAPTCHA_JS)
+        return info
+    except Exception:
+        return None
+
+
+# A captcha widget only blocks the application if it belongs to it and is
+# shown. On 2026-09-29 two applications failed on widgets that did neither:
+# Honeywell's Oracle page loads an INVISIBLE hCaptcha (display:none, 0x0) that
+# its own script runs at submit, and CHA's careers page has a reCAPTCHA on the
+# Constant Contact newsletter signup in its footer. A challenge that does
+# appear after submit is visible by then, and _resolve_post_submit_captcha
+# handles it.
+_DETECT_CAPTCHA_JS = """() => {
+            const NON_APPLICATION_FORM = /newsletter|mailing list|subscribe|constant contact/i;
+            const belongs = (el) => {
+                if (el.closest('footer')) return false;
+                const form = el.closest('form');
+                return !(form && NON_APPLICATION_FORM.test(form.innerText || '')
+                         && !form.querySelector('input[type="file"]'));
+            };
+            const shown = (el) => {
+                if (el.closest('[aria-hidden="true"]')) return false;
+                const r = el.getBoundingClientRect();
+                const cs = getComputedStyle(el);
+                return r.width > 0 && r.height > 0
+                    && cs.display !== 'none' && cs.visibility !== 'hidden';
+            };
+            const firstPresented = (sel) =>
+                [...document.querySelectorAll(sel)].find((el) => belongs(el) && shown(el)) || null;
             // hCaptcha — check BEFORE reCAPTCHA since both use [data-sitekey]
-            const hcapFrame = document.querySelector('iframe[src*="hcaptcha"]');
-            const hcapDiv = document.querySelector('.h-captcha, [data-hcaptcha-sitekey]');
+            const hcapFrame = firstPresented('iframe[src*="hcaptcha"]');
+            const hcapDiv = firstPresented('.h-captcha, [data-hcaptcha-sitekey]');
             if (hcapFrame || hcapDiv) {
                 let sitekey = '';
                 if (hcapDiv) sitekey = hcapDiv.getAttribute('data-sitekey')
@@ -35,9 +64,10 @@ def _detect_captcha(page) -> Optional[Dict[str, str]]:
                 return {type: 'hcaptcha', sitekey};
             }
             // reCAPTCHA v2/v3/Enterprise
-            const recapFrame = document.querySelector('iframe[src*="recaptcha"]');
-            const recapDiv = document.querySelector('.g-recaptcha, [data-sitekey]:not(.h-captcha)');
-            const recapBadge = document.querySelector('.grecaptcha-badge');
+            const recapFrame = firstPresented('iframe[src*="recaptcha"]');
+            const recapDiv = firstPresented('.g-recaptcha, [data-sitekey]:not(.h-captcha)');
+            // The v3 badge is often styled hidden, so only require that it belongs.
+            const recapBadge = [...document.querySelectorAll('.grecaptcha-badge')].find(belongs) || null;
             const isEnterprise = !!document.querySelector(
                 'script[src*="recaptcha/enterprise"], iframe[src*="recaptcha/enterprise"]'
             );
@@ -135,10 +165,7 @@ def _detect_captcha(page) -> Optional[Dict[str, str]]:
             if (body.includes('security checkpoint'))
                 return {type: 'unknown', sitekey: ''};
             return null;
-        }""")
-        return info
-    except Exception:
-        return None
+        }"""
 
 
 def _solve_captcha(
