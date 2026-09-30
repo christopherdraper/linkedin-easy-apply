@@ -107,7 +107,7 @@ Guidelines:
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
-        stats.add_ai_tokens(response.usage)
+        stats.add_ai_tokens(response.usage, response.model)
         msg = response.content[0].text.strip()
         # Strip em dashes — they scream "AI-written"
         msg = msg.replace(" — ", ", ").replace(" -- ", ", ").replace("—", ", ").replace("--", ", ")

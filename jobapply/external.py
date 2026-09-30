@@ -1430,7 +1430,7 @@ def _ai_find_navigation_button(page):
                 }
             ],
         )
-        stats.add_ai_tokens(response.usage)
+        stats.add_ai_tokens(response.usage, response.model)
         button_text = response.content[0].text.strip().strip('"').strip("'")
         log.info(f"   👁️ AI vision found button: '{button_text}'")
 

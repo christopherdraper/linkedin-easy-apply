@@ -1015,7 +1015,7 @@ def _ai_answer_question(
             system=system_prompt,
             messages=[{"role": "user", "content": prompt}],
         )
-        stats.add_ai_tokens(response.usage)
+        stats.add_ai_tokens(response.usage, response.model)
         answer = response.content[0].text.strip()
 
         # Retry once with ultra-strict prompt if too long (text fields only)
@@ -1038,7 +1038,7 @@ def _ai_answer_question(
                     },
                 ],
             )
-            stats.add_ai_tokens(retry_response.usage)
+            stats.add_ai_tokens(retry_response.usage, retry_response.model)
             answer = retry_response.content[0].text.strip()
             if len(answer) > 100:
                 log.warning(

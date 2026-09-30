@@ -136,7 +136,7 @@ Rate how well this job matches the candidate. Respond with ONLY valid JSON, no o
             messages=[{"role": "user", "content": prompt}],
             output_config={"format": {"type": "json_schema", "schema": _SCORE_SCHEMA}},
         )
-        stats.add_ai_tokens(response.usage)
+        stats.add_ai_tokens(response.usage, response.model)
         # Structured output guarantees the first content block is valid JSON
         result = json.loads(response.content[0].text)
         # Schema can't enforce numeric bounds, so clamp to 0-1 here
@@ -255,7 +255,7 @@ IMPORTANT: Never use em dashes (—) or double dashes (--). Use commas, periods,
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
-        stats.add_ai_tokens(response.usage)
+        stats.add_ai_tokens(response.usage, response.model)
         text = response.content[0].text.strip()
         # Strip em dashes — they scream "AI-written"
         text = (
@@ -327,7 +327,7 @@ Cover: what the company does, what the role involves day-to-day, what stack/tool
             max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
         )
-        stats.add_ai_tokens(response.usage)
+        stats.add_ai_tokens(response.usage, response.model)
         notes = response.content[0].text.strip()
         # Append deal-breakers if any, so they're always visible
         if deal_breakers:

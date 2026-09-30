@@ -12,7 +12,19 @@ _apply_start_time: float = 0.0
 # Per-application AI token usage — cleared at start of each submit
 _ai_tokens_in: int = 0
 _ai_tokens_out: int = 0
+_ai_cost_usd: float = 0.0
 _final_ats_url: str = ""
+
+# $ per million tokens: (input, output, 5-minute cache write, cache read).
+# Anthropic first-party API rates as of 2026-09. Matched by model-id prefix, so
+# dated ids such as claude-haiku-4-5-20251001 resolve too.
+_MODEL_RATES = {
+    "claude-sonnet-5-5": (2.00, 10.00, 2.50, 0.20),
+    "claude-haiku-4-5": (1.00, 5.00, 1.25, 0.10),
+    "claude-opus-5-5": (4.00, 20.00, 5.00, 0.20),
+}
+# An unlisted model is priced as Sonnet 5.5, the most expensive model the tool calls.
+_DEFAULT_RATES = _MODEL_RATES["claude-sonnet-5-5"]
 
 
 def reset_run_stats() -> None:
@@ -20,19 +32,44 @@ def reset_run_stats() -> None:
 
     Does not touch _apply_start_time; callers set that themselves.
     """
-    global _ai_tokens_in, _ai_tokens_out, _final_ats_url  # noqa: PLW0603
+    global _ai_tokens_in, _ai_tokens_out, _ai_cost_usd, _final_ats_url  # noqa: PLW0603
     _field_fills.clear()
     _ai_answer_failures.clear()
     _ai_tokens_in = 0
     _ai_tokens_out = 0
+    _ai_cost_usd = 0.0
     _final_ats_url = ""
 
 
-def add_ai_tokens(usage) -> None:
-    """Accumulate AI token counts from an anthropic response usage object."""
-    global _ai_tokens_in, _ai_tokens_out  # noqa: PLW0603
+def _usage_count(usage, field: str) -> int:
+    value = getattr(usage, field, 0)
+    return value if isinstance(value, int) else 0
+
+
+def usage_cost_usd(usage, model: str = "") -> float:
+    """Dollar cost of one API response, at its own model's rates.
+
+    Cache reads and writes are billed separately from input_tokens, which
+    excludes them; the Workday vision loop caches its system prompt.
+    """
+    rate_in, rate_out, rate_write, rate_read = next(
+        (r for prefix, r in _MODEL_RATES.items() if (model or "").startswith(prefix)),
+        _DEFAULT_RATES,
+    )
+    return (
+        _usage_count(usage, "input_tokens") * rate_in
+        + _usage_count(usage, "output_tokens") * rate_out
+        + _usage_count(usage, "cache_creation_input_tokens") * rate_write
+        + _usage_count(usage, "cache_read_input_tokens") * rate_read
+    ) / 1_000_000
+
+
+def add_ai_tokens(usage, model: str = "") -> None:
+    """Accumulate token counts and dollar cost from an anthropic response usage object."""
+    global _ai_tokens_in, _ai_tokens_out, _ai_cost_usd  # noqa: PLW0603
     _ai_tokens_in += usage.input_tokens
     _ai_tokens_out += usage.output_tokens
+    _ai_cost_usd += usage_cost_usd(usage, model)
 
 
 _ATS_PATTERNS = [
@@ -141,13 +178,14 @@ def _categorize_failure(status: str) -> str:
     return "other"
 
 
-# Blended token-to-dollar rates (70% Sonnet 4.6 / 30% Haiku 4.5)
+# Blended token-to-dollar rates (70% Sonnet 4.6 / 30% Haiku 4.5). Only for
+# estimating log entries written before add_ai_tokens priced each call by model.
 _COST_INPUT_PER_M = 2.40  # $/M input tokens
 _COST_OUTPUT_PER_M = 12.00  # $/M output tokens
 
 
 def _compute_cost_usd(tokens_in: int, tokens_out: int) -> float:
-    """Compute estimated API cost from token counts using blended rates."""
+    """Estimate API cost from token counts alone, using the historical blended rates."""
     return round(
         (tokens_in * _COST_INPUT_PER_M / 1_000_000) + (tokens_out * _COST_OUTPUT_PER_M / 1_000_000),
         4,

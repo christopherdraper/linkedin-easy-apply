@@ -325,7 +325,7 @@ def _run_act_loop(
             messages=messages,
         )
         try:
-            stats.add_ai_tokens(r.usage)
+            stats.add_ai_tokens(r.usage, r.model)
         except Exception:  # noqa: BLE001, S110
             pass
         messages.append({"role": "assistant", "content": r.content})
@@ -338,7 +338,10 @@ def _run_act_loop(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Respond by calling the act tool with your next action."}
+                        {
+                            "type": "text",
+                            "text": "Respond by calling the act tool with your next action.",
+                        }
                     ],
                 }
             )

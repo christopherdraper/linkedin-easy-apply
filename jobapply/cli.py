@@ -201,7 +201,7 @@ Rules:
                 max_tokens=3000,
                 messages=[{"role": "user", "content": parse_prompt}],
             )
-            stats.add_ai_tokens(response.usage)
+            stats.add_ai_tokens(response.usage, response.model)
             parsed_text = response.content[0].text.strip()
             json_match = re.search(r"\{.*\}", parsed_text, re.DOTALL)
             if not json_match:

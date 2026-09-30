@@ -41,7 +41,7 @@ from jobapply.search import (
     search_linkedin,
     search_remoteok,
 )
-from jobapply.stats import _categorize_failure, _compute_cost_usd, _detect_ats_platform
+from jobapply.stats import _categorize_failure, _detect_ats_platform
 
 log = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ def _build_application_entry(
         "fields_filled": list(stats._field_fills),
         "ai_answer_failures": list(stats._ai_answer_failures),
         "ai_tokens": {"input": stats._ai_tokens_in, "output": stats._ai_tokens_out},
-        "cost_usd": _compute_cost_usd(stats._ai_tokens_in, stats._ai_tokens_out),
+        "cost_usd": round(stats._ai_cost_usd, 4),
         "duration_seconds": round(time.time() - stats._apply_start_time, 1)
         if stats._apply_start_time
         else None,

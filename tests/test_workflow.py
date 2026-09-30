@@ -36,6 +36,7 @@ def seeded_stats(monkeypatch):
     monkeypatch.setattr(stats, "_ai_answer_failures", [{"question": "salary?"}])
     monkeypatch.setattr(stats, "_ai_tokens_in", 100_000)
     monkeypatch.setattr(stats, "_ai_tokens_out", 10_000)
+    monkeypatch.setattr(stats, "_ai_cost_usd", 0.36)
     monkeypatch.setattr(stats, "_final_ats_url", "https://boards.greenhouse.io/acme/jobs/1")
     monkeypatch.setattr(stats, "_apply_start_time", 0.0)
 
@@ -68,7 +69,7 @@ class TestBuildApplicationEntry:
         assert entry["fields_filled"] == [{"label": "Name", "value": "Test User"}]
         assert entry["ai_answer_failures"] == [{"question": "salary?"}]
         assert entry["ai_tokens"] == {"input": 100_000, "output": 10_000}
-        # 100k in * $2.40/M + 10k out * $12.00/M
+        # the cost priced per call by stats.add_ai_tokens
         assert entry["cost_usd"] == 0.36
         # fields_filled is a snapshot copy, not a live reference
         stats._field_fills.append({"label": "Email", "value": "x"})

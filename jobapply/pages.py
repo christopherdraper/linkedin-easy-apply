@@ -736,7 +736,7 @@ A page may have has_file_upload=true AND has_form_fields=true."""
             system=_PAGE_CLASSIFIER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
-        stats.add_ai_tokens(response.usage)
+        stats.add_ai_tokens(response.usage, response.model)
         raw = response.content[0].text.strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
