@@ -142,6 +142,8 @@ _ATS_PATTERNS = [
     ("ActBlue", "actblue.com"),
     ("Oracle Recruiting", "oracle.com/careers"),
     ("Oracle Recruiting", "eeho.fa.us2.oraclecloud.com"),
+    # Oracle Recruiting Cloud candidate sites on any tenant (Honeywell: ibqbjb)
+    ("Oracle Recruiting", "oraclecloud.com/hcmui/candidateexperience"),
 ]
 
 

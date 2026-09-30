@@ -141,3 +141,24 @@ class TestHttpErrorPage:
 
     def test_ordinary_page_is_not_an_error(self, browser_page):
         assert self._check(browser_page, "<title>Careers</title><h1>Apply now</h1>") is None
+
+
+class TestHcaptchaCallbackDelivery:
+    """Oracle's widget is rendered from script with a private callback; the
+    solved token only counts once that callback receives it (2026-09-30)."""
+
+    def test_token_reaches_the_callback_passed_to_render(self, browser_page):
+        from urllib.parse import quote
+
+        from jobapply.pages import CAPTCHA_CALLBACK_HOOK_JS, _inject_captcha_token
+
+        browser_page.add_init_script(CAPTCHA_CALLBACK_HOOK_JS)
+        site = (
+            "<div id=w></div><script>"
+            "window.hcaptcha = {render(el, p) { return 'id1'; }};"
+            "hcaptcha.render('w', {sitekey: 'k', callback: (t) => { window.gotToken = t; }});"
+            "</script>"
+        )
+        browser_page.goto("data:text/html," + quote(site))
+        assert _inject_captcha_token(browser_page, "hcaptcha", "TOKEN-123") is True
+        assert browser_page.evaluate("window.gotToken") == "TOKEN-123"

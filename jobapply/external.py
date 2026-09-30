@@ -35,6 +35,7 @@ from jobapply.forms import (
     _safe_click,
 )
 from jobapply.pages import (
+    CAPTCHA_CALLBACK_HOOK_JS,
     _classify_page,
     _detect_captcha,
     _detect_login_page,
@@ -2472,6 +2473,9 @@ def submit_external_apply(  # noqa: C901
             headed=use_headed,  # type: ignore[arg-type]  # truthy str/None used as bool
         )
         try:
+            # Before any navigation, so it runs ahead of the sites' scripts;
+            # on the context so tabs an Apply button opens get it too.
+            context.add_init_script(CAPTCHA_CALLBACK_HOOK_JS)
             _goto_resilient(page, job["url"], timeout=20000)
             page.wait_for_timeout(2000)
 

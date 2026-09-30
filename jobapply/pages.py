@@ -341,6 +341,38 @@ def _capsolver_solve(api_key: str, ctype: str, sitekey: str, page_url: str) -> O
     return None
 
 
+# Installed before any page script runs (page.add_init_script). hCaptcha hands
+# a solved token to the callback the SITE passed to hcaptcha.render, and a
+# widget rendered from script (Oracle Recruiting Cloud, iCIMS) keeps that
+# callback private. Wrapping render records it, so a token from the solving
+# service can be delivered the same way hCaptcha would deliver its own.
+CAPTCHA_CALLBACK_HOOK_JS = """(() => {
+    if (window.__jaHcHooked) return;
+    window.__jaHcHooked = true;
+    window.__jaHcaptchaCallbacks = [];
+    const wrap = (hc) => {
+        if (!hc || hc.__jaWrapped || typeof hc.render !== 'function') return hc;
+        const render = hc.render.bind(hc);
+        hc.render = function (container, params) {
+            const cb = params && params.callback;
+            if (typeof cb === 'function') window.__jaHcaptchaCallbacks.push(cb);
+            else if (typeof cb === 'string') window.__jaHcaptchaCallbacks.push((t) => window[cb](t));
+            return render(container, params);
+        };
+        hc.__jaWrapped = true;
+        return hc;
+    };
+    let current;
+    try {
+        Object.defineProperty(window, 'hcaptcha', {
+            configurable: true,
+            get() { return current; },
+            set(v) { current = wrap(v); },
+        });
+    } catch (e) {}
+})();"""
+
+
 def _inject_captcha_token(page, ctype: str, token: str) -> bool:
     """Inject a solved CAPTCHA token into the page and trigger callbacks."""
     try:
@@ -382,22 +414,33 @@ def _inject_captcha_token(page, ctype: str, token: str) -> bool:
             # native submit, which skips the listener that would re-run the
             # challenge. Without it the token sat in the textarea and iCIMS
             # never left its email step (2026-09-30).
-            submitted = page.evaluate(
+            delivered = page.evaluate(
                 """(token) => {
                 const ta = document.querySelector('[name="h-captcha-response"], '
                     + 'textarea[name="g-recaptcha-response"]');
                 if (ta) { ta.style.display = 'block'; ta.value = token; }
                 document.querySelectorAll('textarea[name*="captcha"]')
                     .forEach(el => { el.value = token; });
+                const callbacks = [...(window.__jaHcaptchaCallbacks || [])];
+                document.querySelectorAll('.h-captcha[data-callback]').forEach(d => {
+                    const f = window[d.getAttribute('data-callback')];
+                    if (typeof f === 'function') callbacks.push(f);
+                });
+                if (callbacks.length) {
+                    callbacks.forEach(cb => { try { cb(token); } catch (e) {} });
+                    return 'callback';
+                }
                 const widget = document.querySelector('.h-captcha[data-size="invisible"]');
                 const form = widget && widget.closest('form');
-                if (!form) return false;
+                if (!form) return '';
                 form.submit();
-                return true;
+                return 'submit';
             }""",
                 token,
             )
-            if submitted:
+            if delivered == "callback":
+                log.info("   🧩 Handed the token to the site's hCaptcha callback")
+            elif delivered == "submit":
                 log.info("   🧩 Submitted the form the invisible hCaptcha guards")
         elif ctype == "turnstile":
             page.evaluate(
