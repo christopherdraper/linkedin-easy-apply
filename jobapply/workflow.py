@@ -40,6 +40,7 @@ from jobapply.search import (
     search_hn_whos_hiring,
     search_linkedin,
     search_remoteok,
+    search_workday_sites,
 )
 from jobapply.stats import _categorize_failure, _detect_ats_platform
 
@@ -56,6 +57,8 @@ def _search_source(
         jobs = search_hn_whos_hiring(params)
     elif source == "biotech":
         jobs = search_biotech(params)
+    elif source == "workday":
+        jobs = search_workday_sites(params)
     else:
         jobs = search_linkedin(params, proxy=proxy, need_description=need_description)
     return jobs
@@ -209,6 +212,7 @@ def auto_apply_workflow(  # noqa: C901
         "remoteok": "RemoteOK",
         "hn": "HackerNews Who's Hiring",
         "biotech": "Biotech/Pharma Careers",
+        "workday": "Employer Workday sites",
     }
     label = source_labels.get(source, source)
     log.info(f"🚀 {label} job apply workflow (Easy Apply + External)")

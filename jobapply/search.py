@@ -386,7 +386,7 @@ def search_hn_whos_hiring(params: JobSearchParams) -> List[Dict]:
 # ── Biotech / Pharma career sites (Workday API) ─────────────────────────
 _BIOTECH_WORKDAY_SITES = [
     # (display_name, tenant, wd_instance, site_path)
-    ("Eli Lilly", "lilly", "wd5", "LLY"),
+    ("Eli Lilly", "lilly", "wd115", "LLY"),  # moved from wd5, which now answers 422
     ("Amgen", "amgen", "wd1", "Careers"),
     ("Pfizer", "pfizer", "wd1", "PfizerCareers"),
     ("BMS", "bristolmyerssquibb", "wd5", "BMS"),
@@ -603,6 +603,77 @@ def search_biotech(params: JobSearchParams) -> List[Dict]:
         time.sleep(random.uniform(0.5, 1.5))
 
     return all_jobs
+
+
+def _posted_within(posted_on: str, max_age_days: Optional[int]) -> bool:
+    """Workday's "Posted 3 Days Ago" / "Posted 30+ Days Ago" against a day limit."""
+    if not max_age_days or not posted_on:
+        return True
+    if "30+" in posted_on:
+        return False
+    m = re.search(r"(\d+)\s*Days?\s*Ago", posted_on, re.IGNORECASE)
+    return not m or int(m.group(1)) <= max_age_days
+
+
+def search_workday_sites(params: JobSearchParams) -> List[Dict]:
+    """Search employers' own Workday career sites (params.workday_sites).
+
+    Built while LinkedIn had restricted the applicant's account (2026-09-30):
+    it needs no LinkedIn session and uses only Workday's public job API. A
+    posting is kept if it is in the US and either remote or at a location
+    matching params.local_terms; whether that is a real commute is left to the
+    scorer. The country check matters: Lilly writes India as "IN: Hyderabad".
+    """
+    blacklist_lower = [c.lower() for c in params.company_blacklist]
+    excluded_lower = [kw.lower() for kw in params.keywords_excluded]
+    local_lower = [t.lower() for t in params.local_terms]
+    jobs: List[Dict] = []
+    for site_cfg in params.workday_sites:
+        name = site_cfg.get("name", "")
+        tenant, wd, site = site_cfg.get("tenant"), site_cfg.get("wd"), site_cfg.get("site")
+        if not (tenant and wd and site) or name.lower() in blacklist_lower:
+            continue
+        data = _workday_search(tenant, wd, site, params.title, limit=20)
+        postings = data.get("jobPostings", [])
+        log.info(f"   🏢 {name}: {data.get('total', 0)} results for '{params.title}'")
+        for posting in postings:
+            title = posting.get("title", "")
+            path = posting.get("externalPath", "")
+            if not title or not path or any(kw in title.lower() for kw in excluded_lower):
+                continue
+            if not _posted_within(posting.get("postedOn", ""), params.max_age_days):
+                continue
+            info = _workday_job_detail(tenant, wd, site, path).get("jobPostingInfo") or {}
+            country = (info.get("country") or {}).get("descriptor", "")
+            if "united states" not in country.lower():
+                continue
+            location = info.get("location") or posting.get("locationsText", "")
+            others = " ".join(info.get("additionalLocations") or [])
+            remote = (info.get("remoteType") or "").lower() == "remote"
+            local = any(t in f"{location} {others}".lower() for t in local_lower)
+            if not (remote or local):
+                continue
+            url = f"https://{tenant}.{wd}.myworkdayjobs.com/{site}{path}"
+            description = re.sub(
+                r"\s+", " ", re.sub(r"<[^>]+>", " ", info.get("jobDescription", ""))
+            )
+            jobs.append(
+                {
+                    "id": f"wd_{tenant}_{hashlib.sha256(url.encode()).hexdigest()[:12]}",
+                    "url": url,
+                    "listing_url": url,
+                    "title": title,
+                    "company": name,
+                    "description": _sanitize_description(description.strip()[:5000]),
+                    "location": "Remote" if remote and not local else location,
+                    "posted_ago": posting.get("postedOn", ""),
+                    "easy_apply": False,
+                    "apply_type": "external",
+                    "source": "workday",
+                }
+            )
+        time.sleep(random.uniform(0.5, 1.5))
+    return jobs
 
 
 # Scroll LinkedIn's results pane one step and report how many job cards have

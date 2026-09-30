@@ -17,6 +17,11 @@ class JobSearchParams:
     max_age_days: Optional[int] = 3  # Only show jobs posted within this many days
     keywords_excluded: List[str] = field(default_factory=list)
     company_blacklist: List[str] = field(default_factory=list)
+    # "workday" source: employer career sites to search, as
+    # {"name", "tenant", "wd", "site"}, and the location words that count as
+    # commuting distance (a US job is kept if it is remote or matches one).
+    workday_sites: List[Dict] = field(default_factory=list)
+    local_terms: List[str] = field(default_factory=list)
 
 
 @dataclass

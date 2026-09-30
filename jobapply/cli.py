@@ -560,6 +560,8 @@ def _run_batch_sources(
                 max_age_days=_criteria.get("max_age_days", 14),
                 keywords_excluded=_criteria.get("keywords_excluded", []),
                 company_blacklist=_criteria.get("company_blacklist", []),
+                workday_sites=_criteria.get("workday_sites", []),
+                local_terms=_criteria.get("local_terms", []),
             )
 
             try:
@@ -649,7 +651,7 @@ def main():
     parser.add_argument("--company", default=None, help="Company name for --external-url")
     parser.add_argument(
         "--source",
-        choices=["linkedin", "remoteok", "hn", "biotech", "all"],
+        choices=["linkedin", "remoteok", "hn", "biotech", "workday", "all"],
         default="linkedin",
         help="Job source: linkedin, remoteok, hn, biotech (pharma career sites), or all",
     )
