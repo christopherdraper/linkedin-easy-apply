@@ -557,8 +557,7 @@ class TestAshbyHandler:
         handler.on_step_start(page, {})
         scripts = [c.args[0] for c in page.evaluate.call_args_list if c.args]
         assert any(
-            "ashby-application-form-autofill" in js and "data-jobapply-skip" in js
-            for js in scripts
+            "ashby-application-form-autofill" in js and "data-jobapply-skip" in js for js in scripts
         )
 
     def test_on_submit_detects_spam_filter(self):
@@ -2091,12 +2090,18 @@ class TestWorkdaySubmitReview:
             return WorkdayHandler()._submit_review(page)
 
     def test_confirmation_is_submitted(self):
-        page = self._page([{"text": "review ...", "errors": []},
-                           {"text": "congratulations! your application has been submitted.", "errors": []}])
+        page = self._page(
+            [
+                {"text": "review ...", "errors": []},
+                {"text": "congratulations! your application has been submitted.", "errors": []},
+            ]
+        )
         assert self._run(page) == "submitted"
 
     def test_validation_error_is_a_failure(self):
-        page = self._page([{"text": "review", "errors": ["Errors Found: Phone Number is required"]}])
+        page = self._page(
+            [{"text": "review", "errors": ["Errors Found: Phone Number is required"]}]
+        )
         result = self._run(page)
         assert result.startswith("failed") and "Phone Number is required" in result
 
@@ -2112,4 +2117,3 @@ class TestWorkdaySubmitReview:
             result = WorkdayHandler()._submit_review(page)
         click.assert_not_called()
         assert result.startswith("failed")
-

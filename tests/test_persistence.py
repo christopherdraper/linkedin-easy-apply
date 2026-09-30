@@ -516,9 +516,7 @@ class TestLinkedInWelcomeBackLogin:
 
         import jobapply.browser as br
 
-        monkeypatch.setattr(
-            br, "_load_credentials", lambda: {"email": "e@x.com", "password": "pw"}
-        )
+        monkeypatch.setattr(br, "_load_credentials", lambda: {"email": "e@x.com", "password": "pw"})
         pw_field = MagicMock()
         # No email field (Welcome back), password field present.
         monkeypatch.setattr(
@@ -531,12 +529,11 @@ class TestLinkedInWelcomeBackLogin:
         pw_field.fill.assert_any_call("pw")
 
     def test_missing_password_field_still_fails(self, data_dir, monkeypatch):
-        import jobapply.browser as br
         from unittest.mock import MagicMock
 
-        monkeypatch.setattr(
-            br, "_load_credentials", lambda: {"email": "e@x.com", "password": "pw"}
-        )
+        import jobapply.browser as br
+
+        monkeypatch.setattr(br, "_load_credentials", lambda: {"email": "e@x.com", "password": "pw"})
         monkeypatch.setattr(br, "_first_visible", lambda page, sel: None)
         page = MagicMock()
         page.url = "https://www.linkedin.com/login/"
@@ -655,4 +652,3 @@ class TestAtsLoginRejectionDetection:
         with patch.object(accounts, "_safe_click"), caplog.at_level(logging.WARNING):
             assert accounts._attempt_ats_login(page, domain) is False
         assert any("rejected" in r.getMessage().lower() for r in caplog.records)
-

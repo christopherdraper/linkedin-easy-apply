@@ -1124,4 +1124,3 @@ class TestFileInputSkipMarker:
         with patch.object(external, "_get_field_label", return_value=""):
             found = external._find_file_upload_inputs(page)
         assert [u["element"] for u in found] == [resume]
-

@@ -321,18 +321,24 @@ class TestFetchDescriptionsThrottle:
     LinkedIn job-page loads per search preceded a session revocation."""
 
     def _jobs(self, n):
-        return [{"id": f"li_{i}", "url": f"https://www.linkedin.com/jobs/view/{i}/", "description": ""}
-                for i in range(n)]
+        return [
+            {"id": f"li_{i}", "url": f"https://www.linkedin.com/jobs/view/{i}/", "description": ""}
+            for i in range(n)
+        ]
 
     def test_fetches_only_jobs_that_need_a_description(self, monkeypatch):
         from jobapply import search
 
         fetched = []
-        monkeypatch.setattr(search, "_fetch_description",
-                            lambda ctx, url: (fetched.append(url) or ("desc", "1 day ago")))
+        monkeypatch.setattr(
+            search,
+            "_fetch_description",
+            lambda ctx, url: fetched.append(url) or ("desc", "1 day ago"),
+        )
         jobs = self._jobs(5)
-        n = search._fetch_descriptions(None, _PacingPage(), jobs,
-                                       need_description=lambda j: j["id"] in ("li_1", "li_3"))
+        n = search._fetch_descriptions(
+            None, _PacingPage(), jobs, need_description=lambda j: j["id"] in ("li_1", "li_3")
+        )
         assert n == 2
         assert fetched == [jobs[1]["url"], jobs[3]["url"]]
         assert jobs[0]["description"] == "" and jobs[0]["posted_ago"] == ""
@@ -352,4 +358,3 @@ class TestFetchDescriptionsThrottle:
 
         monkeypatch.setattr(search, "_fetch_description", lambda ctx, url: ("d", ""))
         assert search._fetch_descriptions(None, _PacingPage(), self._jobs(3)) == 3
-

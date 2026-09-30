@@ -453,8 +453,7 @@ def _coord_is_submit(page, coord) -> bool:
         return True
 
 
-_PAGE_SYSTEM = (
-    """You are completing a Workday job application, advancing PAGE BY PAGE to the
+_PAGE_SYSTEM_TEXT = """You are completing a Workday job application, advancing PAGE BY PAGE to the
 final Review page. You get a screenshot and a list of clickable elements with coordinates.
 Issue ONE action via `act`.
 
@@ -498,8 +497,7 @@ skills.
 HARD RULES: NEVER click "Submit". NEVER create an account or type a password. If you reach
 a page whose heading is "Review", respond 'done' with text 'REACHED_REVIEW'. If you land on
 a Sign In / Create Account page, respond 'done' with text 'LOGIN_WALL'. Today: """
-    + TODAY
-)
+_PAGE_SYSTEM = _PAGE_SYSTEM_TEXT + TODAY  # nosec B608 -- prompt text for the model, not SQL
 
 
 def vision_complete_page(page, profile, *, client=None, max_actions=120) -> bool:
