@@ -15,6 +15,7 @@ from jobapply import stats
 from jobapply.accounts import _fetch_verification_code_from_gmail
 from jobapply.ai import _AI_AVAILABLE, _get_ai_client
 from jobapply.browser import (
+    LinkedInBlockedError,
     _ensure_logged_in,
     _playwright_context,
     _resolve_proxy,
@@ -2433,9 +2434,7 @@ def submit_external_apply(  # noqa: C901
                 # "external form stuck" on a blank page.
                 direct_url = ""
                 try:
-                    direct_url = _resolve_linkedin_apply_href(
-                        apply_btn.get_attribute("href") or ""
-                    )
+                    direct_url = _resolve_linkedin_apply_href(apply_btn.get_attribute("href") or "")
                 except Exception:  # noqa: BLE001, S110
                     pass
 
@@ -2525,6 +2524,8 @@ def submit_external_apply(  # noqa: C901
         except ApplicationAbortError as e:
             log.warning(f"   🛡️  Application aborted: {e}")
             return f"aborted: {e}"
+        except LinkedInBlockedError:
+            raise
         except Exception as e:
             return f"failed: {e}"
         finally:

@@ -4,10 +4,18 @@ import json
 import logging
 import os
 import random
+import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from jobapply.config import CDP_URL, CREDENTIALS_FILE, SESSION_FILE
+from jobapply.config import (
+    CDP_URL,
+    CREDENTIALS_FILE,
+    LINKEDIN_BLOCK_COOLDOWN_H,
+    LINKEDIN_BLOCK_FILE,
+    SESSION_FILE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -366,7 +374,12 @@ def _dismiss_linkedin_overlays(page) -> None:
 
 
 def _ensure_logged_in(page, target_url: str) -> None:
-    """Check if LinkedIn redirected to auth wall and attempt auto-login. Raises on failure."""
+    """Check if LinkedIn redirected to auth wall and attempt auto-login. Raises on failure.
+
+    A checkpoint or restriction page raises LinkedInBlockedError instead: logging
+    in again from there is exactly the traffic that got the account flagged.
+    """
+    _assert_linkedin_not_blocked(page)
     if "authwall" not in page.url and "uas/login" not in page.url:
         return
     if not _login_linkedin(page):
@@ -375,3 +388,69 @@ def _ensure_logged_in(page, target_url: str) -> None:
     page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
     if "authwall" in page.url or "uas/login" in page.url:
         raise RuntimeError("Login succeeded but still redirected to auth wall")
+
+
+class LinkedInBlockedError(RuntimeError):
+    """LinkedIn put the account behind a checkpoint or restriction page.
+
+    Every further LinkedIn page load deepens the flag, so this stops the whole
+    batch rather than one search or one application.
+    """
+
+
+# On 2026-09-29 LinkedIn restricted the account after ~3.5h of batch traffic
+# ("accessed an unusually high volume of LinkedIn profile data"). The page sits
+# at /checkpoint/challenge/ and the batch hung on it for an hour.
+_LINKEDIN_RESTRICTION_PHRASES = (
+    "account has been temporarily restricted",
+    "account has been restricted",
+    "we restricted your account",
+)
+
+
+def _linkedin_block_reason(page) -> Optional[str]:
+    """Describe the LinkedIn checkpoint or restriction page, or None if not blocked."""
+    url = page.url or ""
+    if "linkedin.com" not in url:
+        return None
+    try:
+        body = page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+    except Exception:
+        body = ""
+    restricted = any(p in body.lower() for p in _LINKEDIN_RESTRICTION_PHRASES)
+    if not restricted and "/checkpoint/" not in url:
+        return None
+    reason = "account temporarily restricted" if restricted else "security checkpoint"
+    lifted = re.search(r"restriction will be lifted on ([^\n]+?)\.?(?:\n|$)", body)
+    if lifted:
+        reason += f" (LinkedIn says it lifts {lifted.group(1).strip()})"
+    return f"{reason}: {url[:100]}"
+
+
+def _record_linkedin_block(reason: str) -> None:
+    """Persist the block so later LinkedIn batches refuse to start during the cooldown."""
+    LINKEDIN_BLOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LINKEDIN_BLOCK_FILE.write_text(
+        json.dumps({"at": datetime.now(timezone.utc).isoformat(), "reason": reason})
+    )
+
+
+def _linkedin_block_active() -> Optional[Dict[str, Any]]:
+    """Return the recorded block if its cooldown has not expired, else None."""
+    try:
+        rec = json.loads(LINKEDIN_BLOCK_FILE.read_text())
+        at = datetime.fromisoformat(rec["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    until = at + timedelta(hours=LINKEDIN_BLOCK_COOLDOWN_H)
+    if datetime.now(timezone.utc) >= until:
+        return None
+    return {**rec, "until": until.isoformat()}
+
+
+def _assert_linkedin_not_blocked(page) -> None:
+    """Raise LinkedInBlockedError (and record it) if the page is a LinkedIn block."""
+    reason = _linkedin_block_reason(page)
+    if reason:
+        _record_linkedin_block(reason)
+        raise LinkedInBlockedError(f"LinkedIn blocked this session: {reason}")

@@ -264,3 +264,12 @@ def _clear_rejected_login_domains():
     accounts._REJECTED_LOGIN_DOMAINS.clear()
     yield
     accounts._REJECTED_LOGIN_DOMAINS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_linkedin_block_file(tmp_path, monkeypatch):
+    """No test may read or write the real LinkedIn block record: a real one on
+    disk would make batch tests exit, and a test must never create one."""
+    import jobapply.browser
+
+    monkeypatch.setattr(jobapply.browser, "LINKEDIN_BLOCK_FILE", tmp_path / "linkedin_blocked.json")

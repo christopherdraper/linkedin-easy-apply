@@ -6,7 +6,7 @@ import re
 import time
 from typing import Dict, Optional
 
-from jobapply import stats
+from jobapply import stats, watchdog
 from jobapply.ai import _AI_AVAILABLE
 from jobapply.applog import (
     already_applied,
@@ -17,7 +17,7 @@ from jobapply.applog import (
     save_log,
     save_score_cache,
 )
-from jobapply.browser import _human_delay
+from jobapply.browser import LinkedInBlockedError, _human_delay
 from jobapply.config import COVER_LETTER_DIR, LOG_FILE
 from jobapply.content import (
     SCORER_FINGERPRINT,
@@ -61,7 +61,9 @@ def _search_source(
     return jobs
 
 
-def _needs_description(job: Dict, applied_urls: set, score_cache: Dict, min_match_score: float) -> bool:
+def _needs_description(
+    job: Dict, applied_urls: set, score_cache: Dict, min_match_score: float
+) -> bool:
     """True if this batch will score or apply to the job, so it needs its page.
 
     Mirrors the skip rules in auto_apply_workflow's job loop: already applied,
@@ -232,7 +234,7 @@ def auto_apply_workflow(  # noqa: C901
     except RuntimeError as e:
         # A dead session must reach cli._run_batch, which stops the whole batch;
         # swallowing it here sent every remaining title through a logged-out search.
-        if "session expired" in str(e).lower():
+        if isinstance(e, LinkedInBlockedError) or "session expired" in str(e).lower():
             raise
         log.error(f"❌ Search failed: {e}")
         return {"applications": [], "total": 0, "jobs_found": 0}
@@ -247,6 +249,7 @@ def auto_apply_workflow(  # noqa: C901
     applied = 0
 
     for job in jobs:
+        watchdog.pet()
         if applied >= max_applications:
             log.info(f"✋ Reached limit ({max_applications})")
             break
@@ -319,6 +322,8 @@ def auto_apply_workflow(  # noqa: C901
                 )
                 if msg_status:
                     log.info(f"   📨 Hiring manager message: {msg_status}")
+            except LinkedInBlockedError:
+                raise
             except Exception as exc:
                 log.info("   ⚠️  Hiring manager message failed: %s", exc)
 

@@ -6,7 +6,11 @@ from typing import Dict, Optional
 
 from jobapply import stats
 from jobapply.ai import _AI_AVAILABLE, _get_ai_client
-from jobapply.browser import _playwright_context, _stealth_playwright
+from jobapply.browser import (
+    _assert_linkedin_not_blocked,
+    _playwright_context,
+    _stealth_playwright,
+)
 from jobapply.profile import ApplicantProfile
 from jobapply.safety import _sanitize_description
 
@@ -207,6 +211,7 @@ def _message_hiring_manager_after_apply(
         try:
             page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(3000)
+            _assert_linkedin_not_blocked(page)
 
             poster = _extract_hiring_manager(page)
             if not poster or not poster.get("compose_url"):

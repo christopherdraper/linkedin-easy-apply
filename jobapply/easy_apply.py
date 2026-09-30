@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from jobapply import stats
-from jobapply.browser import _playwright_context, _save_session, _stealth_playwright
+from jobapply.browser import (
+    LinkedInBlockedError,
+    _assert_linkedin_not_blocked,
+    _playwright_context,
+    _save_session,
+    _stealth_playwright,
+)
 from jobapply.forms import (
     _MODAL_SEL,
     _answer_screening_questions,
@@ -220,6 +226,7 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
         try:
             page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(2000)
+            _assert_linkedin_not_blocked(page)
 
             easy_apply_sel = "[aria-label*='Easy Apply'], button:has-text('Easy Apply'), a:has-text('Easy Apply')"
             easy_apply_btn = None
@@ -250,6 +257,8 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
         except ApplicationAbortError as e:
             log.warning(f"   🛡️  Application aborted: {e}")
             return f"aborted: {e}"
+        except LinkedInBlockedError:
+            raise
         except Exception as e:
             return f"failed: {e}"
         finally:

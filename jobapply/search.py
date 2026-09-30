@@ -11,6 +11,8 @@ from typing import Callable, Dict, List, Optional
 
 from jobapply.applog import save_search_log
 from jobapply.browser import (
+    LinkedInBlockedError,
+    _assert_linkedin_not_blocked,
     _dismiss_linkedin_overlays,
     _ensure_logged_in,
     _playwright_context,
@@ -33,6 +35,7 @@ def _fetch_description(context, url: str) -> tuple:
     try:
         desc_page.goto(url, wait_until="domcontentloaded", timeout=20000)
         desc_page.wait_for_timeout(2000)
+        _assert_linkedin_not_blocked(desc_page)
 
         # Extract posting age (e.g. "2 days ago", "1 week ago", "Reposted 3 days ago")
         posted_ago = (
@@ -84,6 +87,8 @@ def _fetch_description(context, url: str) -> tuple:
 
         if text:
             return re.sub(r"\s+", " ", text).strip(), posted_ago
+    except LinkedInBlockedError:
+        raise
     except Exception as exc:
         log.debug("Description fetch failed for %s: %s", url, exc)
     finally:
@@ -652,9 +657,7 @@ def _assert_linkedin_session(context, page) -> None:
     Deliberately no auto-login here: logging a revoked session back in hits an
     SMS challenge, and retrying would text the applicant's phone on every run.
     """
-    has_li_at = any(
-        c.get("name") == "li_at" for c in context.cookies("https://www.linkedin.com")
-    )
+    has_li_at = any(c.get("name") == "li_at" for c in context.cookies("https://www.linkedin.com"))
     guest_view = (
         page.query_selector("div.job-card-container") is None
         and page.query_selector("div.job-search-card") is not None
@@ -739,6 +742,7 @@ def search_linkedin(
             try:
                 page.wait_for_selector("div.job-card-container, div.job-search-card", timeout=12000)
             except Exception:
+                _assert_linkedin_not_blocked(page)
                 raise RuntimeError(
                     f"No results found — LinkedIn may have changed layout. URL: {page.url}"
                 ) from None

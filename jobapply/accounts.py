@@ -238,7 +238,9 @@ _REJECTED_LOGIN_DOMAINS: set = set()
 def _attempt_ats_login(page, domain: str) -> bool:
     """Try to log in using stored ATS credentials. Returns True if login succeeded."""
     if domain in _REJECTED_LOGIN_DOMAINS:
-        log.info("   🔑 Skipping login for %s: it rejected the stored password earlier this run", domain)
+        log.info(
+            "   🔑 Skipping login for %s: it rejected the stored password earlier this run", domain
+        )
         return False
     accounts = _load_ats_accounts()
     if domain not in accounts:

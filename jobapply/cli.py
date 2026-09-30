@@ -11,16 +11,24 @@ import sys
 import time
 from pathlib import Path
 
-from jobapply import stats
+from jobapply import stats, watchdog
 from jobapply.ai import _AI_AVAILABLE, _get_ai_client
 from jobapply.browser import (
+    LinkedInBlockedError,
     _ensure_logged_in,
+    _linkedin_block_active,
     _load_credentials,
     _playwright_context,
     _save_credentials,
     _stealth_playwright,
 )
-from jobapply.config import COVER_LETTER_DIR, CREDENTIALS_FILE, DATA_DIR
+from jobapply.config import (
+    COVER_LETTER_DIR,
+    CREDENTIALS_FILE,
+    DATA_DIR,
+    LINKEDIN_BLOCK_COOLDOWN_H,
+    LINKEDIN_BLOCK_FILE,
+)
 from jobapply.content import _save_cover_letter_docx, ai_generate_cover_letter
 from jobapply.external import submit_external_apply
 from jobapply.profile import ApplicantProfile, JobSearchParams
@@ -489,10 +497,42 @@ def _resolve_batch_settings(args, parser):
     return profile, _criteria, max_applications, min_score, titles, remote
 
 
+# Exit status when LinkedIn has blocked the account, so wrapper scripts that
+# chain several batches stop instead of starting the next one.
+EXIT_LINKEDIN_BLOCKED = 75
+
+
 def _run_batch(args, profile, _criteria, max_applications, min_score, titles, remote) -> None:
     """Run the default batch loop over sources and titles."""
     sources = ["linkedin", "remoteok", "hn", "biotech"] if args.source == "all" else [args.source]
 
+    block = _linkedin_block_active() if "linkedin" in sources else None
+    if block:
+        log.error(
+            f"🛑 LinkedIn blocked this account at {block['at']}: {block['reason']}\n"
+            f"   LinkedIn batches are paused until {block['until']}. "
+            f"Delete {LINKEDIN_BLOCK_FILE} to override."
+        )
+        sources = [s for s in sources if s != "linkedin"]
+        if not sources:
+            sys.exit(EXIT_LINKEDIN_BLOCKED)
+
+    watchdog.start()
+    try:
+        blocked = _run_batch_sources(
+            args, sources, _criteria, profile, max_applications, min_score, titles, remote
+        )
+    finally:
+        watchdog.stop()
+    if blocked:
+        sys.exit(EXIT_LINKEDIN_BLOCKED)
+
+
+def _run_batch_sources(
+    args, sources, _criteria, profile, max_applications, min_score, titles, remote
+) -> bool:
+    """Search and apply for every source and title. Returns True if LinkedIn blocked us."""
+    blocked = False
     for source in sources:
         if len(sources) > 1:
             log.info(f"\n{'=' * 50}")
@@ -500,6 +540,7 @@ def _run_batch(args, profile, _criteria, max_applications, min_score, titles, re
             log.info(f"{'=' * 50}\n")
 
         for i, title in enumerate(titles):
+            watchdog.pet()
             if i > 0:
                 delay = random.randint(15, 30) + (i * random.randint(3, 8))
                 log.info(f"⏳ Waiting {delay}s before next search...")
@@ -524,6 +565,14 @@ def _run_batch(args, profile, _criteria, max_applications, min_score, titles, re
                     proxy=args.proxy,
                     source=source,
                 )
+            except LinkedInBlockedError as exc:
+                log.error(
+                    f"🛑 {exc}\n   Stopping all LinkedIn activity. LinkedIn batches are paused "
+                    f"for {LINKEDIN_BLOCK_COOLDOWN_H}h; the account owner should sign in to "
+                    "LinkedIn on their own device."
+                )
+                blocked = True
+                break
             except RuntimeError as exc:
                 if "session expired" in str(exc).lower():
                     log.error(
@@ -532,6 +581,7 @@ def _run_batch(args, profile, _criteria, max_applications, min_score, titles, re
                     break
                 log.error(f"❌ Error during '{title}': {exc}")
             continue
+    return blocked
 
 
 def main():

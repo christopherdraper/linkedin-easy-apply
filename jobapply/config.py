@@ -13,3 +13,7 @@ CDP_URL = "http://localhost:9222"
 DEBUG_DIR = DATA_DIR / "debug"
 DEEP_APPLY_QUEUE_FILE = DATA_DIR / "deep_apply_queue.json"
 SCORE_CACHE_FILE = DATA_DIR / "score_cache.json"
+# Written when LinkedIn restricts the account; LinkedIn batches refuse to start
+# until LINKEDIN_BLOCK_COOLDOWN_H hours have passed or the file is deleted.
+LINKEDIN_BLOCK_FILE = DATA_DIR / "linkedin_blocked.json"
+LINKEDIN_BLOCK_COOLDOWN_H = 72
