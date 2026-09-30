@@ -299,18 +299,30 @@ def _screen(page):
 
 
 def _run_act_loop(
-    page, client, system_text, user_text, max_actions, forbid_submit=True, resume_path=None
+    page,
+    client,
+    system_text,
+    user_text,
+    max_actions,
+    forbid_submit=True,
+    resume_path=None,
+    after_action=None,
 ):
     """Shared bounded act loop. Returns True if the model signalled 'done'.
 
     ``resume_path`` (when set) is uploaded to any empty Workday file-upload
     widget each iteration, so the model never has to -- it has no file action.
+    ``after_action(page)`` (when set) runs after each action for work the
+    model cannot do, such as a questionnaire in another tab; a string it
+    returns is passed to the model with the next screenshot.
     """
     from jobapply import stats
 
     sys_cached = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
     _autofill_resume(page, resume_path)
-    messages = [{"role": "user", "content": [{"type": "text", "text": user_text}] + _screen(page)}]
+    note = after_action(page) if after_action else None
+    first = [{"type": "text", "text": user_text + (f"\n{note}" if note else "")}]
+    messages = [{"role": "user", "content": first + _screen(page)}]
     recent_sigs = []
     text_only_turns = 0
     for _i in range(max_actions):
@@ -418,7 +430,10 @@ def _run_act_loop(
             except Exception as e:  # noqa: BLE001
                 log.debug("vision act err: %s", str(e)[:80])
         _autofill_resume(page, resume_path)
+        note = after_action(page) if after_action else None
         cont = _screen(page)
+        if note:
+            cont = [{"type": "text", "text": note}] + list(cont)
         results = [{"type": "tool_result", "tool_use_id": tu.id, "content": cont}]
         for extra in tus[1:]:
             results.append(
@@ -553,4 +568,32 @@ def vision_complete_page(page, profile, *, client=None, max_actions=120) -> bool
         f"Applicant:\n{summary}{screening}{eeo}\nCurrent screen:"
     )
     log.info("   Workday vision: driving form to Review (budget %d actions)", max_actions)
-    return _run_act_loop(page, client, _PAGE_SYSTEM, user, max_actions, resume_path=resume_path)
+    return _run_act_loop(
+        page,
+        client,
+        _PAGE_SYSTEM,
+        user,
+        max_actions,
+        resume_path=resume_path,
+        after_action=_assessment_step(profile),
+    )
+
+
+def _assessment_step(profile):
+    """after_action hook: complete a "Take Assessment" questionnaire once."""
+    from ats_handlers._workday_assessment import complete_assessment, on_assessment_page
+
+    done = {"ok": False}
+
+    def step(page):
+        if done["ok"] or not on_assessment_page(page):
+            return None
+        if complete_assessment(page, profile):
+            done["ok"] = True
+            return (
+                "The Take Assessment questionnaire has been completed in another tab. "
+                "Click Save and Continue."
+            )
+        return None
+
+    return step
