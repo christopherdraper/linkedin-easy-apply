@@ -1633,6 +1633,24 @@ class TestAtsRequisitionDedup:
         with patch("jobapply.applog.load_log", return_value=log):
             assert _duplicate_ats_application(self.WD.replace("Eng_JR1", "Eng_JR9")) is None
 
+    GH = "https://job-boards.greenhouse.io/embed/job_app"
+
+    def test_greenhouse_embed_jobs_do_not_collide(self):
+        # 2026-10-03: query stripping made every embed URL one key.
+        gemini = f"{self.GH}?for=gemini&token=8099895&gh_jid=8099895&gh_src=x"
+        other = f"{self.GH}?for=voxel51&token=4400001"
+        assert _canonical_ats_key(gemini) != _canonical_ats_key(other)
+        # Tracking params still ignored for the same job.
+        assert _canonical_ats_key(gemini) == _canonical_ats_key(
+            f"{self.GH}?gh_jid=8099895&token=8099895&for=gemini"
+        )
+
+    def test_embed_url_without_a_job_id_is_not_deduped(self):
+        assert _canonical_ats_key(f"{self.GH}?for=voxel51&validityToken=abc") == ""
+        log = [{"status": "submitted", "ats_url": f"{self.GH}?for=x&validityToken=1"}]
+        with patch("jobapply.applog.load_log", return_value=log):
+            assert _duplicate_ats_application(f"{self.GH}?for=y&validityToken=2") is None
+
     def test_unattempted_status_does_not_block(self):
         log = [{"status": "dry_run", "ats_url": self.WD}]
         with patch("jobapply.applog.load_log", return_value=log):

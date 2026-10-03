@@ -2410,15 +2410,33 @@ def _navigate_external_form(  # noqa: C901
     return f"failed: exceeded max form steps ({_MAX_EXTERNAL_STEPS})"
 
 
+# Query parameters that name the job on ATS URLs whose path does not (e.g.
+# Greenhouse's /embed/job_app?for=<board>&token=<job id>).
+_ATS_JOB_ID_PARAMS = ("for", "gh_jid", "token", "jobid", "job_id", "id", "reqid", "requisitionid")
+# Generic form endpoints: the path is the same for every job on the ATS.
+_GENERIC_ATS_PATH_RE = re.compile(r"/embed/job_app$")
+
+
 def _canonical_ats_key(url: str) -> str:
-    """Reduce an ATS URL to the requisition it identifies.
+    """Reduce an ATS URL to the requisition it identifies, or "" if it can't.
 
     Strips query/fragment and any /apply... sub-path, so a posting page and its
-    application page collapse to one key.
+    application page collapse to one key. Job-identifying query parameters are
+    kept: stripping them made every Greenhouse embed URL the same key, so one
+    application blocked every other Greenhouse embed job as a duplicate
+    (Gemini, Blue River, 2026-10-03). A generic endpoint with no job id (an
+    embed URL carrying only a per-session validityToken) gets no key.
     """
-    base = re.sub(r"\?.*$", "", url or "").split("#")[0].rstrip("/")
-    base = re.sub(r"/apply(/.*)?$", "", base)
-    return base.lower()
+    raw = (url or "").split("#")[0]
+    base = re.sub(r"\?.*$", "", raw).rstrip("/")
+    base = re.sub(r"/apply(/.*)?$", "", base).lower()
+    query = parse_qs(urlparse(raw).query)
+    ids = sorted(
+        f"{k.lower()}={v[0]}" for k, v in query.items() if k.lower() in _ATS_JOB_ID_PARAMS and v
+    )
+    if _GENERIC_ATS_PATH_RE.search(base) and not any(not i.startswith("for=") for i in ids):
+        return ""
+    return f"{base}?{'&'.join(ids)}" if ids else base
 
 
 def _duplicate_ats_application(ats_url: str) -> Optional[str]:
