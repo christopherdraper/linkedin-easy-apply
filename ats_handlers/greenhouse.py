@@ -4,6 +4,8 @@ Greenhouse quirks handled here:
 - Email verification codes sent after form submission or mid-form
 - Security code input fields (various selector strategies)
 - Post-verification page transition polling
+- Education "School" picker: a searchable select that lists only the first
+  few hundred schools alphabetically, so the school must be typed to appear
 """
 
 import logging
@@ -53,7 +55,49 @@ class GreenhouseHandler(BaseATSHandler):
         selector ends up clicking, putting the loop into a no-op spin.
         """
         self._dismiss_cookie_banner(page)
+        profile = ctx.get("profile") if isinstance(ctx, dict) else None
+        if profile is not None:
+            self._fill_schools(page, profile)
         return None
+
+    @staticmethod
+    def _fill_schools(page, profile) -> int:
+        """Pick the applicant's school in each empty School* select.
+
+        The option list starts at "Aalborg University"; Ball State is never in
+        the visible slice, so the AI answered in prose and the required field
+        stayed empty until the step budget ran out (Voxel51, TailorCare,
+        2026-10-03). Typing the name filters the list to the real option.
+        """
+        school = getattr(profile, "education_university", None)
+        if not school:
+            return 0
+        filled = 0
+        for inp in page.query_selector_all("input[id^='school--']"):
+            try:
+                chosen = inp.evaluate(
+                    """el => { const c = el.closest('.select__control') || el.parentElement;
+                        return !!c.querySelector('.select__single-value'); }"""
+                )
+                if chosen or not inp.is_visible():
+                    continue
+                inp.click()
+                inp.type(school, delay=50)
+                options = f"#react-select-{inp.get_attribute('id')}-listbox [role='option']"
+                page.wait_for_selector(options, timeout=6000)
+                want = school.strip().lower()
+                for opt in page.query_selector_all(options):
+                    if opt.inner_text().strip().lower() == want:
+                        opt.click()
+                        filled += 1
+                        log.info("   Greenhouse: school -> %s", school)
+                        break
+                else:
+                    page.keyboard.press("Escape")
+                    log.info("   Greenhouse: %r not in the school list", school)
+            except Exception as e:  # noqa: BLE001
+                log.debug("Greenhouse school fill failed: %s", e)
+        return filled
 
     def handle_verification_code(self, page, ctx: dict) -> Optional[str]:  # noqa: C901
         """Handle Greenhouse email verification code flow.

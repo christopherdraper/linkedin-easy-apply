@@ -670,11 +670,17 @@ def _answer_div_custom_selects(page, profile: ApplicantProfile) -> int:
             "[aria-haspopup='listbox']:not([role='combobox']), "
             "[class*='select__control'], "
             "[class*='SelectControl'], "
-            "[data-testid*='select']"
+            "[data-testid*='select']:not([data-testid*='clear'])"
         )
         for cs in custom_selects:
             try:
                 if not cs.is_visible():
+                    continue
+                # React-select's "Clear selections" x carries
+                # data-testid="clear-selection"; clicking it as if it were a
+                # select wiped the value just chosen (Greenhouse School*,
+                # Voxel51, 2026-10-03).
+                if str(cs.get_attribute("aria-label") or "").lower().startswith("clear"):
                     continue
                 # Check if already has a selected value (no placeholder visible)
                 has_value = cs.evaluate("""el => {
