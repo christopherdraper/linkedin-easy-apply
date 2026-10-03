@@ -751,11 +751,80 @@ def _is_trap_field(element, label_text: str = "") -> bool:
         return False
 
 
+EDUCATION_DATES_SKIP_STATUS = "skipped: requires education dates"
+
+# Finds education date fields (Greenhouse "Start date month*" under
+# "Education", "Graduation year", ...). Job-availability fields such as
+# "Earliest start date" are not in an education context and are left alone.
+# Optional ones are marked so every filler skips them; required ones are
+# returned so the application can be skipped.
+_EDUCATION_DATE_FIELDS_JS = """() => {
+  const DATE = /\\b(start|end|from|to|graduation|completion)\\b[^\\n]{0,12}\\b(date|month|year)\\b|\\bgraduat(ion|ed)\\b[^\\n]{0,15}\\b(date|month|year)\\b|\\byear (of )?graduation\\b/i;
+  const labelOf = (el) => {
+    const byFor = el.id && document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+    if (byFor) return byFor.innerText;
+    const by = el.getAttribute('aria-labelledby');
+    const ref = by && document.getElementById(by.split(' ')[0]);
+    if (ref) return ref.innerText;
+    return el.getAttribute('aria-label') || '';
+  };
+  const inEducation = (el) => {
+    let n = el;
+    for (let i = 0; i < 10 && n; i++, n = n.parentElement) {
+      if (/education/i.test(n.id || '')) return true;
+      const head = n.querySelector && n.querySelector(':scope > legend, :scope > h2, :scope > h3, :scope > h4');
+      if (head && /education/i.test(head.innerText)) return true;
+    }
+    return false;
+  };
+  const required = [];
+  for (const el of document.querySelectorAll('input, select, textarea, [role="combobox"]')) {
+    if (el.type === 'hidden' || el.type === 'file') continue;
+    const label = (labelOf(el) || '').trim();
+    if (!DATE.test(label)) continue;
+    if (!/graduat/i.test(label) && !inEducation(el)) continue;
+    const isRequired = el.required || el.getAttribute('aria-required') === 'true'
+      || /\\*\\s*$/.test(label);
+    if (isRequired) required.push(label);
+    else el.setAttribute('data-jobapply-skip', 'education-date');
+  }
+  return required;
+}"""
+
+
+def _enforce_education_date_policy(page, profile) -> None:
+    """Skip the application if it requires education dates the applicant withheld.
+
+    The applicant removed graduation dates on purpose; the AI then guessed
+    months ("June", "December") for required date fields (TailorCare,
+    2026-10-03). With no dates in the profile, optional date fields are left
+    blank and a required one ends the application as a flagged skip.
+    """
+    if getattr(profile, "education_year", None):
+        return
+    try:
+        required = page.evaluate(_EDUCATION_DATE_FIELDS_JS) or []
+    except Exception as exc:
+        log.debug("Education date scan failed: %s", exc)
+        return
+    if required:
+        from jobapply.safety import ApplicantPolicySkip
+
+        log.info("   ⏭  Form requires education dates (%s); skipping", required[0][:40])
+        raise ApplicantPolicySkip(EDUCATION_DATES_SKIP_STATUS)
+
+
 def _get_field_label(page, element) -> str:
     """Get the label text for a form field element.
 
-    Returns "" for spam-trap fields, which every caller then skips.
+    Returns "" for spam-trap fields and fields marked data-jobapply-skip,
+    which every caller then skips.
     """
+    try:
+        if element.get_attribute("data-jobapply-skip") == "education-date":
+            return ""
+    except Exception:  # noqa: S110
+        pass
     # Try multiple strategies to find the label text
     label_text = element.evaluate("""el => {
         // Use getRootNode() to pierce Shadow DOM when looking up labels

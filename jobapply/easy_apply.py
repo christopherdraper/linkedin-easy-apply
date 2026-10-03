@@ -20,12 +20,13 @@ from jobapply.forms import (
     _answer_screening_questions,
     _dismiss_all_typeaheads,
     _dump_form_debug,
+    _enforce_education_date_policy,
     _fill_empty_required_fields,
     _get_validation_errors,
     _safe_click,
 )
 from jobapply.profile import ApplicantProfile
-from jobapply.safety import ApplicationAbortError
+from jobapply.safety import ApplicantPolicySkip, ApplicationAbortError
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +137,7 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
             return "failed: lost track of form steps"
 
         # Fill screening questions on EVERY page (new fields appear after each Next)
+        _enforce_education_date_policy(page, profile)
         _answer_screening_questions(page, profile)
         _fill_location_typeaheads(page, profile)
 
@@ -297,10 +299,13 @@ def submit_easy_apply(job: Dict, profile: ApplicantProfile, proxy: Optional[str]
             if resume_input:
                 resume_input.set_input_files(resume_path)
 
+            _enforce_education_date_policy(page, profile)
             _answer_screening_questions(page, profile)
             return _navigate_form(page, profile, owns_browser, context, job_id=job.get("id", ""))
 
         except ApplicationAbortError as e:
+            if isinstance(e, ApplicantPolicySkip):
+                return e.status
             log.warning(f"   🛡️  Application aborted: {e}")
             return f"aborted: {e}"
         except LinkedInBlockedError:

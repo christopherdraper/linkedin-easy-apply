@@ -66,6 +66,17 @@ class ApplicationAbortError(Exception):
     pass
 
 
+class ApplicantPolicySkip(ApplicationAbortError):
+    """The form needs something the applicant chose not to give (e.g. education
+    dates). Ends the application as a *skip*, not a failure, so it is neither
+    retried nor debugged, and stays visible for a manual exception.
+    """
+
+    def __init__(self, status: str):
+        super().__init__(status)
+        self.status = status
+
+
 def _looks_like_injection(text: str) -> bool:
     """Return True if text contains patterns that look like prompt injection."""
     lower = text.lower()

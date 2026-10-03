@@ -30,6 +30,7 @@ from jobapply.forms import (
     _best_option_match,
     _check_mandatory_checkboxes,
     _dump_form_debug,
+    _enforce_education_date_policy,
     _fill_input_field,
     _get_field_label,
     _safe_click,
@@ -46,7 +47,7 @@ from jobapply.pages import (
     _wait_and_dismiss_cookies,
 )
 from jobapply.profile import ApplicantProfile
-from jobapply.safety import ApplicationAbortError, _check_field_label
+from jobapply.safety import ApplicantPolicySkip, ApplicationAbortError, _check_field_label
 
 log = logging.getLogger(__name__)
 
@@ -1839,6 +1840,7 @@ def _run_form_fill_phase(
     Returns (status, fields_filled_total, zero_fill_steps, stalled): status is
     a final status string when the form is not progressing, or None to proceed.
     """
+    _enforce_education_date_policy(page, profile)
     # Handle file uploads
     if classification.get("has_file_upload"):
         n = _handle_file_uploads(page, profile, cover_letter_path, uploaded_files)
@@ -2680,6 +2682,8 @@ def submit_external_apply(  # noqa: C901
             )
 
         except ApplicationAbortError as e:
+            if isinstance(e, ApplicantPolicySkip):
+                return e.status
             log.warning(f"   🛡️  Application aborted: {e}")
             return f"aborted: {e}"
         except LinkedInBlockedError:

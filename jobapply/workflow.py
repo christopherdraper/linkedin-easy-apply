@@ -103,6 +103,8 @@ def _submit_one(
         icon = (
             "✅"
             if status == "submitted"
+            else "⏭ "
+            if status.startswith("skipped")
             else "🛡️ "
             if status.startswith("aborted")
             else "⚠️ "
@@ -125,6 +127,8 @@ def _submit_one(
             if status == "submitted"
             else "🔒"
             if "requires account" in status
+            else "⏭ "
+            if status.startswith("skipped")
             else "🛡️ "
             if status.startswith("aborted")
             else "⚠️ "

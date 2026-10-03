@@ -130,6 +130,8 @@ def _build_status_counts(entries):
             counts["Submitted"] += 1
         elif status.startswith("aborted"):
             counts["Aborted"] += 1
+        elif status.startswith("skipped"):
+            counts["Skipped"] += 1
         elif status.startswith("failed"):
             counts["Failed"] += 1
         elif status == "dry_run":

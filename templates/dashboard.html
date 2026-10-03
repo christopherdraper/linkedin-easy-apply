@@ -220,6 +220,7 @@
         .badge-failed    { background: rgba(248, 113, 113, 0.15); color: var(--red); }
         .badge-aborted   { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
         .badge-dryrun    { background: rgba(167, 139, 250, 0.15); color: var(--purple); }
+        .badge-skipped   { background: rgba(96, 165, 250, 0.15); color: var(--blue, #60a5fa); }
         .badge-other     { background: rgba(139, 143, 163, 0.15); color: var(--text-muted); }
 
         .score-bar {
@@ -649,6 +650,8 @@
                         <span class="badge badge-submitted">Submitted</span>
                     {% elif st.startswith('aborted') %}
                         <span class="badge badge-aborted">Aborted</span>
+                    {% elif st.startswith('skipped') %}
+                        <span class="badge badge-skipped" title="{{ st }}">Skipped: {{ st[9:]|replace('requires ', '') }}</span>
                     {% elif st.startswith('failed') %}
                         <span class="badge badge-failed">Failed</span>
                     {% elif st == 'dry_run' %}
