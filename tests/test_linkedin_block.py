@@ -191,3 +191,98 @@ class TestWatchdog:
         with patch("jobapply.watchdog.faulthandler") as m_fh:
             watchdog.pet()
         m_fh.dump_traceback_later.assert_not_called()
+
+
+class TestLoginOutcomes:
+    """Sign-in paths found live on 2026-10-03 while restoring a session."""
+
+    def _page(self, url):
+        from unittest.mock import MagicMock
+
+        page = MagicMock()
+        page.url = url
+        page.evaluate.return_value = ""
+        return page
+
+    def test_live_session_redirecting_to_feed_counts_as_signed_in(self, monkeypatch):
+        import jobapply.browser as br
+
+        monkeypatch.setattr(br, "_load_credentials", lambda: {"email": "e@x.com", "password": "pw"})
+        page = self._page("https://www.linkedin.com/feed/")
+        assert br._login_linkedin(page) is True
+        page.query_selector_all.assert_not_called()
+
+    def test_non_pin_checkpoint_is_not_attempted(self, monkeypatch):
+        import jobapply.browser as br
+
+        monkeypatch.setattr(br, "_first_visible", lambda page, sel: None)
+        codes = []
+        monkeypatch.setattr(br, "_linkedin_pin_codes", lambda: iter(codes))
+        page = self._page("https://www.linkedin.com/checkpoint/challenge/abc")
+        assert br._complete_linkedin_pin_challenge(page) is False
+
+    def test_pin_challenge_uses_gmail_code(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import jobapply.browser as br
+
+        pin = MagicMock()
+        page = self._page("https://www.linkedin.com/checkpoint/challenge/abc")
+
+        def submit():
+            page.url = "https://www.linkedin.com/feed/"
+
+        button = MagicMock()
+        button.click.side_effect = submit
+        monkeypatch.setattr(
+            br, "_first_visible", lambda pg, sel: pin if sel == br._PIN_INPUT_SELECTOR else button
+        )
+        monkeypatch.setattr(
+            br, "_gmail_code_source", lambda: {"email": "e@x.com", "app_password": "x"}
+        )
+        monkeypatch.setattr(
+            "jobapply.accounts._fetch_verification_code_from_gmail", lambda *a, **k: "123456"
+        )
+        assert br._complete_linkedin_pin_challenge(page) is True
+        pin.fill.assert_called_once_with("123456")
+
+    def test_no_terminal_and_no_gmail_never_calls_input(self, monkeypatch):
+        import builtins
+
+        import jobapply.browser as br
+
+        monkeypatch.setattr(br, "_gmail_code_source", lambda: None)
+        monkeypatch.setattr(br.sys.stdin, "isatty", lambda: False, raising=False)
+        monkeypatch.setattr(builtins, "input", lambda *a: (_ for _ in ()).throw(AssertionError))
+        assert list(br._linkedin_pin_codes()) == []
+
+    def test_failed_login_on_checkpoint_records_block(self, monkeypatch):
+        import pytest
+
+        import jobapply.browser as br
+
+        page = self._page("https://www.linkedin.com/authwall?x=1")
+
+        def login(pg):
+            pg.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+            return False
+
+        monkeypatch.setattr(br, "_login_linkedin", login)
+        with pytest.raises(br.LinkedInBlockedError):
+            br._ensure_logged_in(page, "https://www.linkedin.com/jobs/")
+        assert br._linkedin_block_active()
+
+
+class TestCdpUrlOverride:
+    def test_env_points_tenant_at_its_own_browser(self, monkeypatch):
+        import importlib
+
+        import jobapply.config as cfg
+
+        monkeypatch.setenv("JOBAPPLY_CDP_URL", "http://localhost:9223")
+        try:
+            assert importlib.reload(cfg).CDP_URL == "http://localhost:9223"
+        finally:
+            monkeypatch.delenv("JOBAPPLY_CDP_URL")
+            importlib.reload(cfg)
+        assert cfg.CDP_URL == "http://localhost:9222"

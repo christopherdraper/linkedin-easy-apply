@@ -149,6 +149,7 @@ The only required environment variable is the Anthropic key. Everything else liv
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `ANTHROPIC_API_KEY` | yes | AI scoring, form fills, cover letters |
+| `JOBAPPLY_CDP_URL` | no | Automation Chrome to attach to. Defaults to `http://localhost:9222`. When two people run the bot on one server, give each their own Chrome on its own port so one person's runs never use the other's LinkedIn session. |
 
 ```bash
 echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> ~/.bashrc
@@ -161,7 +162,7 @@ These live in `profile.json` under `application_settings`, not as env vars.
 
 | Field | Required for | How to get it |
 |-------|-------------|---------------|
-| `gmail_app_password` | Greenhouse and PageUp email verification codes, **and account creation** | Google Account, Security, 2-Step Verification, App Passwords. Generate one for "Mail". 16 characters, no spaces. Only works if your profile `email` is a Gmail address with IMAP on. |
+| `gmail_app_password` | Greenhouse and PageUp email verification codes, LinkedIn's emailed sign-in code, **and account creation** | Google Account, Security, 2-Step Verification, App Passwords. Generate one for "Mail". 16 characters, no spaces. Only works if your profile `email` is a Gmail address with IMAP on. |
 | `captcha_api_key` | Lever (hCaptcha), Eightfold (reCAPTCHA), some Workdays — **at apply time only, not account creation** | Sign up at 2captcha.com or capsolver.com. Add credits. |
 | `captcha_service` | as above | `"2captcha"` or `"capsolver"`. Defaults to `2captcha`. |
 | `proxy_rules` | SmartRecruiters (Incapsula WAF). Optional everywhere else. | Dict of `domain: socks5://host:port`. Example: `{"smartrecruiters.com": "socks5://127.0.0.1:1080"}`. |

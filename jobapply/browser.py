@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import re
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from jobapply.config import (
     CDP_URL,
     CREDENTIALS_FILE,
+    DATA_DIR,
     LINKEDIN_BLOCK_COOLDOWN_H,
     LINKEDIN_BLOCK_FILE,
     SESSION_FILE,
@@ -89,6 +91,90 @@ def _first_visible(page, selector: str):
     return None
 
 
+_PIN_INPUT_SELECTOR = (
+    "input#input__email_verification_pin, input#input__phone_verification_pin, "
+    "input[name='pin'], input[autocomplete='one-time-code']"
+)
+
+
+def _signed_in_url(url: str) -> bool:
+    """True when *url* is a page LinkedIn only serves to a signed-in member."""
+    return "/feed" in url or "/jobs" in url
+
+
+def _gmail_code_source() -> Optional[Dict[str, str]]:
+    """Gmail address + app password for reading LinkedIn's emailed PIN, if set up."""
+    try:
+        from jobapply.profile import ApplicantProfile
+
+        profile = ApplicantProfile.from_dict(json.loads((DATA_DIR / "profile.json").read_text()))
+    except Exception:
+        return None
+    if profile.email and profile.gmail_app_password:
+        return {"email": profile.email, "app_password": profile.gmail_app_password}
+    return None
+
+
+def _linkedin_pin_codes():
+    """Yield verification codes: one from Gmail, else typed ones on a terminal.
+
+    A batch or timer run has no terminal; input() there either raised EOFError
+    or blocked forever, so the login now fails cleanly instead.
+    """
+    gmail = _gmail_code_source()
+    if gmail:
+        from jobapply.accounts import _fetch_verification_code_from_gmail
+
+        log.info("   📧 Reading LinkedIn's verification code from Gmail...")
+        code = _fetch_verification_code_from_gmail(
+            gmail["email"], gmail["app_password"], max_wait=90
+        )
+        if code:
+            yield code
+        return
+    if not sys.stdin.isatty():
+        log.error("   ❌ No Gmail app password and no terminal to type the code into")
+        return
+    for _ in range(3):
+        code = input("   Enter verification code (or 'skip' to abort): ").strip()
+        if code.lower() == "skip":
+            return
+        yield code
+
+
+def _complete_linkedin_pin_challenge(page) -> bool:
+    """Finish an emailed/texted PIN challenge after sign-in. Returns True on success.
+
+    Only the PIN form is handled. Any other checkpoint (captcha, identity or
+    restriction check) is left for the account owner: automating those is
+    what gets an account restricted.
+    """
+    if not _first_visible(page, _PIN_INPUT_SELECTOR):
+        log.error("❌ LinkedIn security check is not a PIN challenge; not attempting it")
+        return False
+    log.info("🔐 LinkedIn sent a verification code")
+    for code in _linkedin_pin_codes():
+        code_input = _first_visible(page, _PIN_INPUT_SELECTOR)
+        if not code_input:
+            break
+        code_input.fill(code)
+        verify_btn = _first_visible(
+            page,
+            "button#email-pin-submit-button, button[type='submit'], "
+            "button:has-text('Submit'), button:has-text('Verify')",
+        )
+        if verify_btn:
+            verify_btn.click()
+        else:
+            code_input.press("Enter")
+        page.wait_for_timeout(4000)
+        if _signed_in_url(page.url):
+            log.info("✅ Verification successful")
+            return True
+        log.warning("   ❌ Verification code was not accepted")
+    return False
+
+
 def _login_linkedin(page) -> bool:
     """
     Automate LinkedIn login using stored credentials.
@@ -107,6 +193,12 @@ def _login_linkedin(page) -> bool:
     if "login" not in current and "authwall" not in current:
         page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=15000)
         page.wait_for_timeout(2000)
+
+    # A live session makes /login redirect straight to the feed. Treating
+    # that as "no login form" reported a working session as a failed login.
+    if _signed_in_url(page.url):
+        log.info("✅ Already signed in")
+        return True
 
     # Fill login form. LinkedIn's 2026 login page uses React-generated ids
     # and no name attributes; autocomplete/type are the stable hooks. The
@@ -150,45 +242,12 @@ def _login_linkedin(page) -> bool:
 
     page.wait_for_timeout(4000)
 
-    # Check if we landed on the feed (success)
-    if "/feed" in page.url or "/jobs" in page.url:
+    if _signed_in_url(page.url):
         log.info("✅ Login successful")
         return True
 
-    # Check for verification challenge
     if "checkpoint" in page.url or "challenge" in page.url:
-        log.info("🔐 LinkedIn requires verification — check your email/phone for a code")
-        for attempt in range(3):
-            code = input("   Enter verification code (or 'skip' to abort): ").strip()
-            if code.lower() == "skip":
-                return False
-            code_input = page.query_selector(
-                "input#input__email_verification_pin, "
-                "input[name='pin'], "
-                "input#input__phone_verification_pin"
-            )
-            if code_input:
-                code_input.fill(code)
-                verify_btn = page.query_selector(
-                    "button#email-pin-submit-button, "
-                    "button[type='submit'], "
-                    "button:has-text('Submit'), "
-                    "button:has-text('Verify')"
-                )
-                if verify_btn:
-                    verify_btn.click()
-                else:
-                    code_input.press("Enter")
-                page.wait_for_timeout(3000)
-
-                if "/feed" in page.url or "/jobs" in page.url:
-                    log.info("✅ Verification successful")
-                    return True
-                log.warning(f"   ❌ Verification failed (attempt {attempt + 1}/3)")
-            else:
-                log.error("   ❌ Could not find verification code input field")
-                return False
-        return False
+        return _complete_linkedin_pin_challenge(page)
 
     # Check for wrong password
     error_el = page.query_selector(
@@ -383,6 +442,9 @@ def _ensure_logged_in(page, target_url: str) -> None:
     if "authwall" not in page.url and "uas/login" not in page.url:
         return
     if not _login_linkedin(page):
+        # A login that ends on a security check is a block, not an expiry:
+        # record it so the batch stops instead of retrying the login.
+        _assert_linkedin_not_blocked(page)
         raise RuntimeError(f"LinkedIn session expired. Redirected to: {page.url}")
     # Re-navigate to the intended page after login
     page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
