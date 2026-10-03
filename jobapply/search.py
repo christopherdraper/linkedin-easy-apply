@@ -916,6 +916,117 @@ def search_linkedin(
     return jobs
 
 
+# Exact result counts from LinkedIn's own job-search API (the endpoint its
+# jobs page calls). The 2026 AI-search results page shows only "99+ results",
+# so page scraping can no longer read a count. Called from a linkedin.com page
+# so the session cookies and CSRF token apply. Omitting a location searches
+# the member's country, as a keyword-only jobs URL does.
+_VOYAGER_JOB_COUNT_JS = """async ({keywords, remote, tpr}) => {
+  const csrf = (document.cookie.match(/JSESSIONID="?([^";]+)/) || [])[1] || '';
+  const kw = encodeURIComponent(keywords).replace(/\\(/g, '%28').replace(/\\)/g, '%29');
+  const filters = [];
+  if (remote) filters.push('workplaceType:List(2)');
+  if (tpr) filters.push('timePostedRange:List(' + tpr + ')');
+  const url = '/voyager/api/voyagerJobsDashJobCards'
+    + '?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollection-220'
+    + '&count=1&q=jobSearch&start=0&query=(origin:JOB_SEARCH_PAGE_JOB_FILTER,keywords:' + kw
+    + ',selectedFilters:(' + filters.join(',') + '),spellCorrectionEnabled:true)';
+  const r = await fetch(url, {headers: {
+    'csrf-token': csrf,
+    'accept': 'application/vnd.linkedin.normalized+json+2.1',
+    'x-restli-protocol-version': '2.0.0',
+  }});
+  let total = null;
+  try { total = (await r.json()).data.paging.total; } catch (e) {}
+  return {status: r.status, total};
+}"""
+
+
+def _voyager_job_count(page, keywords: str, remote: bool, tpr: Optional[str] = None):
+    """Exact LinkedIn job count for *keywords*, or None if the API did not answer."""
+    try:
+        res = page.evaluate(
+            _VOYAGER_JOB_COUNT_JS, {"keywords": keywords, "remote": remote, "tpr": tpr}
+        )
+    except Exception as exc:
+        log.warning("   Job count API call failed: %s", exc)
+        return None
+    if res.get("status") != 200 or not isinstance(res.get("total"), int):
+        log.warning("   Job count API returned status %s", res.get("status"))
+        return None
+    return res["total"]
+
+
+def _api_counts(pg, title_kw: str, remote: bool):
+    """(total, past week, past day) counts from the job-search API."""
+    if "linkedin.com" not in (pg.url or ""):
+        pg.goto("https://www.linkedin.com/jobs/", wait_until="domcontentloaded", timeout=30000)
+        _ensure_logged_in(pg, "https://www.linkedin.com/jobs/")
+    counts: List[Optional[int]] = []
+    for tpr in (None, "r604800", "r86400"):
+        if counts:
+            pg.wait_for_timeout(int(random.uniform(0.8, 2.0) * 1000))
+        counts.append(_voyager_job_count(pg, title_kw, remote, tpr))
+    return tuple(counts)
+
+
+def _logged_api_counts(pg, title_kw: str, remote: bool):
+    """API counts for one snapshot title, logged; None if the API gave nothing."""
+    total_count, week_count, day_count = _api_counts(pg, title_kw, remote)
+    if (total_count, week_count, day_count) == (None, None, None):
+        log.warning("   Job count API gave nothing; reading the results pages")
+        return None
+    log.info(f"   Total results: {total_count or 'unknown'}")
+    log.info(f"   Past week:     {week_count or 'unknown'}")
+    log.info(f"   Past 24 hours: {day_count or 'unknown'}")
+    return total_count, week_count, day_count
+
+
+def _title_counts(pg, title_kw: str, base_params: Dict[str, str], location, remote: bool):
+    """(total, past week, past day) for one snapshot title.
+
+    The API needs no location lookup; a location search still goes through
+    the results pages, as does any title the API does not answer.
+    """
+    if not location:
+        counts = _logged_api_counts(pg, title_kw, remote)
+        if counts:
+            return counts
+    return _scraped_counts(pg, base_params)
+
+
+def _scraped_counts(pg, base_params: Dict[str, str]):
+    """(total, past week, past day) counts read from three results pages."""
+    from urllib.parse import urlencode
+
+    # --- All-time count ---
+    url_all = f"https://www.linkedin.com/jobs/search/?{urlencode(base_params)}"
+    pg.goto(url_all, wait_until="domcontentloaded", timeout=30000)
+    _ensure_logged_in(pg, url_all)
+    pg.wait_for_timeout(3000)
+    total_count = _extract_results_count(pg)
+    log.info(f"   Total results: {total_count or 'unknown'}")
+
+    # --- Past 1 week count ---
+    week_params = {**base_params, "f_TPR": "r604800"}
+    url_week = f"https://www.linkedin.com/jobs/search/?{urlencode(week_params)}"
+    pg.goto(url_week, wait_until="domcontentloaded", timeout=30000)
+    _ensure_logged_in(pg, url_week)
+    pg.wait_for_timeout(3000)
+    week_count = _extract_results_count(pg)
+    log.info(f"   Past week:     {week_count or 'unknown'}")
+
+    # --- Past 24 hours count ---
+    day_params = {**base_params, "f_TPR": "r86400"}
+    url_day = f"https://www.linkedin.com/jobs/search/?{urlencode(day_params)}"
+    pg.goto(url_day, wait_until="domcontentloaded", timeout=30000)
+    _ensure_logged_in(pg, url_day)
+    pg.wait_for_timeout(3000)
+    day_count = _extract_results_count(pg)
+    log.info(f"   Past 24 hours: {day_count or 'unknown'}")
+    return total_count, week_count, day_count
+
+
 def _extract_results_count(page) -> Optional[int]:
     """Extract the total results count from a LinkedIn job search page."""
     # fmt: off
@@ -983,8 +1094,6 @@ def market_snapshot(
     except ImportError:
         raise RuntimeError("Run: pip install playwright && playwright install chromium") from None
 
-    from urllib.parse import urlencode
-
     snapshots = []
     now = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -998,33 +1107,7 @@ def market_snapshot(
 
         for attempt in range(2):
             try:
-                # --- All-time count ---
-                url_all = f"https://www.linkedin.com/jobs/search/?{urlencode(base_params)}"
-                pg.goto(url_all, wait_until="domcontentloaded", timeout=30000)
-                _ensure_logged_in(pg, url_all)
-                pg.wait_for_timeout(3000)
-                total_count = _extract_results_count(pg)
-                log.info(f"   Total results: {total_count or 'unknown'}")
-
-                # --- Past 1 week count ---
-                week_params = {**base_params, "f_TPR": "r604800"}
-                url_week = f"https://www.linkedin.com/jobs/search/?{urlencode(week_params)}"
-                pg.goto(url_week, wait_until="domcontentloaded", timeout=30000)
-                _ensure_logged_in(pg, url_week)
-                pg.wait_for_timeout(3000)
-                week_count = _extract_results_count(pg)
-                log.info(f"   Past week:     {week_count or 'unknown'}")
-
-                # --- Past 24 hours count ---
-                day_params = {**base_params, "f_TPR": "r86400"}
-                url_day = f"https://www.linkedin.com/jobs/search/?{urlencode(day_params)}"
-                pg.goto(url_day, wait_until="domcontentloaded", timeout=30000)
-                _ensure_logged_in(pg, url_day)
-                pg.wait_for_timeout(3000)
-                day_count = _extract_results_count(pg)
-                log.info(f"   Past 24 hours: {day_count or 'unknown'}")
-
-                return pg, total_count, week_count, day_count
+                return (pg, *_title_counts(pg, title_kw, base_params, location, remote))
             except TargetClosedError:
                 if attempt == 0:
                     log.warning("   Page closed by browser, opening fresh page and retrying...")

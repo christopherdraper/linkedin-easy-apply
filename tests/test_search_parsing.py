@@ -456,3 +456,48 @@ class TestMarketSnapshotFailureSignaling:
         assert result[0]["past_day_results"] == 10
         assert "returned no counts" not in caplog.text
         assert save_log.call_count == 1
+
+
+class TestMarketSnapshotApiCounts:
+    """The AI-search results page shows only "99+ results"; counts now come
+    from LinkedIn's job-search API (live-checked 2026-10-03)."""
+
+    def test_api_count_parsed_and_failures_are_none(self):
+        from jobapply.search import _voyager_job_count
+
+        page = MagicMock()
+        page.evaluate.return_value = {"status": 200, "total": 391}
+        assert _voyager_job_count(page, "SRE", True) == 391
+        page.evaluate.return_value = {"status": 401, "total": None}
+        assert _voyager_job_count(page, "SRE", True) is None
+        page.evaluate.side_effect = RuntimeError("detached")
+        assert _voyager_job_count(page, "SRE", True) is None
+
+    def test_snapshot_uses_api_counts_without_loading_result_pages(self):
+        page = MagicMock()
+        page.url = "https://www.linkedin.com/jobs/"
+        page.evaluate.side_effect = [{"status": 200, "total": t} for t in (391, 213, 96)]
+        with (
+            patch("jobapply.search._stealth_playwright"),
+            patch(
+                "jobapply.search._playwright_context",
+                return_value=(MagicMock(), MagicMock(), page, True),
+            ),
+            patch("jobapply.search._ensure_logged_in"),
+            patch("jobapply.search._save_session"),
+            patch("jobapply.search.save_search_log"),
+            patch("jobapply.search.time.sleep"),
+            patch("jobapply.search._extract_results_count") as scrape,
+        ):
+            snaps = market_snapshot(["Senior Site Reliability Engineer"])
+        assert (
+            snaps[0]["total_results"],
+            snaps[0]["past_week_results"],
+            snaps[0]["past_day_results"],
+        ) == (391, 213, 96)
+        scrape.assert_not_called()
+        page.goto.assert_not_called()
+        # Remote filter and the week / day windows are passed to the API call.
+        args = [c.args[1] for c in page.evaluate.call_args_list]
+        assert [a["tpr"] for a in args] == [None, "r604800", "r86400"]
+        assert all(a["remote"] for a in args)
