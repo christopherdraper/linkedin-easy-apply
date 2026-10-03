@@ -74,6 +74,51 @@ def _get_modal_text(page) -> str:
     return ""
 
 
+# LinkedIn's 2026 Easy Apply modal: captions are <p>, not <label>, and city
+# fields are a typeahead (data-testid="typeahead-input") whose suggestions are
+# role="option" items in a listbox. Typing a value without picking a
+# suggestion leaves the field "required" and Next never advances (Cribl,
+# 2026-10-03).
+_TYPEAHEAD_INPUT_SEL = "input[data-testid='typeahead-input']"
+_TYPEAHEAD_OPTION_SEL = "[data-testid='typeahead-results-container'] [role='option']"
+_TYPEAHEAD_CAPTION_JS = """el => {
+    const field = el.closest('[componentkey^="easyApplyFieldFocus"]');
+    const p = field && field.querySelector('p');
+    return p ? p.innerText.trim() : (el.getAttribute('placeholder') || '');
+}"""
+
+
+def _fill_location_typeaheads(page, profile: ApplicantProfile) -> int:
+    """Type the applicant's city into empty location typeaheads and pick a suggestion."""
+    if not profile.city:
+        return 0
+    modal = page.query_selector(_MODAL_SEL)
+    if not modal:
+        return 0
+    filled = 0
+    for inp in modal.query_selector_all(_TYPEAHEAD_INPUT_SEL):
+        try:
+            if not inp.is_visible() or (inp.input_value() or "").strip():
+                continue
+            caption = (inp.evaluate(_TYPEAHEAD_CAPTION_JS) or "").lower()
+            if not any(k in caption for k in ("city", "location")):
+                continue
+            inp.click()
+            inp.type(profile.city, delay=60)
+            page.wait_for_selector(_TYPEAHEAD_OPTION_SEL, timeout=6000)
+            options = page.query_selector_all(_TYPEAHEAD_OPTION_SEL)
+            # Prefer "<city>, <state>, ..." over metro areas like "Greater <city>".
+            want = f"{profile.city}, ".lower()
+            pick = next((o for o in options if o.inner_text().lower().startswith(want)), None)
+            (pick or options[0]).click()
+            page.wait_for_timeout(500)
+            log.info("   📍 Location typeahead '%s' -> %s", caption[:30], inp.input_value())
+            filled += 1
+        except Exception as exc:
+            log.debug("Location typeahead fill failed: %s", exc)
+    return filled
+
+
 def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> str:  # noqa: C901
     """Navigate through multi-step Easy Apply form. Returns status string."""
     max_steps = 15
@@ -92,6 +137,7 @@ def _navigate_form(page, profile, owns_browser, context, job_id: str = "") -> st
 
         # Fill screening questions on EVERY page (new fields appear after each Next)
         _answer_screening_questions(page, profile)
+        _fill_location_typeaheads(page, profile)
 
         # Scope button lookups to the modal: page-wide text selectors would also
         # match the "similar jobs" carousel's Next button and other page chrome.
