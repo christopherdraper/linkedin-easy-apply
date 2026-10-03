@@ -215,16 +215,13 @@ Rules:
                 browser.close()
 
 
-def _role_key(entry: dict) -> tuple:
-    """Identity of a work-history entry for merging: employer + title, case-folded."""
-    return (
-        (entry.get("employer") or "").strip().casefold(),
-        (entry.get("title") or "").strip().casefold(),
-    )
-
-
 def _apply_synced_profile(raw: dict, parsed: dict, profile_path: str) -> None:
-    """Merge AI-parsed LinkedIn data into the existing profile.json."""
+    """Merge AI-parsed LinkedIn data into the existing profile.json.
+
+    The LinkedIn profile is the source of truth: work history and education
+    are REPLACED, not merged. Roles or details removed from LinkedIn (for
+    example to trim an older career history) must drop out of applications.
+    """
     p = raw.setdefault("profile", raw)
     exp = p.setdefault("experience", {})
 
@@ -243,11 +240,6 @@ def _apply_synced_profile(raw: dict, parsed: dict, profile_path: str) -> None:
                 if job.get(key):
                     entry[key] = job[key]
             prev.append(entry)
-        # The profile page lists only the latest few roles ("Show all
-        # experiences" hides the rest), so a parse is a partial view: keep
-        # stored roles it did not show instead of deleting them.
-        shown = {_role_key(e) for e in prev}
-        prev += [e for e in exp.get("previous_employers", []) if _role_key(e) not in shown]
         exp["previous_employers"] = prev
         log.info(f"   ✅ Updated previous_employers: {len(prev)} entries")
 
@@ -266,10 +258,7 @@ def _apply_synced_profile(raw: dict, parsed: dict, profile_path: str) -> None:
 
     # Update education
     if parsed.get("education"):
-        # Fill and update fields; a value the page did not show (None, or a
-        # key it never renders such as a minor) keeps what is stored.
-        edu = p.setdefault("education", {})
-        edu.update({k: v for k, v in parsed["education"].items() if v not in (None, "", [])})
+        p["education"] = parsed["education"]
         log.info("   ✅ Updated education")
 
     # Professional summary (used for resume/cover-letter context)
