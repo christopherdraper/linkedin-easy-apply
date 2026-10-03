@@ -112,6 +112,7 @@ ats_handlers/
   smartrecruiters.py # /oneclick-ui/ navigation, DataDome anti-bot
   lever.py          # Ancestor-<label> fills, required-checkbox-pair fix, EEO selects, hidden hCaptcha token relay, /apply jump
   ashby.py          # Spam filter detection on page load + after submit
+  dover.py          # Label-less MUI fields by name, PDF-only resume, Turnstile wait, Thanks-card success
   paylocity.py      # Resume force-upload modal
   workable.py       # Cookie banner backdrop
 ```

@@ -21,9 +21,32 @@ def _detect_captcha(page) -> Optional[Dict[str, str]]:
     """Detect CAPTCHA on page. Returns dict with type/sitekey/url, or None."""
     try:
         info = page.evaluate(_DETECT_CAPTCHA_JS)
-        return info
     except Exception:
         return None
+    if info and info.get("type") == "turnstile" and not info.get("sitekey"):
+        info["sitekey"] = _turnstile_sitekey_from_frames(page)
+    return info
+
+
+# Turnstile challenge frames carry the sitekey in their path:
+# challenges.cloudflare.com/cdn-cgi/challenge-platform/.../turnstile/f/av0/rch/<id>/0x4AAA.../light/...
+_TURNSTILE_SITEKEY_RE = re.compile(r"/(0x[0-9A-Za-z_-]{16,})/")
+
+
+def _turnstile_sitekey_from_frames(page) -> str:
+    """Sitekey of a rendered Turnstile widget, read from its frame URL.
+
+    Page script cannot reach the frame (closed shadow root); Playwright can.
+    """
+    try:
+        for frame in page.frames:
+            if "challenges.cloudflare.com" in (frame.url or ""):
+                m = _TURNSTILE_SITEKEY_RE.search(frame.url)
+                if m:
+                    return m.group(1)
+    except Exception:  # noqa: S110
+        pass
+    return ""
 
 
 # A captcha widget only blocks the application if it belongs to it and is
@@ -65,7 +88,7 @@ _DETECT_CAPTCHA_JS = """() => {
             }
             // reCAPTCHA v2/v3/Enterprise
             const recapFrame = firstPresented('iframe[src*="recaptcha"]');
-            const recapDiv = firstPresented('.g-recaptcha, [data-sitekey]:not(.h-captcha)');
+            const recapDiv = firstPresented('.g-recaptcha, [data-sitekey]:not(.h-captcha):not(.cf-turnstile)');
             // The v3 badge is often styled hidden, so only require that it belongs.
             const recapBadge = [...document.querySelectorAll('.grecaptcha-badge')].find(belongs) || null;
             const isEnterprise = !!document.querySelector(
@@ -119,17 +142,20 @@ _DETECT_CAPTCHA_JS = """() => {
                 if (isEnterprise) type += '_enterprise';
                 return {type, sitekey};
             }
-            // Cloudflare Turnstile
-            const cfFrame = document.querySelector('iframe[src*="challenges.cloudflare"]');
-            const cfDiv = document.querySelector('.cf-turnstile, [data-turnstile-sitekey]');
-            const cfScript = document.querySelector(
-                'script[src*="challenges.cloudflare.com/turnstile"]'
-            );
+            // Cloudflare Turnstile. The api.js script alone is not a widget:
+            // Dover loads it with render=explicit and draws the challenge only
+            // at submit, so counting the script failed a plain form before a
+            // single field was filled (2026-10-03).
+            const cfFrame = firstPresented('iframe[src*="challenges.cloudflare"]');
+            const cfDiv = firstPresented('.cf-turnstile, [data-turnstile-sitekey]');
             // Also detect rendered Turnstile widget (dynamically created, no static class)
-            const cfWidget = document.querySelector(
-                '[id*="turnstile"], [class*="turnstile"]'
-            );
-            if (cfFrame || cfDiv || cfScript || cfWidget) {
+            const cfWidget = firstPresented('[id*="turnstile"], [class*="turnstile"]');
+            // An explicit-render widget draws its iframe in a closed shadow root,
+            // invisible to querySelector; its response input sits beside it.
+            const cfInput = [...document.querySelectorAll('input[name="cf-turnstile-response"]')]
+                .find((el) => !el.value && el.parentElement && belongs(el)
+                    && shown(el.parentElement)) || null;
+            if (cfFrame || cfDiv || cfWidget || cfInput) {
                 let sitekey = '';
                 if (cfDiv) sitekey = cfDiv.getAttribute('data-sitekey')
                     || cfDiv.getAttribute('data-turnstile-sitekey') || '';
@@ -370,6 +396,30 @@ CAPTCHA_CALLBACK_HOOK_JS = """(() => {
             set(v) { current = wrap(v); },
         });
     } catch (e) {}
+    // Turnstile with render=explicit (Dover) hands its callback to
+    // turnstile.render too; without it a solved token never reaches the app.
+    // Not a window accessor like hcaptcha above: Turnstile's api.js sees a
+    // predefined window.turnstile and never initialises. Wrap it once it
+    // appears instead, polling fast enough to beat the app's render call.
+    window.__jaTurnstileCallbacks = [];
+    const wrapTs = () => {
+        const ts = window.turnstile;
+        if (!ts || ts.__jaWrapped || typeof ts.render !== 'function') return false;
+        const render = ts.render.bind(ts);
+        ts.render = function (container, params) {
+            const cb = params && params.callback;
+            if (typeof cb === 'function') window.__jaTurnstileCallbacks.push(cb);
+            else if (typeof cb === 'string') window.__jaTurnstileCallbacks.push((t) => window[cb](t));
+            return render(container, params);
+        };
+        ts.__jaWrapped = true;
+        return true;
+    };
+    const tsTimer = setInterval(() => { if (wrapTs()) clearInterval(tsTimer); }, 5);
+    setTimeout(() => clearInterval(tsTimer), 120000);
+    document.addEventListener('load', (e) => {
+        if (e.target && e.target.tagName === 'SCRIPT') wrapTs();
+    }, true);
 })();"""
 
 
@@ -454,6 +504,9 @@ def _inject_captcha_token(page, ctype: str, token: str) -> bool:
                         const cb = w.getAttribute('data-callback');
                         if (cb && typeof window[cb] === 'function') window[cb](token);
                     });
+                }
+                for (const cb of (window.__jaTurnstileCallbacks || [])) {
+                    try { cb(token); } catch (e) {}
                 }
             }""",
                 token,

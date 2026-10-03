@@ -2033,6 +2033,28 @@ def _goto_resilient(page, url: str, *, timeout: int, attempts: int = 3, backoff_
             page.wait_for_timeout(backoff_ms * attempt)
 
 
+# Since 2026-10 an external Apply on LinkedIn can open a "Share your profile?"
+# <dialog> instead of the employer's site. Its Continue link is the real
+# /safety/go/ apply link.
+_SHARE_PROFILE_CONTINUE = "dialog a[href*='/safety/go/']:visible"
+
+
+def _continue_share_profile_prompt(page) -> str:
+    """Click Continue on LinkedIn's share-profile prompt; return the ATS URL or "".
+
+    Clicking (rather than only following the href) keeps the applicant's
+    share-profile choice; the URL is returned in case no new tab appears.
+    """
+    link = page.query_selector(_SHARE_PROFILE_CONTINUE)
+    if not link:
+        return ""
+    url = _resolve_linkedin_apply_href(link.get_attribute("href") or "")
+    log.info("   🔗 LinkedIn share-profile prompt: continuing to the employer's site")
+    _safe_click(link, page)
+    page.wait_for_timeout(3000)
+    return url
+
+
 def _resolve_linkedin_apply_href(href: str) -> str:
     """Turn a LinkedIn "Apply on company website" href into the real ATS URL.
 
@@ -2535,6 +2557,7 @@ def submit_external_apply(  # noqa: C901
                     known = set(context.pages)
                     _safe_click(apply_btn, page)
                     page.wait_for_timeout(3000)
+                    share_url = _continue_share_profile_prompt(page)
 
                     # Handle new tab (external URLs often open in new tab).
                     # Pick the page that actually appeared, not pages[-1]:
@@ -2555,6 +2578,16 @@ def submit_external_apply(  # noqa: C901
                             page.wait_for_load_state("domcontentloaded", timeout=15000)
                         except Exception:  # noqa: BLE001, S110
                             pass
+                    elif share_url:
+                        _goto_resilient(page, share_url, timeout=30000)
+                        page.wait_for_timeout(2000)
+
+                # Still on LinkedIn means Apply led nowhere. The form loop would
+                # otherwise "fill" LinkedIn's own page (its search box) for 20
+                # steps, as happened on 2026-10-03.
+                if urlparse(page.url).netloc.endswith("linkedin.com"):
+                    _dump_form_debug(page, job.get("id", ""), "Apply stayed on LinkedIn")
+                    return "failed: Apply button did not leave LinkedIn"
 
             # Wait for JS rendering and dismiss cookie banners
             _wait_and_dismiss_cookies(page)

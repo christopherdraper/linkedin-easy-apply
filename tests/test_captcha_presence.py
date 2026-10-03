@@ -47,6 +47,34 @@ class TestCaptchaPresence:
         )
         assert _detect_captcha(browser_page) is None
 
+    def test_turnstile_script_without_widget_is_not_a_blocker(self, browser_page):
+        # Dover (2026-10-03): api.js?render=explicit loaded, widget drawn only at submit.
+        browser_page.set_content(
+            APPLICATION_FORM
+            + '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit">'
+            "</script>"
+        )
+        assert _detect_captcha(browser_page) is None
+
+    def test_visible_turnstile_widget_is_detected(self, browser_page):
+        browser_page.set_content(
+            APPLICATION_FORM
+            + '<div class="cf-turnstile" data-sitekey="0xAAAA" style="width:300px;height:65px"></div>'
+        )
+        assert _detect_captcha(browser_page) == {"type": "turnstile", "sitekey": "0xAAAA"}
+
+    def test_shadow_rendered_turnstile_found_by_its_response_input(self, browser_page):
+        # Dover: the iframe sits in a closed shadow root; only the input is visible to JS.
+        widget = (
+            '<div style="width:300px;height:65px"><div></div>'
+            '<input type="hidden" name="cf-turnstile-response" value="{}"></div>'
+        )
+        browser_page.set_content(APPLICATION_FORM + widget.format(""))
+        assert (_detect_captcha(browser_page) or {}).get("type") == "turnstile"
+        # Already solved: not reported again, so it is not paid for twice.
+        browser_page.set_content(APPLICATION_FORM + widget.format("tok"))
+        assert _detect_captcha(browser_page) is None
+
     def test_footer_newsletter_recaptcha_is_not_a_blocker(self, browser_page):
         browser_page.set_content(
             APPLICATION_FORM + "<footer><form><p>Join our mailing list</p><input type=email>"
