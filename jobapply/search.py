@@ -110,6 +110,55 @@ def _card_title(title_el) -> str:
     return re.sub(r"\s+with verification$", "", first_line)
 
 
+# LinkedIn's 2026 "AI search" results page (/jobs/search-results/) has no
+# stable class names and no links on its cards: each card is a clickable block
+# carrying componentkey="job-card-component-ref-<jobId>" (nested twice).
+_AI_SEARCH_CARD_SELECTOR = "[componentkey^='job-card-component-ref-']"
+_AI_SEARCH_CARDS_JS = """els => {
+  const seen = new Set(), out = [];
+  for (const e of els) {
+    const key = e.getAttribute('componentkey');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      jobId: key.replace('job-card-component-ref-', ''),
+      paras: [...e.querySelectorAll('p')].map(p => p.innerText.trim()).filter(Boolean),
+    });
+  }
+  return out;
+}"""
+
+
+def _ai_search_job(job_id: str, paras: List[str]) -> Optional[Dict]:
+    """One job dict from an AI-search card: title, company, location paragraphs."""
+    if not job_id.isdigit() or len(paras) < 2:
+        return None
+    # The title paragraph repeats the title for screen readers, prefixed
+    # "Selected, " on the open card; the last line is the visible one.
+    title = paras[0].splitlines()[-1].strip()
+    title = re.sub(r"\s*\(Verified job\)$", "", title)
+    # Same canonical URL the classic cards produce, so job ids (a hash of it)
+    # still match the applied log and the score cache.
+    url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+    easy = any(p.strip().lower() == "easy apply" for p in paras)
+    return {
+        "id": f"li_{hashlib.sha256(url.encode()).hexdigest()[:12]}",
+        "title": title,
+        "company": paras[1],
+        "location": paras[2] if len(paras) > 2 else "",
+        "url": url,
+        "description": "",
+        "apply_type": "easy_apply" if easy else "external",
+    }
+
+
+def _parse_ai_search_cards(page) -> List[Dict]:
+    """Extract jobs from LinkedIn's AI-search results layout."""
+    cards = page.eval_on_selector_all(_AI_SEARCH_CARD_SELECTOR, _AI_SEARCH_CARDS_JS)
+    jobs = [_ai_search_job(c["jobId"], c["paras"]) for c in cards[:25]]
+    return [j for j in jobs if j]
+
+
 def _parse_job_cards(page) -> List[Dict]:
     """Extract job data from visible job cards on the search results page.
 
@@ -119,6 +168,8 @@ def _parse_job_cards(page) -> List[Dict]:
     try:
         cards = page.query_selector_all("div.job-card-container")
         is_public = False
+        if not cards and page.query_selector(_AI_SEARCH_CARD_SELECTOR):
+            return _parse_ai_search_cards(page)
         if not cards:
             # Public/guest view uses different card selectors
             cards = page.query_selector_all("div.job-search-card")
@@ -690,7 +741,8 @@ def search_workday_sites(params: JobSearchParams) -> List[Dict]:
 # rendered. The pane uses obfuscated class names, so it is located by computed
 # overflow: the first scrollable ancestor of a job card.
 _SCROLL_JOB_PANE_JS = """() => {
-  const first = document.querySelector('li.scaffold-layout__list-item, div.job-card-container');
+  const first = document.querySelector(
+    "li.scaffold-layout__list-item, div.job-card-container, [componentkey^='job-card-component-ref-']");
   let n = first;
   while (n && n !== document.body) {
     const s = getComputedStyle(n);
@@ -700,7 +752,8 @@ _SCROLL_JOB_PANE_JS = """() => {
     }
     n = n.parentElement;
   }
-  return document.querySelectorAll('div.job-card-container, div.job-search-card').length;
+  return document.querySelectorAll(
+    "div.job-card-container, div.job-search-card, [componentkey^='job-card-component-ref-']").length;
 }"""
 
 
@@ -821,7 +874,10 @@ def search_linkedin(
             # Wait for job cards: authenticated view uses job-card-container,
             # public/guest view uses job-search-card (base-search-card)
             try:
-                page.wait_for_selector("div.job-card-container, div.job-search-card", timeout=12000)
+                page.wait_for_selector(
+                    f"div.job-card-container, div.job-search-card, {_AI_SEARCH_CARD_SELECTOR}",
+                    timeout=12000,
+                )
             except Exception:
                 _assert_linkedin_not_blocked(page)
                 raise RuntimeError(

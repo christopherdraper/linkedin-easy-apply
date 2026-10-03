@@ -84,6 +84,7 @@ def _public_page(cards):
     page.query_selector_all.side_effect = lambda sel: (
         [] if sel == "div.job-card-container" else cards
     )
+    page.query_selector.return_value = None  # no AI-search layout cards
     return page
 
 
